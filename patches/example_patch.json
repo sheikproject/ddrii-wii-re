@@ -1,0 +1,14 @@
+{
+  "name": "example_patch_disabled",
+  "enabled": false,
+  "description": "Template only. Replace with a real patch before enabling.",
+  "patches": [
+    {
+      "file_offset": "0x00000000",
+      "original": "",
+      "patched": "",
+      "note": "Hex strings must use an even number of characters. Original bytes are verified before patching."
+    }
+  ]
+}
+

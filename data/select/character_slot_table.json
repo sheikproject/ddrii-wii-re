@@ -1,0 +1,38 @@
+{
+  "source_function": "GetCharacterIdForCurrentSelectSlot",
+  "source_address": "0x8006C588",
+  "notes": [
+    "Maps character select slot index to in-game character ID.",
+    "Blank or disabled slots return -1.",
+    "Icon/page display data and selectable flags are separate systems."
+  ],
+  "special_values": {
+    "10000": "ALL RANDOM?",
+    "10001": "random/system?",
+    "10002": "random/system?",
+    "0x52": "Mii"
+  },
+  "slots": [
+    { "slot": 0, "character_id": 10000, "name": "ALL RANDOM?" },
+    { "slot": 1, "character_id": 10002, "name": "random/system?" },
+    { "slot": 2, "character_id": 10001, "name": "random/system?" },
+    { "slot": 3, "character_id": 82, "hex": "0x52", "name": "Mii" },
+    { "slot": 4, "character_id": 200, "hex": "0xC8", "name": "EMI" },
+    { "slot": 5, "character_id": 201, "hex": "0xC9", "name": "DISCO" },
+    { "slot": 6, "character_id": 203, "hex": "0xCB", "name": "YUNI" },
+    { "slot": 7, "character_id": 204, "hex": "0xCC", "name": "RAGE" },
+    { "slot": 8, "character_id": 202, "hex": "0xCA", "name": "RUBY" },
+    { "slot": 9, "character_id": -1, "name": "invalid" },
+    { "slot": 10, "character_id": -1, "name": "invalid" },
+    { "slot": 11, "character_id": -1, "name": "invalid" },
+    { "slot": 12, "character_id": 205, "hex": "0xCD", "name": "Rena" },
+    { "slot": 13, "character_id": 206, "hex": "0xCE", "name": "NAOKI" },
+    { "slot": 14, "character_id": 207, "hex": "0xCF", "name": "jun" },
+    { "slot": 15, "character_id": 208, "hex": "0xD0", "name": "U1" },
+    { "slot": 16, "character_id": -1, "name": "invalid" },
+    { "slot": 17, "character_id": -1, "name": "invalid" },
+    { "slot": 18, "character_id": -1, "name": "invalid" },
+    { "slot": 19, "character_id": -1, "name": "invalid" },
+    { "slot": 20, "character_id": -1, "name": "invalid" }
+  ]
+}

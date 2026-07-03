@@ -1,0 +1,25 @@
+{
+  "name": "hp5_ssq_viewer_experimental_ported",
+  "enabled": false,
+  "description": "Port of the European HP5 SSQ Viewer Gecko code to this DOL. Disabled until runtime-tested.",
+  "source_codes": [
+    "04021B3C 3BC00003",
+    "0403C2D0 2C1E0003"
+  ],
+  "patches": [
+    {
+      "ram_address": "0x80021ADC",
+      "file_offset": "0x00003E3C",
+      "original": "3BC00002",
+      "patched": "3BC00003",
+      "note": "li r30, 2 -> li r30, 3"
+    },
+    {
+      "ram_address": "0x8003C23C",
+      "file_offset": "0x0001E59C",
+      "original": "2C1E0005",
+      "patched": "2C1E0003",
+      "note": "cmpwi r30, 5 -> cmpwi r30, 3"
+    }
+  ]
+}

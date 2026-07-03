@@ -1,0 +1,38 @@
+# Original game inputs and extracted proprietary files
+/input/
+/orig/
+/baseroms/
+
+# Generated or patched binaries
+/outputs/
+/build/
+/dist/
+*.dol
+*.iso
+*.gcm
+*.rvz
+*.wbfs
+*.wia
+*.ciso
+*.nfs
+*.gcz
+*.tgc
+
+# Emulator/debugger/project-local artifacts
+*.dmw
+*.map
+*.sym
+*.log
+
+# Python/cache/editor noise
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+Desktop.ini

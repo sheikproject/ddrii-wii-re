@@ -7,15 +7,15 @@
     "Icon/page display data and selectable flags are separate systems."
   ],
   "special_values": {
-    "10000": "ALL RANDOM?",
-    "10001": "random/system?",
-    "10002": "random/system?",
+    "10000": "ALL RANDOM",
+    "10001": "RANDOM FEMALE",
+    "10002": "RANDOM MALE",
     "0x52": "Mii"
   },
   "slots": [
-    { "slot": 0, "character_id": 10000, "name": "ALL RANDOM?" },
-    { "slot": 1, "character_id": 10002, "name": "random/system?" },
-    { "slot": 2, "character_id": 10001, "name": "random/system?" },
+    { "slot": 0, "character_id": 10000, "name": "ALL RANDOM" },
+    { "slot": 1, "character_id": 10002, "name": "RANDOM FEMALE" },
+    { "slot": 2, "character_id": 10001, "name": "RANDOM MALE" },
     { "slot": 3, "character_id": 82, "hex": "0x52", "name": "Mii" },
     { "slot": 4, "character_id": 200, "hex": "0xC8", "name": "EMI" },
     { "slot": 5, "character_id": 201, "hex": "0xC9", "name": "DISCO" },

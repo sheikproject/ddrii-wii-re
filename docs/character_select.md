@@ -409,6 +409,38 @@ With the slot availability flag manually changed from `0` to `1`, the blank slot
 selectable and loaded Rena.
 ```
 
+### Character Page Layout Table
+
+`SetupCharacterSelectPageSlots` copies a 7 page x 12 slot display table from:
+
+```text
+RAM  0x802721D0
+file 0x0026E2D0
+```
+
+The value `0x15` means a blank display/panel slot. This table controls what the page/panel
+shows, but it does not decide the final loaded character by itself.
+
+Current decoded page layout:
+
+```text
+page 0: 10 11 12 0B 01 00 04 03 02 15 15 15
+page 1: 05 08 07 06 15 15 15 15 15 15 15 15
+page 2: 17 18 19 1A 1B 1C 1D 1E 15 1F 20 15
+page 3: 00 01 02 03 04 15 15 15 15 15 15 15
+page 4: 00 01 02 03 04 05 06 07 08 09 0A 0B
+page 5: 0C 0D 0E 0F 10 11 12 13 14 15 16 17
+page 6: 00 01 02 03 04 05 06 07 08 09 15 15
+```
+
+Exported as:
+
+```text
+data/select/character_page_layouts.json
+include/select/character_select_pages.h
+src/select/character_select_pages.c
+```
+
 ## Questions To Answer
 
 ```text
@@ -581,6 +613,9 @@ The slot resolver has been exported in a decomp/recomp-style layout:
 ```text
 include/game/character_ids.h
 include/select/csel_chara.h
+include/select/character_select_pages.h
 src/select/character_select.c
+src/select/character_select_pages.c
 data/select/character_slot_table.json
+data/select/character_page_layouts.json
 ```

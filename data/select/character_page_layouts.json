@@ -1,0 +1,48 @@
+{
+  "source_function": "SetupCharacterSelectPageSlots",
+  "source_address": "0x8006C658",
+  "source_table_ram": "0x802721D0",
+  "source_table_file_offset": "0x0026E2D0",
+  "page_count": 7,
+  "slots_per_page": 12,
+  "blank_display_slot": {
+    "value": 21,
+    "hex": "0x15",
+    "meaning": "blank display/panel slot"
+  },
+  "notes": [
+    "This table controls displayed page/panel slot IDs, not the final character ID by itself.",
+    "A slot can display a panel but still be skipped if its selectable flag is 0.",
+    "The final loaded character comes from GetCharacterIdForCurrentSelectSlot."
+  ],
+  "pages": [
+    {
+      "page": 0,
+      "slots": [16, 17, 18, 11, 1, 0, 4, 3, 2, 21, 21, 21]
+    },
+    {
+      "page": 1,
+      "slots": [5, 8, 7, 6, 21, 21, 21, 21, 21, 21, 21, 21]
+    },
+    {
+      "page": 2,
+      "slots": [23, 24, 25, 26, 27, 28, 29, 30, 21, 31, 32, 21]
+    },
+    {
+      "page": 3,
+      "slots": [0, 1, 2, 3, 4, 21, 21, 21, 21, 21, 21, 21]
+    },
+    {
+      "page": 4,
+      "slots": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    },
+    {
+      "page": 5,
+      "slots": [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    },
+    {
+      "page": 6,
+      "slots": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 21]
+    }
+  ]
+}

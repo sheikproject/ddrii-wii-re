@@ -774,11 +774,24 @@ entry 2: 00000006 00000002 00000052 00000000 00000000 00000000 00000000 00000000
 entry 3: 00000006 00000003 00000052 00000000 00000000 00000000 00000000 00000000
 ```
 
+Confirmed entry layout:
+
+```text
+00 00 00 06 = Mii Type
+00 00 00 00 = selected Mii in the list
+00 00 00 52 = body/costume ID
+00 00 00 00 = unknown
+00 00 00 00 = first recolor
+00 00 00 00 = second recolor
+00 00 00 00 = third recolor
+00 00 00 00 = fourth recolor
+```
+
 This looks like four Mii special-part entries. Current field interpretation:
 
 ```text
 value 0 = Mii Type (Wii/Guest)
-value 1 = unknown body option/state value
+value 1 = selected Mii in the list
 value 2 = body/costume ID
 value 3 = unknown body option/state value
 value 4 = first recolor slot
@@ -836,7 +849,7 @@ Observed argument roles:
 r3 = table base / entry 0 address when r4 is 0
 r4 = table entry index
 r5 = value 0 / Mii Type
-r6 = value 1 / unknown body option/state value
+r6 = value 1 / selected Mii in the list
 r7 = value 2 / body/costume ID
 r8 = value 3 / unknown body option/state value
 ```
@@ -846,13 +859,13 @@ Ghidra decompile:
 ```c
 void SetMiiSpecialPartTableEntry(int tableBase, int entryIndex,
                                  undefined4 miiType,
-                                 undefined4 unknownBodyOptionState,
+                                 undefined4 selectedMiiListIndex,
                                  undefined4 bodyCostumeId,
                                  undefined4 unknownBodyOptionState2)
 {
   *(undefined4 *)(tableBase + entryIndex * 0x20) = miiType;
   tableBase = tableBase + entryIndex * 0x20;
-  *(undefined4 *)(tableBase + 4) = unknownBodyOptionState;
+  *(undefined4 *)(tableBase + 4) = selectedMiiListIndex;
   *(undefined4 *)(tableBase + 8) = bodyCostumeId;
   *(undefined4 *)(tableBase + 0xC) = unknownBodyOptionState2;
 }
@@ -900,7 +913,7 @@ void SetMiiSpecialPartTableEntryTail(int tableBase, int entryIndex,
 So the entry is split across two small writers:
 
 ```text
-0x800F37B0 writes values 0-3: Mii Type, unknown, body/costume ID, unknown
+0x800F37B0 writes values 0-3: Mii Type, selected Mii in list, body/costume ID, unknown
 0x800F37CC writes values 4-7: recolor slots 1-4
 ```
 

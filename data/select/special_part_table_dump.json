@@ -7,6 +7,16 @@
   "entry_size": "0x20",
   "value_count_per_entry": 8,
   "value_type": "u32be",
+  "confirmed_entry_layout": [
+    "0x00: Mii Type",
+    "0x04: selected Mii in the list",
+    "0x08: body/costume ID",
+    "0x0C: unknown",
+    "0x10: first recolor",
+    "0x14: second recolor",
+    "0x18: third recolor",
+    "0x1C: fourth recolor"
+  ],
   "known_value_layout": [
     {
       "index": 0,
@@ -22,7 +32,7 @@
     },
     {
       "index": 1,
-      "meaning": "unknown body option/state value"
+      "meaning": "selected Mii in the list"
     },
     {
       "index": 2,
@@ -72,14 +82,14 @@
         "r3 = table base / entry 0 address when r4 is 0",
         "r4 = table entry index",
         "r5 = value 0 / Mii Type",
-        "r6 = value 1 / unknown body option/state value",
+        "r6 = value 1 / selected Mii in the list",
         "r7 = value 2 / body/costume ID",
         "r8 = value 3 / unknown body option/state value"
       ],
       "pseudocode": [
         "entry = tableBase + entryIndex * 0x20",
         "entry[0] = miiType",
-        "entry[1] = unknownBodyOptionState",
+        "entry[1] = selectedMiiListIndex",
         "entry[2] = bodyCostumeId",
         "entry[3] = unknownBodyOptionState2"
       ],
@@ -133,22 +143,22 @@
     {
       "entry_index": 0,
       "values": ["0x00000006", "0x00000000", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["Mii Type 6", "unknown body option/state value 0", "body/costume ID 0x52", "observed recolor slots 0"]
+      "notes": ["Mii Type 6", "selected Mii in the list 0", "body/costume ID 0x52", "unknown value 3 is 0", "observed recolor slots 0"]
     },
     {
       "entry_index": 1,
       "values": ["0x00000006", "0x00000001", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["Mii Type 6", "unknown body option/state value 1", "body/costume ID 0x52", "observed recolor slots 0"]
+      "notes": ["Mii Type 6", "selected Mii in the list 1", "body/costume ID 0x52", "unknown value 3 is 0", "observed recolor slots 0"]
     },
     {
       "entry_index": 2,
       "values": ["0x00000006", "0x00000002", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["Mii Type 6", "unknown body option/state value 2", "body/costume ID 0x52", "observed recolor slots 0"]
+      "notes": ["Mii Type 6", "selected Mii in the list 2", "body/costume ID 0x52", "unknown value 3 is 0", "observed recolor slots 0"]
     },
     {
       "entry_index": 3,
       "values": ["0x00000006", "0x00000003", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["Mii Type 6", "unknown body option/state value 3", "body/costume ID 0x52", "observed recolor slots 0"]
+      "notes": ["Mii Type 6", "selected Mii in the list 3", "body/costume ID 0x52", "unknown value 3 is 0", "observed recolor slots 0"]
     }
   ],
   "observed_customized_entries": [
@@ -166,7 +176,7 @@
   ],
   "interpretation": [
     "The first four observed entries appear to describe Mii special-part variants.",
-    "The second u32 increments from 0 to 3 in the first observed entries, but its exact meaning is not confirmed.",
+    "The second u32 is the selected Mii in the list.",
     "The third u32 is 0x52, the observed Mii body/costume ID. This overlaps numerically with the Mii character ID, but the table role is body/costume.",
     "The fourth u32 is still unknown.",
     "The fifth, sixth, seventh, and eighth u32 values are the four recolor slots and are all written by 0x800F37CC.",

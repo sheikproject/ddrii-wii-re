@@ -1,0 +1,77 @@
+{
+  "name": "CSelMode_ChoiceTable",
+  "address": "0x80272358",
+  "entry_size": 16,
+  "entry_count": 5,
+  "source": "Ghidra table defined as int[20] during CSelMode_Update analysis",
+  "fields": [
+    {
+      "offset": "0x00",
+      "name": "next_select_state",
+      "type": "s32"
+    },
+    {
+      "offset": "0x04",
+      "name": "game_mode_id",
+      "type": "s32"
+    },
+    {
+      "offset": "0x08",
+      "name": "game_mode_sub_id",
+      "type": "s32"
+    },
+    {
+      "offset": "0x0C",
+      "name": "game_mode_extra_id",
+      "type": "s32"
+    }
+  ],
+  "entries": [
+    {
+      "selected_mode_index": 0,
+      "next_select_state": 2,
+      "game_mode_id": 1,
+      "game_mode_sub_id": 1,
+      "game_mode_extra_id": null,
+      "confidence": "partial"
+    },
+    {
+      "selected_mode_index": 1,
+      "next_select_state": 2,
+      "game_mode_id": 2,
+      "game_mode_sub_id": 7,
+      "game_mode_extra_id": null,
+      "confidence": "partial"
+    },
+    {
+      "selected_mode_index": 2,
+      "next_select_state": 27,
+      "game_mode_id": 3,
+      "game_mode_sub_id": 5,
+      "game_mode_extra_id": null,
+      "confidence": "partial"
+    },
+    {
+      "selected_mode_index": 3,
+      "next_select_state": 21,
+      "game_mode_id": 6,
+      "game_mode_sub_id": 0,
+      "game_mode_extra_id": null,
+      "confidence": "partial"
+    },
+    {
+      "selected_mode_index": 4,
+      "next_select_state": null,
+      "game_mode_id": null,
+      "game_mode_sub_id": null,
+      "game_mode_extra_id": null,
+      "confidence": "not_captured"
+    }
+  ],
+  "notes": [
+    "This table is read as CSelMode_ChoiceTable + selectedModeIndex * 0x10.",
+    "The first value is returned through FUN_8012A188 as the next CSelect state.",
+    "The next three values are written to parentSelectData[0..2].",
+    "The fourth int for entries 0-3 and all ints for entry 4 still need a full table dump/screenshot."
+  ]
+}

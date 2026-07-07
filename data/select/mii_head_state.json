@@ -1,0 +1,41 @@
+{
+  "name": "Mii head replacement state",
+  "notes": [
+    "Mii head state is separate from the selected character ID.",
+    "For normal characters this value has been observed/documented as 0.",
+    "When enabled, value 1 appears to replace the character head with a Mii head.",
+    "Selecting the Mii character likely sets this to 1, but that still needs a runtime confirmation."
+  ],
+  "known_addresses": [
+    {
+      "address": "0x808A2260",
+      "label": "Character Mii Head",
+      "context": "select-screen state"
+    },
+    {
+      "address": "0x8053F758",
+      "label": "Character Mii Head (Gameplay)",
+      "context": "gameplay selection state"
+    },
+    {
+      "address": "0x8053FA0C",
+      "label": "Character Mii Head (Boss Songs)",
+      "context": "boss-song selection state"
+    }
+  ],
+  "values": [
+    {
+      "value": 0,
+      "meaning": "normal character head"
+    },
+    {
+      "value": 1,
+      "meaning": "Mii head replacement enabled"
+    }
+  ],
+  "open_questions": [
+    "Confirm whether selecting CHAR_ID_MII always sets this value to 1.",
+    "Find the function that commits Mii head state alongside selected character and costume.",
+    "Determine whether values other than 0 and 1 select Mii head variants or are invalid."
+  ]
+}

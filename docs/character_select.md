@@ -571,6 +571,37 @@ slot 0x0E -> 0xCF / 207 / jun
 slot 0x0F -> 0xD0 / 208 / U1
 ```
 
+### Mii Head State
+
+Mii head state is separate from the selected character ID. For normal characters this
+value is usually `0`. When enabled as `1`, the character's head is replaced with a Mii
+head.
+
+Known related addresses:
+
+```text
+0x808A2260  Character Mii Head
+0x8053F758  Character Mii Head (Gameplay)
+0x8053FA0C  Character Mii Head (Boss Songs)
+```
+
+Known/expected values:
+
+```text
+0 = normal character head
+1 = Mii head replacement enabled
+```
+
+Hypothesis:
+
+```text
+Selecting slot 0x03 / CHAR_ID_MII probably sets Mii head state to 1.
+```
+
+This should be tested with a watchpoint on `0x808A2260` while selecting Mii. For the PC
+port model, Mii head state should be represented separately from the character ID and
+costume slot.
+
 Confirmed invalid slots:
 
 ```text
@@ -618,4 +649,5 @@ src/select/character_select.c
 src/select/character_select_pages.c
 data/select/character_slot_table.json
 data/select/character_page_layouts.json
+data/select/mii_head_state.json
 ```

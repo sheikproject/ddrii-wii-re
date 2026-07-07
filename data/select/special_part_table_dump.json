@@ -1,0 +1,38 @@
+{
+  "name": "Observed special part table dump",
+  "runtime_pointer_source": "DAT_802E70D0",
+  "runtime_pointer_value": "0x8053EA80",
+  "table_address": "0x80540628",
+  "table_address_formula": "0x8053EA80 + 0x1BA8",
+  "entry_size": "0x20",
+  "value_count_per_entry": 8,
+  "value_type": "u32be",
+  "observed_entries": [
+    {
+      "entry_index": 0,
+      "values": ["0x00000006", "0x00000000", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
+      "notes": ["first value 6", "second value variant/index 0", "third value 0x52 / Mii"]
+    },
+    {
+      "entry_index": 1,
+      "values": ["0x00000006", "0x00000001", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
+      "notes": ["first value 6", "second value variant/index 1", "third value 0x52 / Mii"]
+    },
+    {
+      "entry_index": 2,
+      "values": ["0x00000006", "0x00000002", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
+      "notes": ["first value 6", "second value variant/index 2", "third value 0x52 / Mii"]
+    },
+    {
+      "entry_index": 3,
+      "values": ["0x00000006", "0x00000003", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
+      "notes": ["first value 6", "second value variant/index 3", "third value 0x52 / Mii"]
+    }
+  ],
+  "interpretation": [
+    "The first four observed entries appear to describe Mii special-part variants.",
+    "The second u32 increments from 0 to 3, matching four special-part writes observed for category 3.",
+    "The third u32 is 0x52, the confirmed Mii character ID.",
+    "The meaning of first value 6 is unknown."
+  ]
+}

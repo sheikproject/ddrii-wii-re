@@ -758,6 +758,26 @@ current menu/player special-part state rather than a static character definition
 so the same entries should be compared while selecting Mii, normal characters, and the
 Mii customization pages.
 
+Observed runtime dump:
+
+```text
+DAT_802E70D0 value = 0x8053EA80
+table address      = 0x8053EA80 + 0x1BA8 = 0x80540628
+```
+
+First four 0x20-byte entries, decoded as eight big-endian u32 values each:
+
+```text
+entry 0: 00000006 00000000 00000052 00000000 00000000 00000000 00000000 00000000
+entry 1: 00000006 00000001 00000052 00000000 00000000 00000000 00000000 00000000
+entry 2: 00000006 00000002 00000052 00000000 00000000 00000000 00000000 00000000
+entry 3: 00000006 00000003 00000052 00000000 00000000 00000000 00000000 00000000
+```
+
+This looks like four Mii special-part entries. The second value increments from `0` to
+`3`, and the third value is `0x52`, the confirmed Mii character ID. The meaning of the
+first value `6` is still unknown.
+
 Open questions:
 
 ```text
@@ -822,4 +842,5 @@ src/select/character_special_categories.c
 data/select/character_special_categories.json
 include/select/character_special_parts.h
 src/select/character_special_parts.c
+data/select/special_part_table_dump.json
 ```

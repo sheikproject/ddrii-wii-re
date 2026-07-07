@@ -774,8 +774,21 @@ entry 2: 00000006 00000002 00000052 00000000 00000000 00000000 00000000 00000000
 entry 3: 00000006 00000003 00000052 00000000 00000000 00000000 00000000 00000000
 ```
 
-This looks like four Mii special-part entries. The second value increments from `0` to
-`3`, and the third value is `0x52`, the confirmed Mii character ID.
+This looks like four Mii special-part entries. Current field interpretation:
+
+```text
+value 0 = Mii source/type
+value 1 = first recolor slot
+value 2 = body/costume ID
+value 3 = second recolor slot
+value 4 = third recolor slot
+value 5 = fourth recolor slot
+value 6 = unknown / observed zero
+value 7 = unknown / observed zero
+```
+
+`0x52` is the observed Mii body/costume ID in this table. It overlaps numerically with
+the Mii character ID, but the table role here is body/costume.
 
 The first value appears to be a Mii source/type field:
 

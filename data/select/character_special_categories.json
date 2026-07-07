@@ -3,8 +3,9 @@
   "notes": [
     "Classifies character IDs around 0x52-0x59 into special handling categories.",
     "0x52 / Mii falls into category 3.",
-    "Categories 0 and 3 apply four local_80 values through FUN_800CD690.",
-    "Category 1 applies two local_80 values through FUN_800CD690.",
+    "Categories 0 and 3 call FUN_800CD690 four times in the observed block.",
+    "Category 1 calls FUN_800CD690 two times in the observed block.",
+    "FUN_800CD690 only uses r3 and tail-calls FUN_800F7E98(r3 + 0x34); it does not use the apparent index/value arguments.",
     "Category 2 skips the observed local_80 apply path."
   ],
   "categories": [
@@ -12,19 +13,19 @@
       "category": 0,
       "name": "FULL_APPLY_A",
       "character_ids": ["0x54", "0x55"],
-      "local_80_apply_count": 4
+      "wrapper_call_count": 4
     },
     {
       "category": 1,
       "name": "PARTIAL_APPLY",
       "character_ids": ["0x58", "0x59"],
-      "local_80_apply_count": 2
+      "wrapper_call_count": 2
     },
     {
       "category": 2,
       "name": "NORMAL",
       "character_ids": "outside 0x52-0x59",
-      "local_80_apply_count": 0
+      "wrapper_call_count": 0
     },
     {
       "category": 3,
@@ -36,7 +37,22 @@
           "name": "Mii"
         }
       ],
-      "local_80_apply_count": 4
+      "wrapper_call_count": 4
+    }
+  ],
+  "functions": [
+    {
+      "address": "0x800CD690",
+      "name": "ApplyCharacterSpecialPart",
+      "assembly": [
+        "800CD690  addi r3,r3,0x34",
+        "800CD694  b FUN_800F7E98"
+      ],
+      "notes": [
+        "This function ignores r4, r5, and r6.",
+        "The caller appears to pass index/value registers, but this wrapper does not consume them.",
+        "The repeated category loops may be invalid decompiler argument inference or repeated updates of the same object state."
+      ]
     }
   ]
 }

@@ -54,27 +54,27 @@
     },
     {
       "source": "Ghidra decompile after category calculation",
-      "summary": "Category 0 and category 3 both apply four values from local_80 through FUN_800CD690. Category 1 applies two values. Category 2 appears to skip this local_80 apply path.",
+      "summary": "Category 0 and category 3 both call FUN_800CD690 four times. Category 1 calls it two times. Category 2 appears to skip this call path. Later assembly inspection showed FUN_800CD690 ignores the apparent index/value arguments and only uses r3.",
       "category_behavior": [
         {
           "category": 0,
           "character_id_range": "0x54-0x55",
-          "behavior": "apply local_80[0..3]"
+          "behavior": "call FUN_800CD690 four times"
         },
         {
           "category": 1,
           "character_id_range": "0x58-0x59",
-          "behavior": "apply local_80[0..1]"
+          "behavior": "call FUN_800CD690 two times"
         },
         {
           "category": 2,
           "character_id_range": "outside 0x52-0x59",
-          "behavior": "skip observed local_80 apply path"
+          "behavior": "skip observed FUN_800CD690 call path"
         },
         {
           "category": 3,
           "character_id_range": "0x52, 0x53, 0x56, 0x57",
-          "behavior": "apply local_80[0..3]; includes 0x52 / Mii"
+          "behavior": "call FUN_800CD690 four times; includes 0x52 / Mii"
         }
       ],
       "cache_fields": {
@@ -86,6 +86,14 @@
         "0x1810": "local_4C",
         "0x1814": "local_50"
       }
+    },
+    {
+      "source": "Assembly for FUN_800CD690 / ApplyCharacterSpecialPart",
+      "assembly": [
+        "800CD690  addi r3,r3,0x34",
+        "800CD694  b FUN_800F7E98"
+      ],
+      "summary": "The wrapper ignores r4-r6, so it does not directly apply local_80[index]."
     }
   ],
   "open_questions": [

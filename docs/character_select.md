@@ -633,7 +633,7 @@ iVar9    = category derived from local_48
 The category logic treats IDs `0x52-0x59` specially. `0x52` is Mii, so this block likely
 handles Mii/special head or body categories, but the category meanings are not confirmed.
 
-Follow-up decompile shows how some categories are applied:
+Follow-up decompile shows category-dependent calls:
 
 ```c
 if (iVar9 == 0) {
@@ -665,14 +665,26 @@ else {
 Observed category behavior:
 
 ```text
-category 0: IDs 0x54-0x55, applies local_80[0..3]
-category 1: IDs 0x58-0x59, applies local_80[0..1]
-category 2: IDs outside 0x52-0x59, skips this observed local_80 apply path
-category 3: IDs 0x52,0x53,0x56,0x57, applies local_80[0..3]
+category 0: IDs 0x54-0x55, calls FUN_800CD690 four times
+category 1: IDs 0x58-0x59, calls FUN_800CD690 two times
+category 2: IDs outside 0x52-0x59, skips this observed FUN_800CD690 call path
+category 3: IDs 0x52,0x53,0x56,0x57, calls FUN_800CD690 four times
 ```
 
 Since `0x52` / Mii falls into category `3`, Mii uses the four-value `local_80`
-application path.
+loop path.
+
+Assembly for `FUN_800CD690` / `ApplyCharacterSpecialPart`:
+
+```text
+800CD690  addi r3,r3,0x34
+800CD694  b    FUN_800F7E98
+```
+
+This wrapper only uses `r3`; it ignores `r4`, `r5`, and `r6`. So despite the decompiler
+showing calls with `iVar6`, `iVar9`, and `*piVar7`, this wrapper does not directly consume
+the apparent index/value arguments. The loop may be decompiler argument noise, or repeated
+updates of the same object state through `FUN_800F7E98`.
 
 The function also caches the latest values:
 

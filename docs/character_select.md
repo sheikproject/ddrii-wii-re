@@ -860,6 +860,30 @@ void SetMiiSpecialPartTableEntry(int tableBase, int entryIndex,
 
 So this function writes only values `0-3`. Values `4-7` are written elsewhere.
 
+Second watchpoint on the body/costume ID byte:
+
+```text
+watch address = 0x80540633
+PC            = 0x800F37D4
+LR            = 0x8006A468
+r3            = 0x80540628
+r4            = 0
+r5            = 0
+r6            = 0
+r7            = 0
+r8            = 0
+```
+
+This appears to land in the next function, likely beginning at `0x800F37CC`. Tentative
+name until decompile:
+
+```text
+ClearOrUpdateMiiSpecialPartTableEntry
+```
+
+Because all value registers were zero on this hit, this may be a clear/reset path for
+the same entry. Confirm with the Ghidra decompile before naming it permanently.
+
 Additional customized entry observed at `0x80540628` after changing each body
 customization option:
 

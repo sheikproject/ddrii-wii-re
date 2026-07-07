@@ -874,15 +874,35 @@ r7            = 0
 r8            = 0
 ```
 
-This appears to land in the next function, likely beginning at `0x800F37CC`. Tentative
-name until decompile:
+This lands in the next function beginning at `0x800F37CC`. Name:
 
 ```text
-ClearOrUpdateMiiSpecialPartTableEntry
+SetMiiSpecialPartTableEntryTail
 ```
 
-Because all value registers were zero on this hit, this may be a clear/reset path for
-the same entry. Confirm with the Ghidra decompile before naming it permanently.
+Ghidra decompile:
+
+```c
+void SetMiiSpecialPartTableEntryTail(int tableBase, int entryIndex,
+                                     undefined4 secondRecolor,
+                                     undefined4 thirdRecolor,
+                                     undefined4 fourthRecolor,
+                                     undefined4 unknownValue7)
+{
+  tableBase = tableBase + entryIndex * 0x20;
+  *(undefined4 *)(tableBase + 0x10) = secondRecolor;
+  *(undefined4 *)(tableBase + 0x14) = thirdRecolor;
+  *(undefined4 *)(tableBase + 0x18) = fourthRecolor;
+  *(undefined4 *)(tableBase + 0x1C) = unknownValue7;
+}
+```
+
+So the entry is split across two small writers:
+
+```text
+0x800F37B0 writes values 0-3
+0x800F37CC writes values 4-7
+```
 
 Additional customized entry observed at `0x80540628` after changing each body
 customization option:

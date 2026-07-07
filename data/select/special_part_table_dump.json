@@ -92,8 +92,8 @@
     },
     {
       "address": "0x800F37CC",
-      "name": "ClearOrUpdateMiiSpecialPartTableEntry",
-      "confidence": "watchpoint hit; name tentative until decompile",
+      "name": "SetMiiSpecialPartTableEntryTail",
+      "confidence": "Ghidra decompile confirmed",
       "watchpoint": {
         "address": "0x80540633",
         "pc": "0x800F37D4",
@@ -107,10 +107,25 @@
           "r8": "0x00000000"
         }
       },
+      "observed_argument_roles": [
+        "r3 = table base",
+        "r4 = table entry index",
+        "r5 = value 4 / second recolor slot",
+        "r6 = value 5 / third recolor slot",
+        "r7 = value 6 / fourth recolor slot",
+        "r8 = value 7 / unknown"
+      ],
+      "pseudocode": [
+        "entry = tableBase + entryIndex * 0x20",
+        "entry[4] = secondRecolor",
+        "entry[5] = thirdRecolor",
+        "entry[6] = fourthRecolor",
+        "entry[7] = unknownValue7"
+      ],
       "notes": [
         "Hit when the low byte of value 2 / body/costume ID at 0x80540633 changed.",
-        "Register values were all zero after the table base/index, so this may be clearing or resetting the first part of the entry.",
-        "Need Ghidra decompile for the function beginning around 0x800F37CC to confirm written offsets."
+        "Despite the body/costume watchpoint hit, Ghidra decompile shows this function writes offsets 0x10-0x1C, the second half of the entry.",
+        "Together with SetMiiSpecialPartTableEntry, this fills all eight u32 values in the entry."
       ]
     }
   ],

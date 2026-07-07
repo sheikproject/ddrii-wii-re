@@ -795,10 +795,21 @@ The first value appears to be a Mii source/type field:
 ```text
 0x00000006 = observed when using Guest Miis
 0x00000000 = observed after selecting a Mii from the Wii instead of a Guest Mii
+0x00000005 = observed on the Mii body customize screen after changing each option
 ```
 
 The exact name is still tentative, but it is not just "Mii enabled"; it changes based on
-where the selected Mii came from.
+where the selected Mii came from and/or which body customization state is active.
+
+Additional customized entry observed at `0x80540628` after changing each body
+customization option:
+
+```text
+00000005 00000003 00000052 00000005 00000005 00000003 00000004 00000005
+```
+
+This confirms the recolor/body fields are actively updated by the customization screen,
+not just initialized to zero.
 
 Open questions:
 

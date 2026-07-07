@@ -10,7 +10,7 @@
   "known_value_layout": [
     {
       "index": 0,
-      "meaning": "Mii source/type",
+      "meaning": "unknown Mii source/body option state",
       "notes": ["0x00000006 observed for Guest Miis", "0x00000000 observed for Wii console Miis"]
     },
     {
@@ -65,22 +65,35 @@
       "notes": ["Mii source/type 6", "first recolor slot 3", "body/costume ID 0x52", "remaining observed recolor slots 0"]
     }
   ],
+  "observed_customized_entries": [
+    {
+      "context": "Mii body customize screen after changing each available option",
+      "source": "Dolphin Memory Viewer screenshot",
+      "address": "0x80540628",
+      "values": ["0x00000005", "0x00000003", "0x00000052", "0x00000005", "0x00000005", "0x00000003", "0x00000004", "0x00000005"],
+      "notes": [
+        "This confirms the values after body/costume ID are not always zero.",
+        "The visible entry changed from the earlier Guest Mii default dump after each customization option was changed.",
+        "The first value also changed from 6 to 5 in this screenshot, so index 0 may also be controlled by a body customization option or state."
+      ]
+    }
+  ],
   "interpretation": [
     "The first four observed entries appear to describe Mii special-part variants.",
     "The second u32 increments from 0 to 3 and is the first recolor slot.",
     "The third u32 is 0x52, the observed Mii body/costume ID. This overlaps numerically with the Mii character ID, but the table role is body/costume.",
     "The fourth, fifth, and sixth u32 values are the second, third, and fourth recolor slots.",
-    "The first u32 appears to describe the Mii source/type: value 6 was observed with Guest Miis, and value 0 was observed after selecting a Mii from the Wii instead of a Guest Mii."
+    "The first u32 is still not fully named: value 6 was observed with Guest Miis, value 0 was observed after selecting a Mii from the Wii instead of a Guest Mii, and value 5 was visible after changing each body customization option."
   ],
   "observed_first_value_meanings": [
     {
       "value": "0x00000006",
-      "meaning": "Guest Mii source/type",
+      "meaning": "observed with Guest Miis",
       "confidence": "observed"
     },
     {
       "value": "0x00000000",
-      "meaning": "Wii console Mii source/type",
+      "meaning": "observed with Wii console Miis",
       "confidence": "observed"
     }
   ]

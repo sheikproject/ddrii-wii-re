@@ -95,6 +95,11 @@
       ],
       "pseudocode": "FUN_800F7E98(param_1, param_2, param_3, param_4) { *(param_1 + param_2 * 0xC4 + param_3 * 4 + 8) = param_4; }",
       "summary": "FUN_800CD690 is a base-adjusting tail-call wrapper. FUN_800F7E98 performs the indexed write, so local_80[index] is applied there."
+    },
+    {
+      "source": "Ghidra decompile for FUN_800F3764 / LoadSpecialPartValues",
+      "pseudocode": "LoadSpecialPartValues(out, table, index) copies eight u32 values from table + index * 0x20.",
+      "summary": "This is the source of the special part value block used later by the special category path."
     }
   ],
   "open_questions": [

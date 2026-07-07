@@ -65,6 +65,16 @@
         "param_3 is the inner part index.",
         "param_4 is the value written, observed as local_80[index] in the special category path."
       ]
+    },
+    {
+      "address": "0x800F3764",
+      "name": "LoadSpecialPartValues",
+      "pseudocode": "for i in 0..7: outValues[i] = *(table + entryIndex * 0x20 + i * 4);",
+      "notes": [
+        "Copies eight 32-bit values from a table entry.",
+        "Each table entry is 0x20 bytes.",
+        "The caller passes DAT_802E70D0 + 0x1BA8 as the table base in the observed character select path."
+      ]
     }
   ]
 }

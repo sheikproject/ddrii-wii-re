@@ -717,6 +717,32 @@ iVar2 + 0x1810 = local_4C
 iVar2 + 0x1814 = local_50
 ```
 
+`local_80` is loaded indirectly by `FUN_800F3764`, now named
+`LoadSpecialPartValues`:
+
+```c
+void LoadSpecialPartValues(undefined4 *param_1, int param_2, int param_3)
+{
+  int iVar2 = param_2 + param_3 * 0x20;
+  param_1[0] = *(undefined4 *)(iVar2 + 0x00);
+  param_1[1] = *(undefined4 *)(iVar2 + 0x04);
+  param_1[2] = *(undefined4 *)(iVar2 + 0x08);
+  param_1[3] = *(undefined4 *)(iVar2 + 0x0C);
+  param_1[4] = *(undefined4 *)(iVar2 + 0x10);
+  param_1[5] = *(undefined4 *)(iVar2 + 0x14);
+  param_1[6] = *(undefined4 *)(iVar2 + 0x18);
+  param_1[7] = *(undefined4 *)(iVar2 + 0x1C);
+}
+```
+
+So the special part table uses:
+
+```text
+entry size = 0x20 bytes
+values per entry = 8 u32 values
+observed table base = DAT_802E70D0 + 0x1BA8
+```
+
 Open questions:
 
 ```text
@@ -779,4 +805,6 @@ data/select/mii_head_state.json
 include/select/character_special_categories.h
 src/select/character_special_categories.c
 data/select/character_special_categories.json
+include/select/character_special_parts.h
+src/select/character_special_parts.c
 ```

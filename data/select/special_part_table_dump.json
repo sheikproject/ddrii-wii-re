@@ -31,23 +31,23 @@
     },
     {
       "index": 3,
-      "meaning": "first recolor slot"
+      "meaning": "unknown body option/state value"
     },
     {
       "index": 4,
-      "meaning": "second recolor slot"
+      "meaning": "first recolor slot"
     },
     {
       "index": 5,
-      "meaning": "third recolor slot"
+      "meaning": "second recolor slot"
     },
     {
       "index": 6,
-      "meaning": "fourth recolor slot"
+      "meaning": "third recolor slot"
     },
     {
       "index": 7,
-      "meaning": "unknown / observed zero"
+      "meaning": "fourth recolor slot"
     }
   ],
   "writer_functions": [
@@ -74,14 +74,14 @@
         "r5 = value 0 / Mii Type",
         "r6 = value 1 / unknown body option/state value",
         "r7 = value 2 / body/costume ID",
-        "r8 = value 3 / first recolor slot"
+        "r8 = value 3 / unknown body option/state value"
       ],
       "pseudocode": [
         "entry = tableBase + entryIndex * 0x20",
         "entry[0] = miiType",
         "entry[1] = unknownBodyOptionState",
         "entry[2] = bodyCostumeId",
-        "entry[3] = firstRecolor"
+        "entry[3] = unknownBodyOptionState2"
       ],
       "notes": [
         "This is the writer hit when the Mii Type byte at 0x8054062B changes.",
@@ -110,17 +110,17 @@
       "observed_argument_roles": [
         "r3 = table base",
         "r4 = table entry index",
-        "r5 = value 4 / second recolor slot",
-        "r6 = value 5 / third recolor slot",
-        "r7 = value 6 / fourth recolor slot",
-        "r8 = value 7 / unknown"
+        "r5 = value 4 / first recolor slot",
+        "r6 = value 5 / second recolor slot",
+        "r7 = value 6 / third recolor slot",
+        "r8 = value 7 / fourth recolor slot"
       ],
       "pseudocode": [
         "entry = tableBase + entryIndex * 0x20",
-        "entry[4] = secondRecolor",
-        "entry[5] = thirdRecolor",
-        "entry[6] = fourthRecolor",
-        "entry[7] = unknownValue7"
+        "entry[4] = firstRecolor",
+        "entry[5] = secondRecolor",
+        "entry[6] = thirdRecolor",
+        "entry[7] = fourthRecolor"
       ],
       "notes": [
         "Hit when the low byte of value 2 / body/costume ID at 0x80540633 changed.",
@@ -168,7 +168,8 @@
     "The first four observed entries appear to describe Mii special-part variants.",
     "The second u32 increments from 0 to 3 in the first observed entries, but its exact meaning is not confirmed.",
     "The third u32 is 0x52, the observed Mii body/costume ID. This overlaps numerically with the Mii character ID, but the table role is body/costume.",
-    "The fourth, fifth, sixth, and seventh u32 values are the four recolor slots.",
+    "The fourth u32 is still unknown.",
+    "The fifth, sixth, seventh, and eighth u32 values are the four recolor slots and are all written by 0x800F37CC.",
     "The first u32 is Mii Type. It is stored big-endian, so for entry 0 the changing byte appears at 0x8054062B."
   ],
   "observed_first_value_meanings": [

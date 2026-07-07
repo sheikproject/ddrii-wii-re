@@ -780,11 +780,11 @@ This looks like four Mii special-part entries. Current field interpretation:
 value 0 = Mii Type (Wii/Guest)
 value 1 = unknown body option/state value
 value 2 = body/costume ID
-value 3 = first recolor slot
-value 4 = second recolor slot
-value 5 = third recolor slot
-value 6 = fourth recolor slot
-value 7 = unknown / observed zero
+value 3 = unknown body option/state value
+value 4 = first recolor slot
+value 5 = second recolor slot
+value 6 = third recolor slot
+value 7 = fourth recolor slot
 ```
 
 `0x52` is the observed Mii body/costume ID in this table. It overlaps numerically with
@@ -838,7 +838,7 @@ r4 = table entry index
 r5 = value 0 / Mii Type
 r6 = value 1 / unknown body option/state value
 r7 = value 2 / body/costume ID
-r8 = value 3 / first recolor slot
+r8 = value 3 / unknown body option/state value
 ```
 
 Ghidra decompile:
@@ -848,13 +848,13 @@ void SetMiiSpecialPartTableEntry(int tableBase, int entryIndex,
                                  undefined4 miiType,
                                  undefined4 unknownBodyOptionState,
                                  undefined4 bodyCostumeId,
-                                 undefined4 firstRecolor)
+                                 undefined4 unknownBodyOptionState2)
 {
   *(undefined4 *)(tableBase + entryIndex * 0x20) = miiType;
   tableBase = tableBase + entryIndex * 0x20;
   *(undefined4 *)(tableBase + 4) = unknownBodyOptionState;
   *(undefined4 *)(tableBase + 8) = bodyCostumeId;
-  *(undefined4 *)(tableBase + 0xC) = firstRecolor;
+  *(undefined4 *)(tableBase + 0xC) = unknownBodyOptionState2;
 }
 ```
 
@@ -884,24 +884,24 @@ Ghidra decompile:
 
 ```c
 void SetMiiSpecialPartTableEntryTail(int tableBase, int entryIndex,
+                                     undefined4 firstRecolor,
                                      undefined4 secondRecolor,
                                      undefined4 thirdRecolor,
-                                     undefined4 fourthRecolor,
-                                     undefined4 unknownValue7)
+                                     undefined4 fourthRecolor)
 {
   tableBase = tableBase + entryIndex * 0x20;
-  *(undefined4 *)(tableBase + 0x10) = secondRecolor;
-  *(undefined4 *)(tableBase + 0x14) = thirdRecolor;
-  *(undefined4 *)(tableBase + 0x18) = fourthRecolor;
-  *(undefined4 *)(tableBase + 0x1C) = unknownValue7;
+  *(undefined4 *)(tableBase + 0x10) = firstRecolor;
+  *(undefined4 *)(tableBase + 0x14) = secondRecolor;
+  *(undefined4 *)(tableBase + 0x18) = thirdRecolor;
+  *(undefined4 *)(tableBase + 0x1C) = fourthRecolor;
 }
 ```
 
 So the entry is split across two small writers:
 
 ```text
-0x800F37B0 writes values 0-3
-0x800F37CC writes values 4-7
+0x800F37B0 writes values 0-3: Mii Type, unknown, body/costume ID, unknown
+0x800F37CC writes values 4-7: recolor slots 1-4
 ```
 
 Additional customized entry observed at `0x80540628` after changing each body

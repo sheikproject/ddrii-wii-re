@@ -10,7 +10,7 @@
   "known_value_layout": [
     {
       "index": 0,
-      "meaning": "unknown Mii source/body option state",
+      "meaning": "Mii Type (Wii/Guest)",
       "notes": ["0x00000006 observed for Guest Miis", "0x00000000 observed for Wii console Miis"]
     },
     {

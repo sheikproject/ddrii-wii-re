@@ -809,6 +809,40 @@ next word starts at 0x8054062C
 So a write/break at `0x8054062B` is still changing value 0 / Mii Type. `0x8054062C`
 is value 1, not the Mii Type byte.
 
+Writer watchpoint:
+
+```text
+watch address = 0x8054062B
+PC            = 0x800F37B4
+LR            = 0x80068D98
+r3            = 0x80540628
+r4            = 0
+r5            = 0
+r6            = 0
+r7            = 0x52
+r8            = 0
+```
+
+This identifies `FUN_800F37B0` as the table-entry writer. Tentative name:
+
+```text
+SetMiiSpecialPartTableEntry
+```
+
+Observed argument roles:
+
+```text
+r3 = table base / entry 0 address when r4 is 0
+r4 = table entry index
+r5 = value 0 / Mii Type
+r6 = value 1 / unknown body option/state value
+r7 = value 2 / body/costume ID
+r8 = value 3 / first recolor slot
+```
+
+The remaining values are likely passed through later registers or stack arguments; confirm
+from the Ghidra decompile before naming them.
+
 Additional customized entry observed at `0x80540628` after changing each body
 customization option:
 

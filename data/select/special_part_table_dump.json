@@ -50,6 +50,39 @@
       "meaning": "unknown / observed zero"
     }
   ],
+  "writer_functions": [
+    {
+      "address": "0x800F37B0",
+      "name": "SetMiiSpecialPartTableEntry",
+      "confidence": "watchpoint confirmed",
+      "watchpoint": {
+        "address": "0x8054062B",
+        "pc": "0x800F37B4",
+        "lr": "0x80068D98",
+        "registers": {
+          "r3": "0x80540628",
+          "r4": "0x00000000",
+          "r5": "0x00000000",
+          "r6": "0x00000000",
+          "r7": "0x00000052",
+          "r8": "0x00000000"
+        }
+      },
+      "observed_argument_roles": [
+        "r3 = table base / entry 0 address when r4 is 0",
+        "r4 = table entry index",
+        "r5 = value 0 / Mii Type",
+        "r6 = value 1 / unknown body option/state value",
+        "r7 = value 2 / body/costume ID",
+        "r8 = value 3 / first recolor slot"
+      ],
+      "notes": [
+        "This is the writer hit when the Mii Type byte at 0x8054062B changes.",
+        "The function is called from the character select flow around 0x80068D98.",
+        "The remaining table values are likely passed in later registers/stack arguments; confirm in Ghidra decompile."
+      ]
+    }
+  ],
   "observed_entries": [
     {
       "entry_index": 0,

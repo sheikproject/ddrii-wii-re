@@ -743,6 +743,21 @@ values per entry = 8 u32 values
 observed table base = DAT_802E70D0 + 0x1BA8
 ```
 
+`DAT_802E70D0` is in the DOL BSS range, so it must be read from runtime memory. To
+inspect this table in Dolphin:
+
+```text
+1. Go to memory address 0x802E70D0.
+2. Read the 32-bit big-endian pointer stored there. Call it P.
+3. Go to P + 0x1BA8.
+4. Dump entries as 0x20-byte blocks, 8 u32 values per entry.
+```
+
+The observed caller passes this table base into `LoadSpecialPartValues`. It may be
+current menu/player special-part state rather than a static character definition table,
+so the same entries should be compared while selecting Mii, normal characters, and the
+Mii customization pages.
+
 Open questions:
 
 ```text

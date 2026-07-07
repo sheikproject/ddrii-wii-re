@@ -15,7 +15,7 @@
     },
     {
       "index": 1,
-      "meaning": "first recolor slot"
+      "meaning": "unknown body option/state value"
     },
     {
       "index": 2,
@@ -24,19 +24,19 @@
     },
     {
       "index": 3,
-      "meaning": "second recolor slot"
+      "meaning": "first recolor slot"
     },
     {
       "index": 4,
-      "meaning": "third recolor slot"
+      "meaning": "second recolor slot"
     },
     {
       "index": 5,
-      "meaning": "fourth recolor slot"
+      "meaning": "third recolor slot"
     },
     {
       "index": 6,
-      "meaning": "unknown / observed zero"
+      "meaning": "fourth recolor slot"
     },
     {
       "index": 7,
@@ -47,22 +47,22 @@
     {
       "entry_index": 0,
       "values": ["0x00000006", "0x00000000", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["Mii source/type 6", "first recolor slot 0", "body/costume ID 0x52", "remaining observed recolor slots 0"]
+      "notes": ["unknown state value 6", "unknown body option/state value 0", "body/costume ID 0x52", "observed recolor slots 0"]
     },
     {
       "entry_index": 1,
       "values": ["0x00000006", "0x00000001", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["Mii source/type 6", "first recolor slot 1", "body/costume ID 0x52", "remaining observed recolor slots 0"]
+      "notes": ["unknown state value 6", "unknown body option/state value 1", "body/costume ID 0x52", "observed recolor slots 0"]
     },
     {
       "entry_index": 2,
       "values": ["0x00000006", "0x00000002", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["Mii source/type 6", "first recolor slot 2", "body/costume ID 0x52", "remaining observed recolor slots 0"]
+      "notes": ["unknown state value 6", "unknown body option/state value 2", "body/costume ID 0x52", "observed recolor slots 0"]
     },
     {
       "entry_index": 3,
       "values": ["0x00000006", "0x00000003", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["Mii source/type 6", "first recolor slot 3", "body/costume ID 0x52", "remaining observed recolor slots 0"]
+      "notes": ["unknown state value 6", "unknown body option/state value 3", "body/costume ID 0x52", "observed recolor slots 0"]
     }
   ],
   "observed_customized_entries": [
@@ -80,9 +80,9 @@
   ],
   "interpretation": [
     "The first four observed entries appear to describe Mii special-part variants.",
-    "The second u32 increments from 0 to 3 and is the first recolor slot.",
+    "The second u32 increments from 0 to 3 in the first observed entries, but its exact meaning is not confirmed.",
     "The third u32 is 0x52, the observed Mii body/costume ID. This overlaps numerically with the Mii character ID, but the table role is body/costume.",
-    "The fourth, fifth, and sixth u32 values are the second, third, and fourth recolor slots.",
+    "The fourth, fifth, sixth, and seventh u32 values are the four recolor slots.",
     "The first u32 is still not fully named: value 6 was observed with Guest Miis, value 0 was observed after selecting a Mii from the Wii instead of a Guest Mii, and value 5 was visible after changing each body customization option."
   ],
   "observed_first_value_meanings": [

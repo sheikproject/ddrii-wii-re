@@ -777,13 +777,13 @@ entry 3: 00000006 00000003 00000052 00000000 00000000 00000000 00000000 00000000
 This looks like four Mii special-part entries. Current field interpretation:
 
 ```text
-value 0 = Mii source/type
-value 1 = first recolor slot
+value 0 = unknown Mii source/body option state
+value 1 = unknown body option/state value
 value 2 = body/costume ID
-value 3 = second recolor slot
-value 4 = third recolor slot
-value 5 = fourth recolor slot
-value 6 = unknown / observed zero
+value 3 = first recolor slot
+value 4 = second recolor slot
+value 5 = third recolor slot
+value 6 = fourth recolor slot
 value 7 = unknown / observed zero
 ```
 

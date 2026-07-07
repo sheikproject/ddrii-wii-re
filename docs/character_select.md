@@ -681,10 +681,29 @@ Assembly for `FUN_800CD690` / `ApplyCharacterSpecialPart`:
 800CD694  b    FUN_800F7E98
 ```
 
-This wrapper only uses `r3`; it ignores `r4`, `r5`, and `r6`. So despite the decompiler
-showing calls with `iVar6`, `iVar9`, and `*piVar7`, this wrapper does not directly consume
-the apparent index/value arguments. The loop may be decompiler argument noise, or repeated
-updates of the same object state through `FUN_800F7E98`.
+`FUN_800CD690` is a base-adjusting tail-call wrapper. Because it branches directly to
+`FUN_800F7E98`, the original `r4`, `r5`, and `r6` arguments are preserved.
+
+`FUN_800F7E98` decompile:
+
+```c
+void FUN_800f7e98(int param_1, int param_2, int param_3, undefined4 param_4)
+{
+  *(undefined4 *)(param_1 + param_2 * 0xc4 + param_3 * 4 + 8) = param_4;
+}
+```
+
+So the special category loop really does write the apparent `local_80[index]` values into
+a strided table:
+
+```text
+base  = DAT_802e70c4 + 0x34
+outer = iVar6
+index = loop index
+value = local_80[index]
+
+write address = base + outer * 0xC4 + index * 4 + 8
+```
 
 The function also caches the latest values:
 

@@ -5,7 +5,8 @@
     "0x52 / Mii falls into category 3.",
     "Categories 0 and 3 call FUN_800CD690 four times in the observed block.",
     "Category 1 calls FUN_800CD690 two times in the observed block.",
-    "FUN_800CD690 only uses r3 and tail-calls FUN_800F7E98(r3 + 0x34); it does not use the apparent index/value arguments.",
+    "FUN_800CD690 adjusts r3 by 0x34 and tail-branches to FUN_800F7E98, preserving r4-r6.",
+    "FUN_800F7E98 writes param_4 to param_1 + param_2 * 0xC4 + param_3 * 4 + 8.",
     "Category 2 skips the observed local_80 apply path."
   ],
   "categories": [
@@ -49,9 +50,20 @@
         "800CD694  b FUN_800F7E98"
       ],
       "notes": [
-        "This function ignores r4, r5, and r6.",
-        "The caller appears to pass index/value registers, but this wrapper does not consume them.",
-        "The repeated category loops may be invalid decompiler argument inference or repeated updates of the same object state."
+        "This wrapper adjusts the base pointer, then tail-branches to FUN_800F7E98.",
+        "Because this is a tail branch, r4-r6 are preserved for FUN_800F7E98.",
+        "The caller's apparent index/value arguments are consumed by FUN_800F7E98, not by the wrapper itself."
+      ]
+    },
+    {
+      "address": "0x800F7E98",
+      "name": "SetIndexedSpecialPartValue",
+      "pseudocode": "*(param_1 + param_2 * 0xC4 + param_3 * 4 + 8) = param_4;",
+      "notes": [
+        "After FUN_800CD690 adjusts r3 by 0x34, this writes into a strided table.",
+        "param_2 is the outer index/slot.",
+        "param_3 is the inner part index.",
+        "param_4 is the value written, observed as local_80[index] in the special category path."
       ]
     }
   ]

@@ -54,7 +54,7 @@
     },
     {
       "source": "Ghidra decompile after category calculation",
-      "summary": "Category 0 and category 3 both call FUN_800CD690 four times. Category 1 calls it two times. Category 2 appears to skip this call path. Later assembly inspection showed FUN_800CD690 ignores the apparent index/value arguments and only uses r3.",
+      "summary": "Category 0 and category 3 both call FUN_800CD690 four times. Category 1 calls it two times. Category 2 appears to skip this call path. FUN_800CD690 adjusts r3 and tail-branches to FUN_800F7E98, which consumes the apparent index/value arguments.",
       "category_behavior": [
         {
           "category": 0,
@@ -88,12 +88,13 @@
       }
     },
     {
-      "source": "Assembly for FUN_800CD690 / ApplyCharacterSpecialPart",
+      "source": "Assembly/decompile for FUN_800CD690 and FUN_800F7E98",
       "assembly": [
         "800CD690  addi r3,r3,0x34",
         "800CD694  b FUN_800F7E98"
       ],
-      "summary": "The wrapper ignores r4-r6, so it does not directly apply local_80[index]."
+      "pseudocode": "FUN_800F7E98(param_1, param_2, param_3, param_4) { *(param_1 + param_2 * 0xC4 + param_3 * 4 + 8) = param_4; }",
+      "summary": "FUN_800CD690 is a base-adjusting tail-call wrapper. FUN_800F7E98 performs the indexed write, so local_80[index] is applied there."
     }
   ],
   "open_questions": [

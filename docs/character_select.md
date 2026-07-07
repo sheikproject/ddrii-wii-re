@@ -775,8 +775,17 @@ entry 3: 00000006 00000003 00000052 00000000 00000000 00000000 00000000 00000000
 ```
 
 This looks like four Mii special-part entries. The second value increments from `0` to
-`3`, and the third value is `0x52`, the confirmed Mii character ID. The meaning of the
-first value `6` is still unknown.
+`3`, and the third value is `0x52`, the confirmed Mii character ID.
+
+The first value appears to be a Mii source/type field:
+
+```text
+0x00000006 = observed when using Guest Miis
+0x00000000 = observed after selecting a Mii from the Wii instead of a Guest Mii
+```
+
+The exact name is still tentative, but it is not just "Mii enabled"; it changes based on
+where the selected Mii came from.
 
 Open questions:
 

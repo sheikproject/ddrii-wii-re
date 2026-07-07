@@ -33,6 +33,18 @@
     "The first four observed entries appear to describe Mii special-part variants.",
     "The second u32 increments from 0 to 3, matching four special-part writes observed for category 3.",
     "The third u32 is 0x52, the confirmed Mii character ID.",
-    "The meaning of first value 6 is unknown."
+    "The first u32 appears to describe the Mii source/type: value 6 was observed with Guest Miis, and value 0 was observed after selecting a Mii from the Wii instead of a Guest Mii."
+  ],
+  "observed_first_value_meanings": [
+    {
+      "value": "0x00000006",
+      "meaning": "Guest Mii source/type",
+      "confidence": "observed"
+    },
+    {
+      "value": "0x00000000",
+      "meaning": "Wii console Mii source/type",
+      "confidence": "observed"
+    }
   ]
 }

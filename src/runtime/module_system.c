@@ -1,14 +1,33 @@
 #include "runtime/module_system.h"
+#include "runtime/boot_logo.h"
+#include "host/host_cselect.h"
+#include "platform/render_backend.h"
+#include "select/csel_mode.h"
+
+#include <stdio.h>
+#include <windows.h>
 
 void RuntimeEntry(void) {
     /* DOL runtime entry / __start.
        Performs low-level runtime setup, relocates boot info pointers,
        initializes OS/C runtime, runs constructors, then calls GameMain. */
+    (void)GameMain();
 }
 
 int GameMain(void) {
-    /* Original initializes global managers, runs MainLoopManager_Tick until shutdown,
-       then destroys managers in reverse allocation order. */
+    ModuleControllerKnownFields moduleController = {
+        MODULE_ID_BOOT_LOGO,
+        -1,
+        0,
+    };
+
+    puts("DDRII host skeleton: GameMain");
+
+    while (!Platform_ShouldQuit() && ModuleController_Update(&moduleController) == 0) {
+        Sleep(16);
+    }
+
+    puts("DDRII host skeleton: shutdown");
     return 0;
 }
 
@@ -21,38 +40,74 @@ int MainLoopManager_Tick(int *mainLoopManager) {
 }
 
 void ModuleController_ApplyPendingModule(int *moduleController) {
-    (void)moduleController;
+    ModuleControllerKnownFields *controller = (ModuleControllerKnownFields *)moduleController;
 
     /* Original destroys the active module when pendingModuleId != activeModuleId,
        creates the pending module, calls its enter/setup method, then stores activeModuleId. */
+    if (controller->pendingModuleId == controller->activeModuleId) {
+        return;
+    }
+
+    printf("ModuleController: switch %d -> %d\n",
+           controller->activeModuleId,
+           controller->pendingModuleId);
+    ModuleController_CreatePendingModule(moduleController);
+    controller->activeModuleId = controller->pendingModuleId;
 }
 
 void ModuleController_CreatePendingModule(int *moduleController) {
-    (void)moduleController;
+    static BootLogoModuleKnownFields bootLogoModule;
+    static HostCSelectModule cSelectModule;
+    ModuleControllerKnownFields *controller = (ModuleControllerKnownFields *)moduleController;
 
     /* Original allocates a module object based on pendingModuleId:
        0 small boot object, 1 BootLogoModule, 2 CSelect, 3/5/6 CGame. */
+    switch (controller->pendingModuleId) {
+        case MODULE_ID_BOOT_LOGO:
+            BootLogoModule_Init(&bootLogoModule);
+            controller->activeModule = &bootLogoModule;
+            break;
+        case MODULE_ID_CSELECT:
+            CSelect_Init(&cSelectModule);
+            controller->activeModule = &cSelectModule;
+            break;
+        default:
+            printf("ModuleController: unsupported module %d\n", controller->pendingModuleId);
+            controller->activeModule = 0;
+            break;
+    }
 }
 
-void BootLogoModule_Init(void *module) {
-    (void)module;
+int ModuleController_Update(ModuleControllerKnownFields *moduleController) {
+    int nextModuleId;
 
-    /* Original sets BootLogoModule_VTable and initializes logo/timer/fade fields. */
-}
+    ModuleController_ApplyPendingModule((int *)moduleController);
 
-int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
-    (void)bootLogoModule;
-    (void)nextModuleId;
-
-    /* Original runs logo/logo_*.tpl loading, fade-in, hold, fade-out,
-       and returns module ID 2 when the boot logo sequence is finished. */
-    return MODULE_ID_BOOT_LOGO;
+    switch (moduleController->activeModuleId) {
+        case MODULE_ID_BOOT_LOGO:
+            nextModuleId = BootLogoModule_Tick(moduleController->activeModule, MODULE_ID_BOOT_LOGO);
+            BootLogoModule_Draw(moduleController->activeModule);
+            if (nextModuleId != MODULE_ID_BOOT_LOGO) {
+                moduleController->pendingModuleId = nextModuleId;
+            }
+            return 0;
+        case MODULE_ID_CSELECT:
+            return CSelect_TickHost(moduleController->activeModule);
+        default:
+            return 1;
+    }
 }
 
 int CSelect_Init(void *cSelect) {
-    (void)cSelect;
+    HostCSelectModule *module = (HostCSelectModule *)cSelect;
 
     /* Original initializes module ID 2, clears CSelect state, sets CSelect_VTable,
        initializes internal buffers, and clears resource/sub-screen handles. */
+    module->frame = 0;
+    module->selectedModeIndex = 0;
+    module->redrawNeeded = 1;
+    puts("CSelect: init");
+    CSelMode_Init(0);
+    CSelMode_OnEnter(0, 0);
     return 0;
 }

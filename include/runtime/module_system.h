@@ -20,9 +20,7 @@ int GameMain(void);
 int MainLoopManager_Tick(int *mainLoopManager);
 void ModuleController_ApplyPendingModule(int *moduleController);
 void ModuleController_CreatePendingModule(int *moduleController);
-
-void BootLogoModule_Init(void *module);
-int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId);
+int ModuleController_Update(ModuleControllerKnownFields *moduleController);
 
 int CSelect_Init(void *cSelect);
 

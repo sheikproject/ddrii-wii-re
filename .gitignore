@@ -32,6 +32,10 @@ __pycache__/
 .ruff_cache/
 .vscode/
 .idea/
+.vs/
+*.obj
+*.pdb
+*.ilk
 
 # OS files
 Thumbs.db

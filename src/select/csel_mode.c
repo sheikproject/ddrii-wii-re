@@ -1,5 +1,7 @@
 #include "select/csel_mode.h"
 
+#include <stdio.h>
+
 const CSelModeChoice CSelMode_ChoiceTable[5] = {
     { 0x02, 0x01, 0x01, -1 },
     { 0x02, 0x02, 0x07, -1 },
@@ -30,11 +32,24 @@ const CSelModeChoice *CSelMode_GetChoice(int selectedModeIndex) {
     return &CSelMode_ChoiceTable[selectedModeIndex];
 }
 
+int CSelMode_MoveSelection(int selectedModeIndex, int direction) {
+    selectedModeIndex += direction;
+
+    if (selectedModeIndex < 0) {
+        return 4;
+    }
+    if (selectedModeIndex >= 5) {
+        return 0;
+    }
+    return selectedModeIndex;
+}
+
 int CSelMode_Init(void *cselMode) {
     (void)cselMode;
 
     /* Original initializes a 14-entry controller at +0x160.
        Each entry is 0x50 bytes and uses callbacks at 0x8006309C/0x800630D8. */
+    puts("CSelMode: init");
     return 0;
 }
 
@@ -44,11 +59,13 @@ void CSelMode_OnEnter(void *cselMode, void *linkData) {
 
     /* Original links the Czan resource, initializes all mode entries,
        configures layout/animation data, and sets modeState to 1. */
+    puts("CSelMode: on enter");
 }
 
 void CSelMode_Update(void) {
     /* Original reads input, changes selectedModeIndex, plays animations/sounds,
        and commits parentSelectData[0..2] from CSelMode_ChoiceTable. */
+    puts("CSelMode: update");
 }
 
 void CSelMode_SetInitialSelectedMode(void *cselMode) {

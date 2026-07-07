@@ -35,5 +35,6 @@ void CSelMode_Update(void);
 void CSelMode_SetInitialSelectedMode(void *cselMode);
 int CSelMode_ModeIdToSelectedIndex(int modeId);
 const CSelModeChoice *CSelMode_GetChoice(int selectedModeIndex);
+int CSelMode_MoveSelection(int selectedModeIndex, int direction);
 
 #endif

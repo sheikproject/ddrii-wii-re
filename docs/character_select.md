@@ -573,9 +573,9 @@ slot 0x0F -> 0xD0 / 208 / U1
 
 ### Mii Head State
 
-Mii head state is separate from the selected character ID. For normal characters this
-value is usually `0`. When enabled as `1`, the character's head is replaced with a Mii
-head.
+Mii head state is separate from the selected character ID. This field is written during
+Mii selection, but its exact meaning is not confirmed yet. It should not currently be
+treated as a simple boolean.
 
 Known related addresses:
 
@@ -585,22 +585,33 @@ Known related addresses:
 0x8053FA0C  Character Mii Head (Boss Songs)
 ```
 
-Known/expected values:
+Observed write:
 
 ```text
-0 = normal character head
-1 = Mii head replacement enabled
+PC  0x8006D0C4
+LR  0x8006D0AC
+r4  0x808A2224
+r5  0x00000000
+r6  0x00000052  ; Mii character ID
+
+8006D0C4  stw r5,0x3C(r4)
+0x808A2224 + 0x3C = 0x808A2260
 ```
 
-Hypothesis:
+This means selecting Mii wrote `0` to `0x808A2260` in the first observed test. The field
+may be a Mii head index, Mii slot, or replacement-state value rather than `0 = off`,
+`1 = on`.
+
+Open questions:
 
 ```text
-Selecting slot 0x03 / CHAR_ID_MII probably sets Mii head state to 1.
+Compare writes to 0x808A2260 for normal characters and Mii.
+Find whether values other than 0 select Mii head variants.
+Identify the full function around 0x8006D0C4.
 ```
 
-This should be tested with a watchpoint on `0x808A2260` while selecting Mii. For the PC
-port model, Mii head state should be represented separately from the character ID and
-costume slot.
+For the PC port model, Mii head state should still be represented separately from the
+character ID and costume slot.
 
 Confirmed invalid slots:
 

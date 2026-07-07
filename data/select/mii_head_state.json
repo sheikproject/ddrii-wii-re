@@ -2,9 +2,9 @@
   "name": "Mii head replacement state",
   "notes": [
     "Mii head state is separate from the selected character ID.",
-    "For normal characters this value has been observed/documented as 0.",
-    "When enabled, value 1 appears to replace the character head with a Mii head.",
-    "Selecting the Mii character likely sets this to 1, but that still needs a runtime confirmation."
+    "This field is written while selected character ID is 0x52 / Mii.",
+    "The first observed write during Mii selection wrote value 0, so this should not yet be treated as a simple boolean enabled flag.",
+    "It may be a Mii head index, Mii slot, or replacement-state field."
   ],
   "known_addresses": [
     {
@@ -26,15 +26,31 @@
   "values": [
     {
       "value": 0,
-      "meaning": "normal character head"
+      "meaning": "observed value written when selecting Mii; exact meaning unknown"
     },
     {
       "value": 1,
-      "meaning": "Mii head replacement enabled"
+      "meaning": "previously suspected Mii head replacement enabled value; unconfirmed"
+    }
+  ],
+  "observations": [
+    {
+      "pc": "0x8006D0C4",
+      "lr": "0x8006D0AC",
+      "instruction": "stw r5,0x3C(r4)",
+      "base_register": "r4",
+      "base_value": "0x808A2224",
+      "write_address": "0x808A2260",
+      "written_register": "r5",
+      "written_value": 0,
+      "selected_character_register": "r6",
+      "selected_character_value": "0x52",
+      "selected_character_name": "Mii"
     }
   ],
   "open_questions": [
-    "Confirm whether selecting CHAR_ID_MII always sets this value to 1.",
+    "Determine whether 0x808A2260 is a Mii head index, a replacement toggle, or another Mii state field.",
+    "Compare writes to 0x808A2260 for normal characters versus CHAR_ID_MII.",
     "Find the function that commits Mii head state alongside selected character and costume.",
     "Determine whether values other than 0 and 1 select Mii head variants or are invalid."
   ]

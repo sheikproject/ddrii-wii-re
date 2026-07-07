@@ -1,0 +1,121 @@
+{
+  "name": "DDR Points",
+  "field": {
+    "base": "playerDataOrSaveData",
+    "offset": "0x4E8",
+    "example_base": "0x8053FF24",
+    "example_field_address": "0x8054040C"
+  },
+  "limits": {
+    "max_saved_points": 10000000,
+    "final_unlock_points": 2000000,
+    "notes": [
+      "10,000,000 is the hard cap / numeric display safety limit.",
+      "The final unlockable completes at 2,000,000 points and can switch the display to the COMPLETE texture."
+    ]
+  },
+  "functions": [
+    {
+      "address": "0x800F3B68",
+      "name": "GetDDRPoints",
+      "pseudocode": "return *(playerDataOrSaveData + 0x4E8);"
+    },
+    {
+      "address": "0x800F3B70",
+      "name": "SetDDRPoints",
+      "pseudocode": "*(playerDataOrSaveData + 0x4E8) = ddrPoints;",
+      "watchpoint": {
+        "pc": "0x800F3B70",
+        "lr": "0x800E52C8",
+        "r3": "0x8053FF24",
+        "r4": "0x00000DAC",
+        "meaning": "SetDDRPoints(0x8053FF24, 3500)"
+      }
+    },
+    {
+      "address": "0x8006FAA0",
+      "name": "SetupDDRPointsMenuDisplay",
+      "notes": [
+        "Initializes a CzanLinkManager stack object.",
+        "Links a resource passed in r4.",
+        "Calls GetDDRPoints(DAT_802E70D0 + 0x14A4).",
+        "Updates/clears related menu display fields."
+      ]
+    },
+    {
+      "address": "0x801004A0",
+      "name": "UpdateDDRPointsDisplay",
+      "pseudocode": "SetDDRPointsDisplayValue(*(uiRoot + 0x40), ddrPoints);",
+      "notes": [
+        "Ghidra may initially show only one parameter, but r4 is passed through to SetDDRPointsDisplayValue."
+      ]
+    },
+    {
+      "address": "0x8010A2D8",
+      "name": "SetDDRPointsDisplayValue",
+      "notes": [
+        "Updates the DDR Points numeric display.",
+        "Values below 10,000,000 are shown as a 7-digit number.",
+        "Values at or above 10,000,000 take a fallback display path.",
+        "The COMPLETE texture is tied to completion/final unlock state, observed at 2,000,000 points, not directly to the 10,000,000 numeric cap."
+      ]
+    }
+  ],
+  "award_formula": {
+    "pseudocode": "earnedDDRPoints = baseAward + scoreThresholdAward + clearConditionAward + difficultyTargetAward; newDDRPoints = min(currentDDRPoints + earnedDDRPoints, 10000000);",
+    "caller": "0x800E52C8 area"
+  },
+  "award_functions": [
+    {
+      "address": "0x80120334",
+      "name": "CalcDDRPointsBaseAward",
+      "awards": [
+        { "requiredProgress": 0, "points": 500 },
+        { "requiredProgress": 1, "points": 750 },
+        { "requiredProgress": 2, "points": 1000 },
+        { "requiredProgress": 3, "points": 1500 },
+        { "requiredProgress": 4, "points": 2000 }
+      ]
+    },
+    {
+      "address": "0x801203F4",
+      "name": "CalcDDRPointsScoreThresholdAward",
+      "ranges": [
+        { "currentDDRPoints": "0-899999", "thresholdTable": "DAT_802E9600" },
+        { "currentDDRPoints": "900000-1679999", "thresholdTable": "DAT_802E9608" },
+        { "currentDDRPoints": "1680000-9999999", "thresholdTable": "DAT_802E9610" }
+      ],
+      "awards": [
+        { "threshold": 60, "points": 250 },
+        { "threshold": 75, "points": 500 },
+        { "threshold": 90, "points": 750 },
+        { "threshold": 100, "points": 1000 }
+      ]
+    },
+    {
+      "address": "0x80120508",
+      "name": "CalcDDRPointsClearConditionAward",
+      "awards": [
+        { "requiredCondition": 50, "points": 500 },
+        { "requiredCondition": 100, "points": 750 },
+        { "requiredCondition": 200, "points": 1000 },
+        { "requiredCondition": -1, "extraCondition": "fullComboOrSpecialClearFlag != 0", "points": 1500 }
+      ]
+    },
+    {
+      "address": "0x801205AC",
+      "name": "CalcDDRPointsDifficultyTargetAward",
+      "ranges": [
+        { "currentDDRPoints": "0-899999", "targetTable": "DAT_80291E18" },
+        { "currentDDRPoints": "900000-1679999", "targetTable": "DAT_80291E3C" },
+        { "currentDDRPoints": "1680000-9999999", "targetTable": "DAT_80291E60" }
+      ],
+      "awards": [
+        { "target": 2, "points": 250 },
+        { "target": 3, "points": 500 },
+        { "target": 4, "points": 750 },
+        { "target": 5, "points": 1000 }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "source_block": "0x8006D0C4-0x8006D1B8",
+  "notes": [
+    "Classifies character IDs around 0x52-0x59 into special handling categories.",
+    "0x52 / Mii falls into category 3.",
+    "Categories 0 and 3 apply four local_80 values through FUN_800CD690.",
+    "Category 1 applies two local_80 values through FUN_800CD690.",
+    "Category 2 skips the observed local_80 apply path."
+  ],
+  "categories": [
+    {
+      "category": 0,
+      "name": "FULL_APPLY_A",
+      "character_ids": ["0x54", "0x55"],
+      "local_80_apply_count": 4
+    },
+    {
+      "category": 1,
+      "name": "PARTIAL_APPLY",
+      "character_ids": ["0x58", "0x59"],
+      "local_80_apply_count": 2
+    },
+    {
+      "category": 2,
+      "name": "NORMAL",
+      "character_ids": "outside 0x52-0x59",
+      "local_80_apply_count": 0
+    },
+    {
+      "category": 3,
+      "name": "FULL_APPLY_B",
+      "character_ids": ["0x52", "0x53", "0x56", "0x57"],
+      "known_members": [
+        {
+          "character_id": "0x52",
+          "name": "Mii"
+        }
+      ],
+      "local_80_apply_count": 4
+    }
+  ]
+}

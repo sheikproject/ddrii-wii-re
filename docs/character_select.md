@@ -745,4 +745,7 @@ src/select/character_select_pages.c
 data/select/character_slot_table.json
 data/select/character_page_layouts.json
 data/select/mii_head_state.json
+include/select/character_special_categories.h
+src/select/character_special_categories.c
+data/select/character_special_categories.json
 ```

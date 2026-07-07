@@ -46,10 +46,52 @@
       "selected_character_register": "r6",
       "selected_character_value": "0x52",
       "selected_character_name": "Mii"
+    },
+    {
+      "source": "Ghidra decompile around 0x8006D0C4",
+      "summary": "The value written to select-state +0x3C comes from local_4c. local_48 is then classified by character ID range around 0x52-0x59.",
+      "pseudocode": "*(selectState + playerOffset + 0x3C) = local_4c; if (local_48 - 0x52 < 8) { if (local_48 - 0x54 < 2) category = 0; else if (local_48 - 0x52 < 6) category = 3; else category = 1; } else category = 2;"
+    },
+    {
+      "source": "Ghidra decompile after category calculation",
+      "summary": "Category 0 and category 3 both apply four values from local_80 through FUN_800CD690. Category 1 applies two values. Category 2 appears to skip this local_80 apply path.",
+      "category_behavior": [
+        {
+          "category": 0,
+          "character_id_range": "0x54-0x55",
+          "behavior": "apply local_80[0..3]"
+        },
+        {
+          "category": 1,
+          "character_id_range": "0x58-0x59",
+          "behavior": "apply local_80[0..1]"
+        },
+        {
+          "category": 2,
+          "character_id_range": "outside 0x52-0x59",
+          "behavior": "skip observed local_80 apply path"
+        },
+        {
+          "category": 3,
+          "character_id_range": "0x52, 0x53, 0x56, 0x57",
+          "behavior": "apply local_80[0..3]; includes 0x52 / Mii"
+        }
+      ],
+      "cache_fields": {
+        "0x17FC": "local_48",
+        "0x1800": "local_80[0]",
+        "0x1804": "local_80[1]",
+        "0x1808": "local_80[2]",
+        "0x180C": "local_80[3]",
+        "0x1810": "local_4C",
+        "0x1814": "local_50"
+      }
     }
   ],
   "open_questions": [
+    "Determine what local_4c represents before it is written to select-state +0x3C.",
     "Determine whether 0x808A2260 is a Mii head index, a replacement toggle, or another Mii state field.",
+    "Identify the meaning of the local_48 character category values 0, 1, 2, and 3.",
     "Compare writes to 0x808A2260 for normal characters versus CHAR_ID_MII.",
     "Find the function that commits Mii head state alongside selected character and costume.",
     "Determine whether values other than 0 and 1 select Mii head variants or are invalid."

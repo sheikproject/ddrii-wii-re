@@ -602,6 +602,90 @@ This means selecting Mii wrote `0` to `0x808A2260` in the first observed test. T
 may be a Mii head index, Mii slot, or replacement-state value rather than `0 = off`,
 `1 = on`.
 
+Ghidra decompile around `0x8006D0C4`:
+
+```c
+*(int *)(*(int *)(iVar2 + 0x10) + iVar9 + 0x3c) = local_4c;
+if (local_48 - 0x52U < 8) {
+  if (local_48 - 0x54U < 2) {
+    iVar9 = 0;
+  }
+  else if (local_48 - 0x52U < 6) {
+    iVar9 = 3;
+  }
+  else {
+    iVar9 = 1;
+  }
+}
+else {
+  iVar9 = 2;
+}
+```
+
+Current interpretation:
+
+```text
+local_48 = selected/special character ID or related character value
+local_4c = value written to select-state +0x3C, observed at 0x808A2260
+iVar9    = category derived from local_48
+```
+
+The category logic treats IDs `0x52-0x59` specially. `0x52` is Mii, so this block likely
+handles Mii/special head or body categories, but the category meanings are not confirmed.
+
+Follow-up decompile shows how some categories are applied:
+
+```c
+if (iVar9 == 0) {
+LAB_8006d148:
+  piVar7 = local_80;
+  iVar9 = 0;
+  do {
+    FUN_800cd690(DAT_802e70c4, iVar6, iVar9, *piVar7);
+    iVar9 = iVar9 + 1;
+    piVar7 = piVar7 + 1;
+  } while (iVar9 < 4);
+}
+else {
+  ...
+  if (iVar9 == 3) goto LAB_8006d148;
+  ...
+  if (iVar9 == 1) {
+    piVar7 = local_80;
+    iVar9 = 0;
+    do {
+      FUN_800cd690(DAT_802e70c4, iVar6, iVar9, *piVar7);
+      iVar9 = iVar9 + 1;
+      piVar7 = piVar7 + 1;
+    } while (iVar9 < 2);
+  }
+}
+```
+
+Observed category behavior:
+
+```text
+category 0: IDs 0x54-0x55, applies local_80[0..3]
+category 1: IDs 0x58-0x59, applies local_80[0..1]
+category 2: IDs outside 0x52-0x59, skips this observed local_80 apply path
+category 3: IDs 0x52,0x53,0x56,0x57, applies local_80[0..3]
+```
+
+Since `0x52` / Mii falls into category `3`, Mii uses the four-value `local_80`
+application path.
+
+The function also caches the latest values:
+
+```text
+iVar2 + 0x17FC = local_48
+iVar2 + 0x1800 = local_80[0]
+iVar2 + 0x1804 = local_80[1]
+iVar2 + 0x1808 = local_80[2]
+iVar2 + 0x180C = local_80[3]
+iVar2 + 0x1810 = local_4C
+iVar2 + 0x1814 = local_50
+```
+
 Open questions:
 
 ```text

@@ -687,9 +687,9 @@ Assembly for `FUN_800CD690` / `ApplyCharacterSpecialPart`:
 `FUN_800F7E98` decompile:
 
 ```c
-void FUN_800f7e98(int param_1, int param_2, int param_3, undefined4 param_4)
+void SetIndexedSpecialPartValue(int base, int outerIndex, int partIndex, undefined4 value)
 {
-  *(undefined4 *)(param_1 + param_2 * 0xc4 + param_3 * 4 + 8) = param_4;
+  *(undefined4 *)(base + outerIndex * 0xc4 + partIndex * 4 + 8) = value;
 }
 ```
 
@@ -721,17 +721,17 @@ iVar2 + 0x1814 = local_50
 `LoadSpecialPartValues`:
 
 ```c
-void LoadSpecialPartValues(undefined4 *param_1, int param_2, int param_3)
+void LoadSpecialPartValues(undefined4 *outValues, int tableBase, int entryIndex)
 {
-  int iVar2 = param_2 + param_3 * 0x20;
-  param_1[0] = *(undefined4 *)(iVar2 + 0x00);
-  param_1[1] = *(undefined4 *)(iVar2 + 0x04);
-  param_1[2] = *(undefined4 *)(iVar2 + 0x08);
-  param_1[3] = *(undefined4 *)(iVar2 + 0x0C);
-  param_1[4] = *(undefined4 *)(iVar2 + 0x10);
-  param_1[5] = *(undefined4 *)(iVar2 + 0x14);
-  param_1[6] = *(undefined4 *)(iVar2 + 0x18);
-  param_1[7] = *(undefined4 *)(iVar2 + 0x1C);
+  int entry = tableBase + entryIndex * 0x20;
+  outValues[0] = *(undefined4 *)(entry + 0x00);
+  outValues[1] = *(undefined4 *)(entry + 0x04);
+  outValues[2] = *(undefined4 *)(entry + 0x08);
+  outValues[3] = *(undefined4 *)(entry + 0x0C);
+  outValues[4] = *(undefined4 *)(entry + 0x10);
+  outValues[5] = *(undefined4 *)(entry + 0x14);
+  outValues[6] = *(undefined4 *)(entry + 0x18);
+  outValues[7] = *(undefined4 *)(entry + 0x1C);
 }
 ```
 

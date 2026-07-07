@@ -6,7 +6,7 @@
     "Categories 0 and 3 call FUN_800CD690 four times in the observed block.",
     "Category 1 calls FUN_800CD690 two times in the observed block.",
     "FUN_800CD690 adjusts r3 by 0x34 and tail-branches to FUN_800F7E98, preserving r4-r6.",
-    "FUN_800F7E98 writes param_4 to param_1 + param_2 * 0xC4 + param_3 * 4 + 8.",
+    "FUN_800F7E98 writes value to base + outerIndex * 0xC4 + partIndex * 4 + 8.",
     "Category 2 skips the observed local_80 apply path."
   ],
   "categories": [
@@ -58,12 +58,12 @@
     {
       "address": "0x800F7E98",
       "name": "SetIndexedSpecialPartValue",
-      "pseudocode": "*(param_1 + param_2 * 0xC4 + param_3 * 4 + 8) = param_4;",
+      "pseudocode": "*(base + outerIndex * 0xC4 + partIndex * 4 + 8) = value;",
       "notes": [
         "After FUN_800CD690 adjusts r3 by 0x34, this writes into a strided table.",
-        "param_2 is the outer index/slot.",
-        "param_3 is the inner part index.",
-        "param_4 is the value written, observed as local_80[index] in the special category path."
+        "outerIndex is the outer index/slot.",
+        "partIndex is the inner part index.",
+        "value is observed as local_80[index] in the special category path."
       ]
     },
     {

@@ -248,9 +248,9 @@ Next target: analyze `0x8006C588`, which likely resolves current page/slot/selec
 Ghidra decompile:
 
 ```c
-undefined4 GetCharacterIdForCurrentSelectSlot(undefined4 param_1, undefined4 param_2)
+undefined4 GetCharacterIdForCurrentSelectSlot(undefined4 cselChara, undefined4 slot)
 {
-  switch (param_2) {
+  switch (slot) {
   case 0:  return 10000;
   case 1:  return 0x2712;
   case 2:  return 0x2711;
@@ -276,6 +276,15 @@ undefined4 GetCharacterIdForCurrentSelectSlot(undefined4 param_1, undefined4 par
   }
 }
 ```
+
+Ghidra parameter names:
+
+```text
+param_1 -> cselChara
+param_2 -> slot
+```
+
+`cselChara` is passed by the caller but is not used by this switch.
 
 Known IDs from `Characters IDs (In-Game).md`:
 
@@ -420,6 +429,19 @@ file 0x0026E2D0
 
 The value `0x15` means a blank display/panel slot. This table controls what the page/panel
 shows, but it does not decide the final loaded character by itself.
+
+Use this signature/name in Ghidra:
+
+```c
+void SetupCharacterSelectPageSlots(void *cselChara, int pageIndex)
+```
+
+Ghidra parameter names:
+
+```text
+param_1 -> cselChara
+param_2 -> pageIndex
+```
 
 Current decoded page layout:
 

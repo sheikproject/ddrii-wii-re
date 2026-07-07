@@ -3,6 +3,7 @@
   "source_address": "0x8006C588",
   "notes": [
     "Maps character select slot index to in-game character ID.",
+    "Ghidra signature has two parameters: cselChara and slot. cselChara is passed by the caller but unused by the switch.",
     "Blank or disabled slots return -1.",
     "Icon/page display data and selectable flags are separate systems."
   ],

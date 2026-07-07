@@ -1,6 +1,16 @@
 {
   "source_function": "SetupCharacterSelectPageSlots",
   "source_address": "0x8006C658",
+  "ghidra_parameters": [
+    {
+      "name": "cselChara",
+      "meaning": "character select object/state pointer"
+    },
+    {
+      "name": "pageIndex",
+      "meaning": "character select page index used to populate the visible slots"
+    }
+  ],
   "source_table_ram": "0x802721D0",
   "source_table_file_offset": "0x0026E2D0",
   "page_count": 7,

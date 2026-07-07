@@ -684,6 +684,15 @@ Assembly for `FUN_800CD690` / `ApplyCharacterSpecialPart`:
 `FUN_800CD690` is a base-adjusting tail-call wrapper. Because it branches directly to
 `FUN_800F7E98`, the original `r4`, `r5`, and `r6` arguments are preserved.
 
+Use this signature/name in Ghidra:
+
+```c
+void ApplyCharacterSpecialPart(void *objectBase, int outerIndex, int partIndex, undefined4 value)
+{
+  SetIndexedSpecialPartValue((char *)objectBase + 0x34, outerIndex, partIndex, value);
+}
+```
+
 `FUN_800F7E98` decompile:
 
 ```c

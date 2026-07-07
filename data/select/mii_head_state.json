@@ -94,7 +94,7 @@
         "800CD694  b FUN_800F7E98"
       ],
       "pseudocode": "SetIndexedSpecialPartValue(base, outerIndex, partIndex, value) { *(base + outerIndex * 0xC4 + partIndex * 4 + 8) = value; }",
-      "summary": "FUN_800CD690 is a base-adjusting tail-call wrapper. FUN_800F7E98 performs the indexed write, so local_80[index] is applied there."
+      "summary": "ApplyCharacterSpecialPart is a base-adjusting tail-call wrapper. SetIndexedSpecialPartValue performs the indexed write, so local_80[index] is applied there."
     },
     {
       "source": "Ghidra decompile for FUN_800F3764 / LoadSpecialPartValues",

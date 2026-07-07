@@ -17,6 +17,11 @@ void SetIndexedSpecialPartValue(void *base, int outerIndex, int partIndex, int v
     *(int *)(bytes + outerIndex * CHARACTER_SPECIAL_PART_OBJECT_STRIDE + partIndex * 4 + 8) = value;
 }
 
+void ApplyCharacterSpecialPart(void *objectBase, int outerIndex, int partIndex, int value) {
+    char *bytes = (char *)objectBase;
+    SetIndexedSpecialPartValue(bytes + 0x34, outerIndex, partIndex, value);
+}
+
 void SetMiiSpecialPartTableEntry(
     int *tableBase,
     int entryIndex,

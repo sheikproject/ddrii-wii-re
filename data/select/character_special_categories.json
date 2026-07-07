@@ -49,10 +49,12 @@
         "800CD690  addi r3,r3,0x34",
         "800CD694  b FUN_800F7E98"
       ],
+      "pseudocode": "SetIndexedSpecialPartValue(objectBase + 0x34, outerIndex, partIndex, value);",
       "notes": [
         "This wrapper adjusts the base pointer, then tail-branches to FUN_800F7E98.",
         "Because this is a tail branch, r4-r6 are preserved for FUN_800F7E98.",
-        "The caller's apparent index/value arguments are consumed by FUN_800F7E98, not by the wrapper itself."
+        "objectBase is adjusted by 0x34 before the indexed write.",
+        "outerIndex, partIndex, and value are preserved and consumed by SetIndexedSpecialPartValue."
       ]
     },
     {

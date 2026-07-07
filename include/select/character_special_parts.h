@@ -13,6 +13,8 @@ void LoadSpecialPartValues(
 
 void SetIndexedSpecialPartValue(void *base, int outerIndex, int partIndex, int value);
 
+void ApplyCharacterSpecialPart(void *objectBase, int outerIndex, int partIndex, int value);
+
 void SetMiiSpecialPartTableEntry(
     int *tableBase,
     int entryIndex,

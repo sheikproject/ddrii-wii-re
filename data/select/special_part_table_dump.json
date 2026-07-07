@@ -11,7 +11,14 @@
     {
       "index": 0,
       "meaning": "Mii Type (Wii/Guest)",
-      "notes": ["0x00000006 observed for Guest Miis", "0x00000000 observed for Wii console Miis"]
+      "word_address_for_entry_0": "0x80540628",
+      "low_byte_address_for_entry_0": "0x8054062B",
+      "notes": [
+        "Stored as a big-endian u32.",
+        "In Dolphin's byte view, the visible changing byte for entry 0 is at 0x8054062B, not 0x8054062C.",
+        "0x00000006 observed for Guest Miis.",
+        "0x00000000 observed for Wii console Miis."
+      ]
     },
     {
       "index": 1,
@@ -47,22 +54,22 @@
     {
       "entry_index": 0,
       "values": ["0x00000006", "0x00000000", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["unknown state value 6", "unknown body option/state value 0", "body/costume ID 0x52", "observed recolor slots 0"]
+      "notes": ["Mii Type 6", "unknown body option/state value 0", "body/costume ID 0x52", "observed recolor slots 0"]
     },
     {
       "entry_index": 1,
       "values": ["0x00000006", "0x00000001", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["unknown state value 6", "unknown body option/state value 1", "body/costume ID 0x52", "observed recolor slots 0"]
+      "notes": ["Mii Type 6", "unknown body option/state value 1", "body/costume ID 0x52", "observed recolor slots 0"]
     },
     {
       "entry_index": 2,
       "values": ["0x00000006", "0x00000002", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["unknown state value 6", "unknown body option/state value 2", "body/costume ID 0x52", "observed recolor slots 0"]
+      "notes": ["Mii Type 6", "unknown body option/state value 2", "body/costume ID 0x52", "observed recolor slots 0"]
     },
     {
       "entry_index": 3,
       "values": ["0x00000006", "0x00000003", "0x00000052", "0x00000000", "0x00000000", "0x00000000", "0x00000000", "0x00000000"],
-      "notes": ["unknown state value 6", "unknown body option/state value 3", "body/costume ID 0x52", "observed recolor slots 0"]
+      "notes": ["Mii Type 6", "unknown body option/state value 3", "body/costume ID 0x52", "observed recolor slots 0"]
     }
   ],
   "observed_customized_entries": [
@@ -74,7 +81,7 @@
       "notes": [
         "This confirms the values after body/costume ID are not always zero.",
         "The visible entry changed from the earlier Guest Mii default dump after each customization option was changed.",
-        "The first value also changed from 6 to 5 in this screenshot, so index 0 may also be controlled by a body customization option or state."
+        "The first word is Mii Type. In byte view, its low byte is at word address + 3."
       ]
     }
   ],
@@ -83,17 +90,17 @@
     "The second u32 increments from 0 to 3 in the first observed entries, but its exact meaning is not confirmed.",
     "The third u32 is 0x52, the observed Mii body/costume ID. This overlaps numerically with the Mii character ID, but the table role is body/costume.",
     "The fourth, fifth, sixth, and seventh u32 values are the four recolor slots.",
-    "The first u32 is still not fully named: value 6 was observed with Guest Miis, value 0 was observed after selecting a Mii from the Wii instead of a Guest Mii, and value 5 was visible after changing each body customization option."
+    "The first u32 is Mii Type. It is stored big-endian, so for entry 0 the changing byte appears at 0x8054062B."
   ],
   "observed_first_value_meanings": [
     {
       "value": "0x00000006",
-      "meaning": "observed with Guest Miis",
+      "meaning": "Guest Mii",
       "confidence": "observed"
     },
     {
       "value": "0x00000000",
-      "meaning": "observed with Wii console Miis",
+      "meaning": "Wii console Mii",
       "confidence": "observed"
     }
   ]

@@ -777,7 +777,7 @@ entry 3: 00000006 00000003 00000052 00000000 00000000 00000000 00000000 00000000
 This looks like four Mii special-part entries. Current field interpretation:
 
 ```text
-value 0 = unknown Mii source/body option state
+value 0 = Mii Type (Wii/Guest)
 value 1 = unknown body option/state value
 value 2 = body/costume ID
 value 3 = first recolor slot
@@ -798,8 +798,16 @@ The first value appears to be a Mii source/type field:
 0x00000005 = observed on the Mii body customize screen after changing each option
 ```
 
-The exact name is still tentative, but it is not just "Mii enabled"; it changes based on
-where the selected Mii came from and/or which body customization state is active.
+The value is stored as a big-endian u32. For the first entry:
+
+```text
+word address = 0x80540628
+visible low byte in Dolphin byte view = 0x8054062B
+next word starts at 0x8054062C
+```
+
+So a write/break at `0x8054062B` is still changing value 0 / Mii Type. `0x8054062C`
+is value 1, not the Mii Type byte.
 
 Additional customized entry observed at `0x80540628` after changing each body
 customization option:

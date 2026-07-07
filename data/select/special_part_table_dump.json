@@ -76,10 +76,18 @@
         "r7 = value 2 / body/costume ID",
         "r8 = value 3 / first recolor slot"
       ],
+      "pseudocode": [
+        "entry = tableBase + entryIndex * 0x20",
+        "entry[0] = miiType",
+        "entry[1] = unknownBodyOptionState",
+        "entry[2] = bodyCostumeId",
+        "entry[3] = firstRecolor"
+      ],
       "notes": [
         "This is the writer hit when the Mii Type byte at 0x8054062B changes.",
         "The function is called from the character select flow around 0x80068D98.",
-        "The remaining table values are likely passed in later registers/stack arguments; confirm in Ghidra decompile."
+        "Ghidra decompile confirms this function writes only the first four u32 values of the 0x20-byte entry.",
+        "Values 4-7 are written elsewhere."
       ]
     }
   ],

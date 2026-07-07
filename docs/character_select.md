@@ -823,7 +823,8 @@ r7            = 0x52
 r8            = 0
 ```
 
-This identifies `FUN_800F37B0` as the table-entry writer. Tentative name:
+This identifies `FUN_800F37B0` as the writer for the first half of the table entry.
+Name:
 
 ```text
 SetMiiSpecialPartTableEntry
@@ -840,8 +841,24 @@ r7 = value 2 / body/costume ID
 r8 = value 3 / first recolor slot
 ```
 
-The remaining values are likely passed through later registers or stack arguments; confirm
-from the Ghidra decompile before naming them.
+Ghidra decompile:
+
+```c
+void SetMiiSpecialPartTableEntry(int tableBase, int entryIndex,
+                                 undefined4 miiType,
+                                 undefined4 unknownBodyOptionState,
+                                 undefined4 bodyCostumeId,
+                                 undefined4 firstRecolor)
+{
+  *(undefined4 *)(tableBase + entryIndex * 0x20) = miiType;
+  tableBase = tableBase + entryIndex * 0x20;
+  *(undefined4 *)(tableBase + 4) = unknownBodyOptionState;
+  *(undefined4 *)(tableBase + 8) = bodyCostumeId;
+  *(undefined4 *)(tableBase + 0xC) = firstRecolor;
+}
+```
+
+So this function writes only values `0-3`. Values `4-7` are written elsewhere.
 
 Additional customized entry observed at `0x80540628` after changing each body
 customization option:

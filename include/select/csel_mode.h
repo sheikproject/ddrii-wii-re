@@ -104,6 +104,55 @@ void CzanUiObjectInstance_StartAnimation(double startFrame, int objectInstance, 
 void CzanSpriteObject_SetRenderMode(int spriteObject, int mode);
 void CzanUiObjectInstance_RunAnimationScript(int objectInstance, int allowUnknownOpcode);
 void CzanUiObjectInstance_ApplyColorBlocks(int objectInstance);
+void CzanUiManager_SetObjectTextureFrame(
+    int uiManager,
+    int objectGroupHandle,
+    int childObjectIndex,
+    int textureFrameOrAuto,
+    int updateSpriteDimensions);
+void CzanUiManager_ApplyObjectGroupPositionLayout(int uiManager, int objectGroupHandle, float *xyOffset);
+void CzanUiManager_ApplyChildObjectPositionLayout(
+    int uiManager,
+    int objectGroupHandle,
+    int childObjectIndex,
+    float *xyOffset);
+void CzanUiManager_ApplyObjectGroupAnimationOffset(int uiManager, int objectGroupHandle, float *xyOffset);
+void CzanUiManager_ApplyChildObjectAnimationOffset(
+    int uiManager,
+    int objectGroupHandle,
+    int childObjectIndex,
+    float *xyOffset);
+void CzanUiManager_SetObjectGroupEnabled(int uiManager, int objectGroupHandle, unsigned char enabled);
+void CzanUiManager_SetChildObjectEnabled(
+    int uiManager,
+    int objectGroupHandle,
+    int childObjectIndex,
+    unsigned char enabled);
+void CzanUiManager_LinkObjectGroupToReferenceObject(
+    int uiManager,
+    int targetObjectGroupHandle,
+    int referenceObjectGroupHandle,
+    int referenceChildIndex,
+    unsigned char linkMode);
+void CzanSpriteObject_Draw(int spriteObject, int parentTransform, int externalTransform, int drawMode);
+void CzanUiObjectInstance_Draw(int objectInstance);
+void CzanUiManager_DrawObjectListReverse(int objectList, int drawLayerFilter);
+void CzanUiManager_DrawObjectGroupInListOrder(int uiManager, int objectGroupHandle);
+void CzanUiManager_DrawChildObject(int uiManager, int objectGroupHandle, int childObjectIndex);
+void CzanDrawTexturedOrColoredQuad(
+    double u0,
+    double v0,
+    double u1,
+    double v1,
+    int spriteObject,
+    void *quadData,
+    int width,
+    unsigned int height,
+    unsigned char *vertexColors,
+    int textureObject,
+    int param11,
+    int param12);
+void CSelMode_SetHostLinkResourceSize(unsigned int resourceSize);
 int CSelMode_ModeIdToSelectedIndex(int modeId);
 const CSelModeChoice *CSelMode_GetChoice(int selectedModeIndex);
 int CSelMode_MoveSelection(int selectedModeIndex, int direction);

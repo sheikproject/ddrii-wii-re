@@ -3,6 +3,7 @@
 #include "host/host_cselect.h"
 #include "platform/render_backend.h"
 #include "render/render_engine.h"
+#include "resource/resource_manager.h"
 #include "select/csel_mode.h"
 
 #include <stdio.h>
@@ -103,14 +104,31 @@ int ModuleController_Update(ModuleControllerKnownFields *moduleController) {
 
 int CSelect_Init(void *cSelect) {
     HostCSelectModule *module = (HostCSelectModule *)cSelect;
+    ResourceHandle *selectBin;
+    unsigned char *modeSelectLinkData;
 
     /* Original initializes module ID 2, clears CSelect state, sets CSelect_VTable,
        initializes internal buffers, and clears resource/sub-screen handles. */
     module->frame = 0;
     module->selectedModeIndex = 0;
     module->redrawNeeded = 1;
+    module->selectLinkData = 0;
+    module->selectLinkSize = 0;
     puts("CSelect: init");
     CSelMode_Init(0);
-    CSelMode_OnEnter(0, 0);
+
+    selectBin = LoadResourceByPath(0, "select/select_bin_sp.bin", 0);
+    if (selectBin != 0 && selectBin->loaded && selectBin->size > 0xA0) {
+        modeSelectLinkData = (unsigned char *)selectBin->data + 0xA0;
+        module->selectLinkData = modeSelectLinkData;
+        module->selectLinkSize = (unsigned int)selectBin->size - 0xA0u;
+        CSelMode_SetHostLinkResourceSize(module->selectLinkSize);
+        CSelMode_OnEnter(0, modeSelectLinkData);
+    }
+    else {
+        puts("CSelect: failed to load select/select_bin_sp.bin");
+        CSelMode_SetHostLinkResourceSize(0);
+        CSelMode_OnEnter(0, 0);
+    }
     return 0;
 }

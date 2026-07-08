@@ -24,6 +24,7 @@ static HWND gWindow;
 static HDC gDeviceContext;
 static HGLRC gGlContext;
 static int gShouldQuit;
+static int gConfirmPressed;
 static int gWindowWidth;
 static int gWindowHeight;
 static GlTextureSet gTextureSets[MAX_GL_TEXTURE_SETS];
@@ -301,6 +302,13 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 DestroyWindow(hwnd);
                 return 0;
             }
+            if (wParam == VK_RETURN ||
+                wParam == VK_SPACE ||
+                wParam == 'A' ||
+                wParam == 'B') {
+                gConfirmPressed = 1;
+                return 0;
+            }
             break;
     }
 
@@ -420,6 +428,15 @@ void Platform_ShutdownOpenGLWindow(void) {
 int Platform_ShouldQuit(void) {
     PumpMessages();
     return gShouldQuit;
+}
+
+int Platform_ConsumeConfirmPressed(void) {
+    int pressed;
+
+    PumpMessages();
+    pressed = gConfirmPressed;
+    gConfirmPressed = 0;
+    return pressed;
 }
 
 void Platform_ApplyRenderConfig(unsigned int renderConfigColor) {

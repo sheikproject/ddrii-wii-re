@@ -1,5 +1,6 @@
 #include "runtime/boot_logo.h"
 
+#include "platform/render_backend.h"
 #include "render/render_engine.h"
 #include "resource/resource_manager.h"
 
@@ -28,10 +29,10 @@ const BootLogoConfig BootLogoConfigTable[BOOT_LOGO_CONFIG_COUNT] = {
         2,
         0,
         0,
-        1200.0f,
-        60.0f,
-        0x00017FFF,
         300.0f,
+        15.0f,
+        0x00017FFF,
+        90.0f,
         0xFFFFFFFF,
     },
     {
@@ -39,10 +40,10 @@ const BootLogoConfig BootLogoConfigTable[BOOT_LOGO_CONFIG_COUNT] = {
         1,
         0,
         0,
-        120.0f,
-        60.0f,
+        90.0f,
+        15.0f,
         0x00000810,
-        300.0f,
+        90.0f,
         0xFFFFFFFF,
     },
 };
@@ -58,6 +59,15 @@ static const char *BootLogoLogoPaths[] = {
 };
 
 static ResourceHandle *gBootLogoLoadedResource;
+
+static int BootLogoModule_ShouldSkip(const BootLogoModuleKnownFields *module,
+                                     const BootLogoConfig *config) {
+    if (module->stateTimer < config->inputSkipStartTime) {
+        return 0;
+    }
+
+    return Platform_ConsumeConfirmPressed();
+}
 
 const char *BootLogoModule_GetLogoPath(int logoRegionOrLanguageIndex) {
     int count = (int)(sizeof(BootLogoLogoPaths) / sizeof(BootLogoLogoPaths[0]));
@@ -157,7 +167,7 @@ int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
 
     if (module->state == 7) {
         module->stateTimer += 1.0f;
-        module->fadeAlpha = module->stateTimer / 60.0f;
+        module->fadeAlpha = module->stateTimer / 20.0f;
         if (module->fadeAlpha >= 1.0f) {
             module->fadeAlpha = 1.0f;
             module->state = 8;
@@ -184,6 +194,9 @@ int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
         if (module->stateTimer >= config->holdTime) {
             module->state = 10;
         }
+        else if (BootLogoModule_ShouldSkip(module, config)) {
+            module->state = 10;
+        }
     }
 
     if (module->state == 10) {
@@ -193,7 +206,7 @@ int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
 
     if (module->state == 11) {
         module->stateTimer += 1.0f;
-        module->fadeAlpha = 1.0f - module->stateTimer / 60.0f;
+        module->fadeAlpha = 1.0f - module->stateTimer / 20.0f;
         if (module->fadeAlpha <= 0.0f) {
             module->fadeAlpha = 0.0f;
             module->logoFrameIndex = 0;

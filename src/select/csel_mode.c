@@ -1,6 +1,69 @@
 #include "select/csel_mode.h"
 
+#include "resource/czan_link.h"
+
 #include <stdio.h>
+
+static unsigned int gCSelModeHostLinkResourceSize;
+
+static unsigned short ReadBe16(const unsigned char *p) {
+    return (unsigned short)(((unsigned int)p[0] << 8) | (unsigned int)p[1]);
+}
+
+static unsigned int ReadBe32(const unsigned char *p) {
+    return ((unsigned int)p[0] << 24) |
+           ((unsigned int)p[1] << 16) |
+           ((unsigned int)p[2] << 8) |
+           (unsigned int)p[3];
+}
+
+static void CSelMode_LogCaeDescriptors(const CzanLinkBlock *objectBlock, unsigned int blockIndex) {
+    CzanLinkBlock nestedBlock;
+    CzanLinkBlock caeBlock;
+    unsigned int descriptorCount;
+    unsigned int descriptorOffset;
+    unsigned int i;
+
+    if (!CzanLinkResource_GetBlock(objectBlock->data, objectBlock->size, 1, &caeBlock)) {
+        return;
+    }
+
+    if (caeBlock.size < 0x10 ||
+        caeBlock.data[0] != 'C' ||
+        caeBlock.data[1] != 'A' ||
+        caeBlock.data[2] != 'E' ||
+        caeBlock.data[3] != '_') {
+        return;
+    }
+
+    descriptorCount = ReadBe16(caeBlock.data + 8);
+    descriptorOffset = ReadBe32(caeBlock.data + 0x0C);
+    if (descriptorOffset >= caeBlock.size) {
+        return;
+    }
+
+    printf("CSelMode: block %u CAE descriptors=%u\n", blockIndex, descriptorCount);
+    for (i = 0; i < descriptorCount && i < 8; i++) {
+        const unsigned char *descriptor = caeBlock.data + descriptorOffset + i * 0x20;
+        if ((unsigned int)(descriptor - caeBlock.data) + 0x20 > caeBlock.size) {
+            break;
+        }
+
+        printf("CSelMode:   desc %u name=%.16s tex=%u type=%u animOff=0x%X\n",
+               i,
+               descriptor,
+               ReadBe16(descriptor + 0x10),
+               (unsigned int)descriptor[0x14],
+               ReadBe32(descriptor + 0x1C));
+    }
+
+    if (CzanLinkResource_GetBlock(objectBlock->data, objectBlock->size, 0, &nestedBlock) &&
+        CzanLinkResource_IsValid(nestedBlock.data, nestedBlock.size)) {
+        printf("CSelMode: block %u texture WII blockCount=%u\n",
+               blockIndex,
+               CzanLinkResource_GetBlockCount(nestedBlock.data, nestedBlock.size));
+    }
+}
 
 const CSelModeChoice CSelMode_ChoiceTable[5] = {
     { 0x02, 0x01, 0x01, -1 },
@@ -54,14 +117,38 @@ int CSelMode_Init(void *cselMode) {
 }
 
 void CSelMode_OnEnter(void *cselMode, void *linkData) {
+    unsigned int blockCount;
+    unsigned int i;
     (void)cselMode;
-    (void)linkData;
 
     /* Original links the Czan resource, builds Czan UI object groups from blocks
        0..6, reuses one shared mode-button object group across entries 7..13,
        applies region-specific position/animation tables to entries 6..13, and
        sets modeState at +0x130 to 1. */
     puts("CSelMode: on enter");
+
+    blockCount = CzanLinkResource_GetBlockCount(linkData, gCSelModeHostLinkResourceSize);
+    if (blockCount == 0) {
+        puts("CSelMode: linkData is not a valid WII resource");
+        return;
+    }
+
+    printf("CSelMode: WII link blockCount=%u\n", blockCount);
+    for (i = 0; i < blockCount && i < 7; i++) {
+        CzanLinkBlock block;
+        if (CzanLinkResource_GetBlock(linkData, gCSelModeHostLinkResourceSize, i, &block)) {
+            printf("CSelMode: block %u offset=0x%X size=0x%X\n",
+                   i,
+                   (unsigned int)(block.data - (const unsigned char *)linkData),
+                   block.size);
+            if (CzanLinkResource_IsValid(block.data, block.size)) {
+                printf("CSelMode: block %u nested WII blockCount=%u\n",
+                       i,
+                       CzanLinkResource_GetBlockCount(block.data, block.size));
+                CSelMode_LogCaeDescriptors(&block, i);
+            }
+        }
+    }
 }
 
 void CSelMode_Update(void) {
@@ -75,6 +162,10 @@ void CSelMode_SetInitialSelectedMode(void *cselMode) {
 
     /* Original reads **(cselMode + 0x10), maps mode IDs 1/2/3/6 to indices 0..3,
        and writes selectedModeIndex at cselMode + 0x134. */
+}
+
+void CSelMode_SetHostLinkResourceSize(unsigned int resourceSize) {
+    gCSelModeHostLinkResourceSize = resourceSize;
 }
 
 int CSelModeEntry_Init(void *entry) {
@@ -283,4 +374,170 @@ void CzanUiObjectInstance_ApplyColorBlocks(int objectInstance) {
     if (instance == 0) {
         return;
     }
+}
+
+void CzanUiManager_SetObjectTextureFrame(
+    int uiManager,
+    int objectGroupHandle,
+    int childObjectIndex,
+    int textureFrameOrAuto,
+    int updateSpriteDimensions) {
+    /* 0x80175448 selects/rebinds a texture frame on one child object.
+       It stores the requested frame at object +0x148, resolves -2 through
+       object +0xA8/+0x14C, updates sprite +0x34, and optionally refreshes
+       sprite dimensions at +0x100/+0x108 and half sizes at +0x78/+0x7C. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)childObjectIndex;
+    (void)textureFrameOrAuto;
+    (void)updateSpriteDimensions;
+}
+
+void CzanUiManager_ApplyObjectGroupPositionLayout(int uiManager, int objectGroupHandle, float *xyOffset) {
+    /* 0x801750E4 applies xyOffset to every child in a group:
+       object +0xD0/+0xD4 = offset, sprite +0x3C/+0x40 = object +0x30/+0x34 + offset. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)xyOffset;
+}
+
+void CzanUiManager_ApplyChildObjectPositionLayout(
+    int uiManager,
+    int objectGroupHandle,
+    int childObjectIndex,
+    float *xyOffset) {
+    /* 0x8017515C is the single-child version of CzanUiManager_ApplyObjectGroupPositionLayout. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)childObjectIndex;
+    (void)xyOffset;
+}
+
+void CzanUiManager_ApplyObjectGroupAnimationOffset(int uiManager, int objectGroupHandle, float *xyOffset) {
+    /* 0x801751B8 applies xyOffset to every child in a group:
+       object +0xE8/+0xEC = offset, sprite +0x90/+0x94 =
+       object scale +0xF4/+0xF8 * (object +0x48/+0x4C + offset). */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)xyOffset;
+}
+
+void CzanUiManager_ApplyChildObjectAnimationOffset(
+    int uiManager,
+    int objectGroupHandle,
+    int childObjectIndex,
+    float *xyOffset) {
+    /* 0x80175240 is the single-child version of CzanUiManager_ApplyObjectGroupAnimationOffset. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)childObjectIndex;
+    (void)xyOffset;
+}
+
+void CzanUiManager_SetObjectGroupEnabled(int uiManager, int objectGroupHandle, unsigned char enabled) {
+    /* 0x80174F04 sets object +0x173 for every child in the group. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)enabled;
+}
+
+void CzanUiManager_SetChildObjectEnabled(
+    int uiManager,
+    int objectGroupHandle,
+    int childObjectIndex,
+    unsigned char enabled) {
+    /* 0x80174F40 sets object +0x173 for one child in the group. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)childObjectIndex;
+    (void)enabled;
+}
+
+void CzanUiManager_LinkObjectGroupToReferenceObject(
+    int uiManager,
+    int targetObjectGroupHandle,
+    int referenceObjectGroupHandle,
+    int referenceChildIndex,
+    unsigned char linkMode) {
+    /* 0x80176D68 links every target child to one reference object:
+       target object +0x190 = reference object, target sprite +0x1B0 =
+       reference sprite, target sprite +0x1B4 = linkMode. */
+    (void)uiManager;
+    (void)targetObjectGroupHandle;
+    (void)referenceObjectGroupHandle;
+    (void)referenceChildIndex;
+    (void)linkMode;
+}
+
+void CzanSpriteObject_Draw(int spriteObject, int parentTransform, int externalTransform, int drawMode) {
+    /* 0x80170354 is the high-level Czan sprite draw dispatcher. It checks sprite
+       active/texture/dimension state, applies render state, selects a draw mode,
+       then calls a low-level quad emitter such as CzanDrawTexturedOrColoredQuad. */
+    (void)spriteObject;
+    (void)parentTransform;
+    (void)externalTransform;
+    (void)drawMode;
+}
+
+void CzanUiObjectInstance_Draw(int objectInstance) {
+    /* 0x801729B4 is the per-object Czan draw wrapper. It can run up to eight
+       child/pre-post callbacks, resolves linked sprite state at object +0x28,
+       writes sprite +0x1A8, and calls CzanSpriteObject_Draw(object +0x24, ...).
+       It uses object +0x173 as enabled/visibility, +0x198 as descriptor,
+       +0x16C as animation index, +0x148 as texture-frame override, and +0x1A4
+       as the owning object-group handle. */
+    (void)objectInstance;
+}
+
+void CzanUiManager_DrawObjectListReverse(int objectList, int drawLayerFilter) {
+    /* 0x80174BA8 draws an object list from last to first. It skips when list
+       +0x19 is set or +0x1C is null, draws only objects with +0x181 == 1, and
+       filters by object +0x18C unless drawLayerFilter is -1. */
+    (void)objectList;
+    (void)drawLayerFilter;
+}
+
+void CzanUiManager_DrawObjectGroupInListOrder(int uiManager, int objectGroupHandle) {
+    /* 0x80174C58 draws only children belonging to one object group, while
+       preserving the global object-list reverse order from uiManager +0x1C.
+       The group is uiManager +0x04 + objectGroupHandle * 0x28. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+}
+
+void CzanUiManager_DrawChildObject(int uiManager, int objectGroupHandle, int childObjectIndex) {
+    /* 0x80174CF8 directly draws one child:
+       uiManager->groups[objectGroupHandle].children[childObjectIndex]. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)childObjectIndex;
+}
+
+void CzanDrawTexturedOrColoredQuad(
+    double u0,
+    double v0,
+    double u1,
+    double v1,
+    int spriteObject,
+    void *quadData,
+    int width,
+    unsigned int height,
+    unsigned char *vertexColors,
+    int textureObject,
+    int param11,
+    int param12) {
+    /* 0x8016BE18 is the low-level GX quad emitter. textureObject == 0 emits a
+       colored quad; nonzero loads a GX texture object and emits textured vertices. */
+    (void)u0;
+    (void)v0;
+    (void)u1;
+    (void)v1;
+    (void)spriteObject;
+    (void)quadData;
+    (void)width;
+    (void)height;
+    (void)vertexColors;
+    (void)textureObject;
+    (void)param11;
+    (void)param12;
 }

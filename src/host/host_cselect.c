@@ -1,5 +1,6 @@
 #include "host/host_cselect.h"
 
+#include "render/render_engine.h"
 #include "select/csel_mode.h"
 
 #include <conio.h>
@@ -87,7 +88,8 @@ static void Host_DrawCSelModeMenu(int selectedModeIndex) {
     int i;
     const CSelModeChoice *choice;
 
-    system("cls");
+    puts("");
+    puts("---");
     puts("DDRII Host Skeleton");
     puts("===================");
     puts("");
@@ -115,6 +117,15 @@ static void Host_DrawCSelModeMenu(int selectedModeIndex) {
     puts("A/Left: previous   D/Right: next   Enter: confirm   Esc/B: exit");
 }
 
+static void Host_DrawCSelModeGl(const HostCSelectModule *module) {
+    unsigned int backgroundColor = 0x74DDFDFF;
+    (void)module;
+
+    RenderBeginFrame();
+    ApplyRenderConfig(0, &backgroundColor);
+    RenderEndFrame();
+}
+
 int CSelect_TickHost(void *cSelect) {
     HostCSelectModule *module = (HostCSelectModule *)cSelect;
     int input;
@@ -128,6 +139,8 @@ int CSelect_TickHost(void *cSelect) {
         module->redrawNeeded = 0;
     }
 
+    Host_DrawCSelModeGl(module);
+
     input = Host_ReadInput();
     if (input == HOST_INPUT_LEFT) {
         module->selectedModeIndex = CSelMode_MoveSelection(module->selectedModeIndex, -1);
@@ -138,13 +151,11 @@ int CSelect_TickHost(void *cSelect) {
         module->redrawNeeded = 1;
     }
     else if (input == HOST_INPUT_CONFIRM) {
-        system("cls");
         puts("CSelMode: confirm");
         Host_PrintCSelModeChoiceDetails(module->selectedModeIndex);
         return 1;
     }
     else if (input == HOST_INPUT_BACK) {
-        system("cls");
         puts("CSelMode: back/exit");
         return 1;
     }

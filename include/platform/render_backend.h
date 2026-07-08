@@ -25,5 +25,6 @@ int Platform_TextureSlotInitFromTpl(TextureSlotKnownFields *textureSlot);
 int Platform_InitOpenGLWindow(const char *title, int width, int height);
 void Platform_ShutdownOpenGLWindow(void);
 int Platform_ShouldQuit(void);
+int Platform_ConsumeConfirmPressed(void);
 
 #endif

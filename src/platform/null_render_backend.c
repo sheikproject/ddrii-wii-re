@@ -96,3 +96,7 @@ void Platform_ShutdownOpenGLWindow(void) {
 int Platform_ShouldQuit(void) {
     return 0;
 }
+
+int Platform_ConsumeConfirmPressed(void) {
+    return 0;
+}

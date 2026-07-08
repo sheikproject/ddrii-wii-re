@@ -11,6 +11,7 @@ cl /nologo /Iinclude ^
   src\render\render_engine.c ^
   src\platform\win32_gl_backend.c ^
   src\resource\resource_manager.c ^
+  src\resource\czan_link.c ^
   src\select\csel_mode.c ^
   /Feoutputs\ddrii_host_gl.exe ^
   /link user32.lib gdi32.lib opengl32.lib

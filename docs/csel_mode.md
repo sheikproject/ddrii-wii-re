@@ -263,17 +263,185 @@ FUN_80110754 -> CSelModeEntry_SetAnimationOrLayout
   If animationId == -1, calls FUN_801751B8(entry->uiManager, handle, animationData).
   Otherwise calls FUN_80175240(entry->uiManager, handle).
 
+FUN_801106E8 -> CSelModeEntry_SetPositionOrLayout
+  If childObjectIndex == -1, calls FUN_801750E4(entry->uiManager, handle, layoutData).
+  Otherwise calls FUN_8017515C(entry->uiManager, handle).
+
 FUN_80110B80 -> CSelModeEntry_PlayObject
-  Calls FUN_80175448(entry->uiManager, handle).
+  Calls FUN_80175448(entry->uiManager, handle, childObjectIndex, textureFrameOrAuto,
+  updateSpriteDimensions).
 
 FUN_80110BF4 -> CSelModeEntry_SetTransformTriplet
   Copies three 32-bit values into entry +0x44, +0x48, +0x4C.
 ```
 
+`FUN_80175448` is best named:
+
+```text
+CzanUiManager_SetObjectTextureFrame
+```
+
+Suggested signature:
+
+```c
+void CzanUiManager_SetObjectTextureFrame(
+    int uiManager,
+    int objectGroupHandle,
+    int childObjectIndex,
+    int textureFrameOrAuto,
+    int updateSpriteDimensions);
+```
+
+Confirmed behavior:
+
+```text
+uiManager +0x04                     -> object group table
+objectGroupHandle * 0x28 +0x20      -> child object pointer array
+childObjectIndex                    -> selects one CzanUiObjectInstance
+CzanUiObjectInstance +0x148         -> requested/override texture frame
+CzanUiObjectInstance +0xA8/+0x14C   -> automatic texture frame when textureFrameOrAuto == -2
+CzanUiObjectInstance +0x24          -> attached CzanSpriteObject
+CzanSpriteObject +0x24              -> texture set handle
+CzanSpriteObject +0x34              -> active texture frame/index
+CzanSpriteObject +0x28              -> active texture descriptor/header
+CzanSpriteObject +0x100/+0x108      -> texture dimensions copied from the TPL descriptor
+CzanSpriteObject +0x78/+0x7C        -> half width/height as floats
+```
+
+So `CSelModeEntry_PlayObject` is not a full draw/layout function. It selects or refreshes
+the texture frame for a child object and optionally updates dimensions from the TPL
+descriptor. The missing composition behavior is still in the helpers that apply layout,
+visibility, transforms, and animation state.
+
 These helpers strongly suggest the mode-select background/UI is not raw texture drawing.
 `CSelMode_OnEnter` creates UI/model object handles from Czan link blocks and then applies
 animation/layout commands through the `FUN_80175xxx` family. The next renderer target
 should be those Czan UI/object functions, not direct `selTitle` texture guessing.
+
+## Czan Sprite Draw Dispatch
+
+`FUN_801729B4` is the per-object draw wrapper above `CzanSpriteObject_Draw`. Suggested
+name:
+
+```text
+CzanUiObjectInstance_Draw
+```
+
+Important behavior:
+
+```text
+object +0x000..+0x01C -> up to eight callback/child pointers run before/after draw
+object +0x020 -> owning Czan UI manager
+object +0x024 -> attached CzanSpriteObject passed to CzanSpriteObject_Draw
+object +0x028 -> resolved linked sprite candidate
+object +0x148 -> texture-frame override; -1 affects skip/link path
+object +0x160 -> object state/id used when resolving linked child sprite
+object +0x16C -> current animation index
+object +0x173 -> enabled/visibility flag checked before drawing
+object +0x198 -> CAE descriptor
+object +0x1A0 -> callback ordering flag
+object +0x1A4 -> owning object-group handle
+```
+
+When drawing is allowed, it writes:
+
+```text
+sprite +0x1A8 = object +0x28
+```
+
+Then it calls:
+
+```text
+CzanSpriteObject_Draw(object +0x24, 0, 0, -1)
+```
+
+or, when the current animation entry flag bit is set:
+
+```text
+CzanSpriteObject_Draw(object +0x24, &DAT_802EF3A8, &DAT_802EF368, -1)
+```
+
+`FUN_80174BA8`, `FUN_80174C58`, and `FUN_80174CF8` are the Czan draw traversal helpers:
+
+```text
+FUN_80174BA8 -> CzanUiManager_DrawObjectListReverse(objectList, drawLayerFilter)
+FUN_80174C58 -> CzanUiManager_DrawObjectGroupInListOrder(uiManager, objectGroupHandle)
+FUN_80174CF8 -> CzanUiManager_DrawChildObject(uiManager, objectGroupHandle, childObjectIndex)
+```
+
+`CzanUiManager_DrawObjectListReverse` draws the global object list from last to first,
+skipping objects unless `object +0x181 == 1` and the optional layer filter matches
+`object +0x18C`.
+
+`CzanUiManager_DrawObjectGroupInListOrder` filters the global list down to children of
+one object group, preserving the same reverse global draw order.
+
+`CzanUiManager_DrawChildObject` directly draws one child from a group.
+
+`FUN_80170354` is the higher-level Czan sprite draw dispatcher. Suggested name:
+
+```text
+CzanSpriteObject_Draw
+```
+
+It gets the current sprite/render context through `FUN_8012A164`, checks that the sprite
+is active, has a valid texture frame, and has nonzero draw dimensions, copies/adjusts
+the four vertex color blocks, applies GX render state, chooses a draw mode, and then
+calls a low-level quad emitter.
+
+Important fields consumed:
+
+```text
+sprite +0x020 -> active flag
+sprite +0x034 -> active texture frame/index
+sprite +0x090/+0x094 -> secondary dimensions/scale; both must be nonzero
+sprite +0x0B4..+0x0C3 -> four RGBA vertex color blocks
+sprite +0x0C8/+0x0CC/+0x0D0/+0x0D4 -> quad corner/edge inputs
+sprite +0x0D8/+0x0DC -> pivot/offset added to quad X/Y inputs
+sprite +0x0E0..+0x0FC -> final corner values consumed by low-level quad emitters
+sprite +0x104/+0x108 -> width/height passed to draw variants
+sprite +0x10C -> transform/matrix source copied before draw
+sprite +0x16C/+0x170/+0x174 -> color-channel/TEV state
+sprite +0x178/+0x17C/+0x180/+0x184 -> blend/render mode state
+sprite +0x188/+0x18C/+0x190/+0x194/+0x198/+0x19C -> alpha/compare/blend state
+sprite +0x1A0 -> extra render-state value
+sprite +0x1A8/+0x1AC -> optional linked object/texture state
+sprite +0x1C0 -> requested draw mode; if caller passes -1, mode can be derived
+sprite +0x1D4 -> dummy/no-texture flag; when clear, passes sprite pointer to quad emitter
+```
+
+Draw mode dispatch:
+
+```text
+mode 0 -> CzanDrawTexturedOrColoredQuad / FUN_8016BE18
+mode 1 -> FUN_8016D08C
+mode 2 -> FUN_8016D698
+mode 3 -> FUN_8016C3B8
+mode 4 -> FUN_8016C768
+mode 5 -> FUN_8016CC84
+mode 6 -> FUN_8016DEC0
+mode 7 -> FUN_8016E34C
+mode 8 -> FUN_8016E9F0
+```
+
+For common draw mode `0`, the caller passes:
+
+```text
+x0 = sprite +0x0C8 + sprite +0x0D8
+y0 = sprite +0x0CC + sprite +0x0DC
+x1 = sprite +0x0D0 + sprite +0x0D8
+y1 = sprite +0x0D4 + sprite +0x0DC
+sprite pointer
+sprite +0x78
+sprite +0x104
+sprite +0x108
+adjusted vertex colors
+texture/dummy pointer
+```
+
+`FUN_8016BE18` / `CzanDrawTexturedOrColoredQuad` is the low-level GX quad emitter. It
+loads a texture object when one is provided, then writes four vertices/colors directly
+to the GX FIFO.
 
 ## Czan UI Object Group Creation
 
@@ -541,6 +709,10 @@ allowUnknownOpcode  -> nonzero skips/assert-suppresses unknown/default opcodes; 
 The decompiler for this function shows no formal params because the compiler/runtime
 context helper `FUN_8012A160` recovers them internally. The call site in
 `CzanUiManager_CreateObjectGroup` passes `(objectInstance, 1)`.
+
+This function appears in xrefs to `BindTextureFromTextureSet`, but it is not the final
+sprite draw function. It interprets CAE animation commands and writes derived state into
+the attached `CzanSpriteObject`; a later renderer must consume the sprite fields.
 
 The active command pointer is `objectInstance +0x19C`. The stream is float-aligned; the
 opcode is read as `(int)*(float *)currentCommand`.

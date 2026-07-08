@@ -5,6 +5,8 @@ typedef struct HostCSelectModule {
     int frame;
     int selectedModeIndex;
     int redrawNeeded;
+    void *selectLinkData;
+    unsigned int selectLinkSize;
 } HostCSelectModule;
 
 int CSelect_TickHost(void *cSelect);

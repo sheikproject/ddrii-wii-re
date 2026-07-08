@@ -27,12 +27,83 @@ typedef struct CSelModeKnownFields {
     void *characterAssetSystem;
 } CSelModeKnownFields;
 
+typedef struct CSelModeEntryKnownFields {
+    unsigned char base[0x14];
+    int objectHandles[8];
+    int objectHandleCount;
+    unsigned char reserved38[4];
+    void *uiManager;
+    void *vtable;
+    int transformOrState0;
+    int transformOrState1;
+    int transformOrState2;
+} CSelModeEntryKnownFields;
+
+typedef struct CzanUiObjectInstanceKnownFields {
+    unsigned char matrixOrBase[0x20];
+    void *manager;
+    void *spriteObject;
+    int reserved28;
+    int reserved2c;
+    unsigned char transformAndColorState[0x120];
+    int animationCounterOrTimer;
+    int currentAnimationId;
+    int activeAnimationEntry;
+    int initialAnimIndex;
+    unsigned char flags170[0x10];
+    float playbackRate;
+    unsigned char flags17c[0x0c];
+    int unknownHandle188;
+    int unknown18c;
+    int unknown190;
+    int unknown194;
+    void *descriptor;
+    int currentAnimValue;
+    unsigned char tail[0x14];
+} CzanUiObjectInstanceKnownFields;
+
+typedef struct CzanSpriteObjectKnownFields {
+    unsigned char base[0x20];
+    int enabled;
+    void *textureSlot;
+    void *textureHeader;
+    int textureResourceHandle;
+    int textureIndex;
+    int uvOrFrameIndex;
+    unsigned char xAnchorMode;
+    unsigned char yAnchorMode;
+    unsigned char ownsTexture;
+    unsigned char textureReady;
+    unsigned char transformState[0x78];
+    unsigned char color0[4];
+    unsigned char color1[4];
+    unsigned char color2[4];
+    unsigned char color3[4];
+    unsigned char parameterBlock[0xa8];
+    unsigned char visibleFlag;
+    unsigned char renderMode174;
+    unsigned char tail[0x63];
+} CzanSpriteObjectKnownFields;
+
 extern const CSelModeChoice CSelMode_ChoiceTable[5];
 
 int CSelMode_Init(void *cselMode);
 void CSelMode_OnEnter(void *cselMode, void *linkData);
 void CSelMode_Update(void);
 void CSelMode_SetInitialSelectedMode(void *cselMode);
+int CSelModeEntry_Init(void *entry);
+int CSelModeEntry_Update(void *entry, short activeCountOrFlag);
+int CSelModeEntry_AddUiObject(void *entry, int linkBlock);
+int CSelModeEntry_AddChildUiObject(void *entry, int objectId);
+void CSelModeEntry_SetAnimationOrLayout(void *entry, int objectSlot, int animationId, int animationData);
+void CSelModeEntry_PlayObject(void *entry, int objectSlot);
+void CSelModeEntry_SetTransformTriplet(void *entry, const int *values);
+int CzanUiObjectInstance_Init(void *objectInstance);
+int CzanSpriteObject_Init(void *spriteObject);
+void CzanUiObjectInstance_StartAnimation(double startFrame, int objectInstance, int animationIndex);
+void CzanSpriteObject_SetRenderMode(int spriteObject, int mode);
+void CzanUiObjectInstance_RunAnimationScript(int objectInstance, int allowUnknownOpcode);
+void CzanUiObjectInstance_ApplyColorBlocks(int objectInstance);
 int CSelMode_ModeIdToSelectedIndex(int modeId);
 const CSelModeChoice *CSelMode_GetChoice(int selectedModeIndex);
 int CSelMode_MoveSelection(int selectedModeIndex, int direction);

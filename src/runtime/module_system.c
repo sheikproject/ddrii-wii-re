@@ -2,6 +2,7 @@
 #include "runtime/boot_logo.h"
 #include "host/host_cselect.h"
 #include "platform/render_backend.h"
+#include "render/render_engine.h"
 #include "select/csel_mode.h"
 
 #include <stdio.h>
@@ -86,7 +87,9 @@ int ModuleController_Update(ModuleControllerKnownFields *moduleController) {
     switch (moduleController->activeModuleId) {
         case MODULE_ID_BOOT_LOGO:
             nextModuleId = BootLogoModule_Tick(moduleController->activeModule, MODULE_ID_BOOT_LOGO);
+            RenderBeginFrame();
             BootLogoModule_Draw(moduleController->activeModule);
+            RenderEndFrame();
             if (nextModuleId != MODULE_ID_BOOT_LOGO) {
                 moduleController->pendingModuleId = nextModuleId;
             }

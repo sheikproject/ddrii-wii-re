@@ -6,6 +6,14 @@ void Platform_ApplyRenderConfig(unsigned int renderConfigColor) {
     printf("render backend: ApplyRenderConfig color=0x%08X\n", renderConfigColor);
 }
 
+void Platform_BeginFrame(void) {
+    puts("render backend: BeginFrame");
+}
+
+void Platform_EndFrame(void) {
+    puts("render backend: EndFrame");
+}
+
 int Platform_GetTextureDimensions(void *textureHandle, int textureIndex, int *width, int *height) {
     (void)textureHandle;
 

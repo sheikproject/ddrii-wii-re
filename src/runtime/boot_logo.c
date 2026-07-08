@@ -256,6 +256,7 @@ void BootLogoModule_Draw(void *bootLogoModule) {
         fadeOverlayAlpha = 1.0f;
     }
 
-    fadeColor = (unsigned int)(fadeOverlayAlpha * 255.0f) & 0xFFu;
+    fadeColor = (config.renderConfigColor & 0xFFFFFF00u) |
+                ((unsigned int)(fadeOverlayAlpha * 255.0f) & 0xFFu);
     DrawFilledRect(0, 0, 0, module->screenWidth, module->screenHeight, &fadeColor, 0);
 }

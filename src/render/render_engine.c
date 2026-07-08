@@ -4,6 +4,14 @@
 
 #define TEXTURE_SLOT_AUTO 0xFFFFFFFFu
 
+void RenderBeginFrame(void) {
+    Platform_BeginFrame();
+}
+
+void RenderEndFrame(void) {
+    Platform_EndFrame();
+}
+
 void ApplyRenderConfig(int screenManager, const unsigned int *renderConfigColor) {
     (void)screenManager;
 

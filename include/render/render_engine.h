@@ -22,6 +22,8 @@ typedef struct TextureManagerKnownFields {
     unsigned int slotCount;
 } TextureManagerKnownFields;
 
+void RenderBeginFrame(void);
+void RenderEndFrame(void);
 void ApplyRenderConfig(int screenManager, const unsigned int *renderConfigColor);
 int GetTextureDimensions(void *textureHandle, int textureIndex, int *width, int *height);
 void DrawTexturedQuad(

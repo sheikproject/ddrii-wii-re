@@ -4,6 +4,8 @@
 #include "render/render_engine.h"
 
 void Platform_ApplyRenderConfig(unsigned int renderConfigColor);
+void Platform_BeginFrame(void);
+void Platform_EndFrame(void);
 int Platform_GetTextureDimensions(void *textureHandle, int textureIndex, int *width, int *height);
 int Platform_BindTextureFromTextureSet(void *textureHandle, void *outTextureObject, int textureIndex);
 void Platform_DrawTexturedQuad(

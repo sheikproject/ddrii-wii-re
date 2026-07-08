@@ -75,6 +75,217 @@ static void DecodeRgba32(const unsigned char *source, unsigned char *dest, int w
     }
 }
 
+static void WritePixel(unsigned char *dest, int width, int x, int y,
+                       unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
+    unsigned char *pixel = dest + (y * width + x) * 4;
+
+    pixel[0] = r;
+    pixel[1] = g;
+    pixel[2] = b;
+    pixel[3] = a;
+}
+
+static unsigned char Expand4(unsigned int value) {
+    value &= 0xF;
+    return (unsigned char)((value << 4) | value);
+}
+
+static unsigned char Expand5(unsigned int value) {
+    value &= 0x1F;
+    return (unsigned char)((value << 3) | (value >> 2));
+}
+
+static unsigned char Expand6(unsigned int value) {
+    value &= 0x3F;
+    return (unsigned char)((value << 2) | (value >> 4));
+}
+
+static void DecodeIa4(const unsigned char *source, unsigned char *dest, int width, int height) {
+    int blockX;
+    int blockY;
+    const unsigned char *block = source;
+
+    for (blockY = 0; blockY < height; blockY += 4) {
+        for (blockX = 0; blockX < width; blockX += 8) {
+            int y;
+            int x;
+
+            for (y = 0; y < 4; y++) {
+                for (x = 0; x < 8; x++) {
+                    int px = blockX + x;
+                    int py = blockY + y;
+                    unsigned char value = block[y * 8 + x];
+                    unsigned char alpha = Expand4(value >> 4);
+                    unsigned char intensity = Expand4(value);
+
+                    if (px < width && py < height) {
+                        WritePixel(dest, width, px, py, intensity, intensity, intensity, alpha);
+                    }
+                }
+            }
+            block += 32;
+        }
+    }
+}
+
+static void DecodeIa8(const unsigned char *source, unsigned char *dest, int width, int height) {
+    int blockX;
+    int blockY;
+    const unsigned char *block = source;
+
+    for (blockY = 0; blockY < height; blockY += 4) {
+        for (blockX = 0; blockX < width; blockX += 4) {
+            int y;
+            int x;
+
+            for (y = 0; y < 4; y++) {
+                for (x = 0; x < 4; x++) {
+                    int px = blockX + x;
+                    int py = blockY + y;
+                    unsigned char alpha = block[(y * 4 + x) * 2 + 0];
+                    unsigned char intensity = block[(y * 4 + x) * 2 + 1];
+
+                    if (px < width && py < height) {
+                        WritePixel(dest, width, px, py, intensity, intensity, intensity, alpha);
+                    }
+                }
+            }
+            block += 32;
+        }
+    }
+}
+
+static void DecodeRgb5a3(const unsigned char *source, unsigned char *dest, int width, int height) {
+    int blockX;
+    int blockY;
+    const unsigned char *block = source;
+
+    for (blockY = 0; blockY < height; blockY += 4) {
+        for (blockX = 0; blockX < width; blockX += 4) {
+            int y;
+            int x;
+
+            for (y = 0; y < 4; y++) {
+                for (x = 0; x < 4; x++) {
+                    int px = blockX + x;
+                    int py = blockY + y;
+                    unsigned short value = ReadBe16(block, (unsigned int)((y * 4 + x) * 2));
+                    unsigned char r;
+                    unsigned char g;
+                    unsigned char b;
+                    unsigned char a;
+
+                    if ((value & 0x8000) != 0) {
+                        a = 0xFF;
+                        r = Expand5(value >> 10);
+                        g = Expand5(value >> 5);
+                        b = Expand5(value);
+                    }
+                    else {
+                        a = (unsigned char)(((value >> 12) & 7) * 255 / 7);
+                        r = Expand4(value >> 8);
+                        g = Expand4(value >> 4);
+                        b = Expand4(value);
+                    }
+
+                    if (px < width && py < height) {
+                        WritePixel(dest, width, px, py, r, g, b, a);
+                    }
+                }
+            }
+            block += 32;
+        }
+    }
+}
+
+static void DecodeCmprSubBlock(const unsigned char *block, unsigned char *dest, int width, int height,
+                               int blockX, int blockY) {
+    unsigned short c0 = ReadBe16(block, 0);
+    unsigned short c1 = ReadBe16(block, 2);
+    unsigned int bits = ReadBe32(block, 4);
+    unsigned char color[4][4];
+    int i;
+
+    color[0][0] = Expand5(c0 >> 11);
+    color[0][1] = Expand6(c0 >> 5);
+    color[0][2] = Expand5(c0);
+    color[0][3] = 0xFF;
+    color[1][0] = Expand5(c1 >> 11);
+    color[1][1] = Expand6(c1 >> 5);
+    color[1][2] = Expand5(c1);
+    color[1][3] = 0xFF;
+
+    if (c0 > c1) {
+        for (i = 0; i < 3; i++) {
+            color[2][i] = (unsigned char)((2 * color[0][i] + color[1][i]) / 3);
+            color[3][i] = (unsigned char)((color[0][i] + 2 * color[1][i]) / 3);
+        }
+        color[2][3] = 0xFF;
+        color[3][3] = 0xFF;
+    }
+    else {
+        for (i = 0; i < 3; i++) {
+            color[2][i] = (unsigned char)((color[0][i] + color[1][i]) / 2);
+            color[3][i] = 0;
+        }
+        color[2][3] = 0xFF;
+        color[3][3] = 0;
+    }
+
+    for (i = 0; i < 16; i++) {
+        int px = blockX + (i & 3);
+        int py = blockY + (i >> 2);
+        unsigned int index = (bits >> (30 - i * 2)) & 3;
+
+        if (px < width && py < height) {
+            WritePixel(dest, width, px, py,
+                       color[index][0],
+                       color[index][1],
+                       color[index][2],
+                       color[index][3]);
+        }
+    }
+}
+
+static void DecodeCmpr(const unsigned char *source, unsigned char *dest, int width, int height) {
+    int blockX;
+    int blockY;
+    const unsigned char *block = source;
+
+    for (blockY = 0; blockY < height; blockY += 8) {
+        for (blockX = 0; blockX < width; blockX += 8) {
+            DecodeCmprSubBlock(block + 0, dest, width, height, blockX, blockY);
+            DecodeCmprSubBlock(block + 8, dest, width, height, blockX + 4, blockY);
+            DecodeCmprSubBlock(block + 16, dest, width, height, blockX, blockY + 4);
+            DecodeCmprSubBlock(block + 24, dest, width, height, blockX + 4, blockY + 4);
+            block += 32;
+        }
+    }
+}
+
+static int DecodeTplTexture(const unsigned char *source, unsigned char *dest,
+                            int width, int height, unsigned int format) {
+    switch (format) {
+        case 2:
+            DecodeIa4(source, dest, width, height);
+            return 1;
+        case 3:
+            DecodeIa8(source, dest, width, height);
+            return 1;
+        case 5:
+            DecodeRgb5a3(source, dest, width, height);
+            return 1;
+        case 6:
+            DecodeRgba32(source, dest, width, height);
+            return 1;
+        case 14:
+            DecodeCmpr(source, dest, width, height);
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     (void)lParam;
 
@@ -212,7 +423,21 @@ int Platform_ShouldQuit(void) {
 }
 
 void Platform_ApplyRenderConfig(unsigned int renderConfigColor) {
-    (void)renderConfigColor;
+    float r = (float)((renderConfigColor >> 24) & 0xFF) / 255.0f;
+    float g = (float)((renderConfigColor >> 16) & 0xFF) / 255.0f;
+    float b = (float)((renderConfigColor >> 8) & 0xFF) / 255.0f;
+    float a = (float)(renderConfigColor & 0xFF) / 255.0f;
+
+    glClearColor(r, g, b, a);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
+
+void Platform_BeginFrame(void) {
+    PumpMessages();
+}
+
+void Platform_EndFrame(void) {
+    SwapBuffers(gDeviceContext);
 }
 
 int Platform_GetTextureDimensions(void *textureHandle, int textureIndex, int *width, int *height) {
@@ -255,8 +480,6 @@ void Platform_DrawTexturedQuad(
     (void)textureHandle;
     (void)textureIndex;
 
-    PumpMessages();
-    glClear(GL_COLOR_BUFFER_BIT);
     glColor4f(color[0] / 255.0f, color[1] / 255.0f, color[2] / 255.0f, alpha);
     glBegin(GL_QUADS);
     glTexCoord2f(0.0f, 0.0f);
@@ -287,7 +510,6 @@ void Platform_DrawFilledRect(int x, int y, int z, int width, int height, const u
     glVertex2i(x, y + height);
     glEnd();
     glEnable(GL_TEXTURE_2D);
-    SwapBuffers(gDeviceContext);
 }
 
 unsigned int Platform_CreateTextureFromTplResource(
@@ -344,7 +566,10 @@ unsigned int Platform_CreateTextureFromTplResource(
         width = ReadBe16(data, textureHeaderOffset + 2);
         format = ReadBe32(data, textureHeaderOffset + 4);
         imageOffset = ReadBe32(data, textureHeaderOffset + 8);
-        if (format != 6 || imageOffset >= (unsigned int)size) {
+        if (imageOffset >= (unsigned int)size) {
+            continue;
+        }
+        if (format != 2 && format != 3 && format != 5 && format != 6 && format != 14) {
             printf("OpenGL backend: unsupported texture %u format=%u\n", i, format);
             continue;
         }
@@ -353,7 +578,10 @@ unsigned int Platform_CreateTextureFromTplResource(
         if (pixels == 0) {
             continue;
         }
-        DecodeRgba32(data + imageOffset, pixels, width, height);
+        if (!DecodeTplTexture(data + imageOffset, pixels, width, height, format)) {
+            free(pixels);
+            continue;
+        }
 
         glGenTextures(1, &id);
         glBindTexture(GL_TEXTURE_2D, id);

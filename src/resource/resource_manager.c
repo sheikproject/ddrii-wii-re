@@ -75,3 +75,18 @@ ResourceHandle *LoadResourceByPath(void *resourceManager, const char *path, int 
            gLastLoadedResource.size);
     return &gLastLoadedResource;
 }
+
+void LargeResourceManager_ReloadFromLink(int *largeResourceManager, int linkData) {
+    /* 0x80025CA0 reloads the huge global manager allocated at DAT_802E70BC
+       with size 0x3010B8. It initializes a CzanLinkManager-like stack object
+       through CzanLinkManager_InitAndSetLink, tears down existing state if largeResourceManager[0]
+       is nonzero, loads block 0 into the sub-manager at +0x2FBA7C, initializes
+       a common manager at +0x10, initializes seven large banks starting at
+       +0x91610 with stride 0x58534, marks the manager active, refreshes state,
+       then releases the stack link manager with releaseMode -1.
+
+       Bank setup passes 0x5460 for banks 0..4 and 0 for banks 5..6.
+       The listing confirms incoming r4 is passed through as linkData. */
+    (void)largeResourceManager;
+    (void)linkData;
+}

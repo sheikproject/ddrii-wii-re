@@ -9,5 +9,6 @@ typedef struct ResourceHandle {
 } ResourceHandle;
 
 ResourceHandle *LoadResourceByPath(void *resourceManager, const char *path, int flags);
+void LargeResourceManager_ReloadFromLink(int *largeResourceManager, int linkData);
 
 #endif

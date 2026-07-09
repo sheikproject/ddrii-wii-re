@@ -243,3 +243,206 @@ state 0x11 -> DDR Points/display related screen, ctor 0x800F8EC0, size 0x160
 state 0x1D -> transition into game module/CGame path
 ```
 
+## CGame Setup
+
+`FUN_8003CDC4` is the CGame setup/loading state machine run after `CGameFactorySetup`.
+Suggested name:
+
+```text
+CGame_PrepareManagersAndResources
+```
+
+Confirmed key fields:
+
+```text
+cgame +0x008 -> next/active module state
+cgame +0x00C -> setup substate
+cgame +0x0B8 -> setup mode; -1 means use player-data path directly
+cgame +0x3F0 -> subsystem pointer
+cgame +0x3F4 -> subsystem pointer
+cgame +0x3F8 -> subsystem pointer
+cgame +0x3FC -> subsystem pointer
+cgame +0x400 -> subsystem pointer
+cgame +0x404 -> subsystem pointer
+cgame +0x408 -> subsystem pointer
+cgame +0x40C -> subsystem pointer
+cgame +0x410 -> subsystem pointer
+cgame +0x428 -> subsystem pointer
+cgame +0x42C -> optional owned object/resource pointer
+```
+
+Confirmed substates:
+
+```text
+0:
+  reset global managers and owned subsystems
+  if cgame +0x0B8 == -1:
+    copy player-data settings into cgame +0x0B8..+0x0D8
+    configure subsystem at +0x3F0
+    substate = 3
+  else:
+    BootResourceBundle_StartLoading(gBootTempManager)
+    substate = 1
+
+1:
+  wait until FUN_8002202C(gBootTempManager) != 0
+  BootResourceBundle_ApplyLoadedResources(gBootTempManager)
+  substate = 2
+
+2:
+  result = FUN_8003C9A0(cgame)
+  if result == -1:
+    cgame +0x08 = 5
+  else if result == 1:
+    configure subsystem at +0x3F0
+    substate = 3
+
+3:
+  wait for resource managers to become ready
+  wire CGame subsystem outputs together
+  substate = 8
+
+8:
+  wait for *(DAT_802E71F8 +0x0C) == 0
+  substate = 0x0C
+
+0x0C:
+  cgame +0x08 = 2
+```
+
+This is the runtime path that calls `BootResourceBundle_ApplyLoadedResources`, which then
+feeds `resourceBundle[7] +0x10` into `LargeResourceManager_ReloadFromLink`.
+
+## Large Resource Manager
+
+`FUN_80021E98` starts loading the boot/CGame resource bundle into `gBootTempManager`.
+Suggested name:
+
+```text
+BootResourceBundle_StartLoading
+```
+
+Confirmed behavior:
+
+```text
+if resourceBundle[0] == 0:
+  regionIndex = FUN_80143830(DAT_802E71B8)
+  pathTable = PTR_s_/banner/banner_US.bin_802A4390 + regionIndex * 8
+
+  for slot in 0..7:
+    if resourceBundle[slot + 2] == 0:
+      resourceBundle[slot + 2] =
+        LoadResourceByPath(*(DAT_802E71B8 +0x260), pathTable[slot], 0)
+
+  FUN_80023634(gManager_802E70A4)
+  resourceBundle[0] = 1
+```
+
+This means `BootResourceBundle_ApplyLoadedResources` consumes handles loaded here:
+
+```text
+slot 0 -> resourceBundle[2] -> /banner/banner_*.bin, loaded but not consumed here
+slot 1 -> resourceBundle[3] -> /mii/RFLRes01.arc
+slot 2 -> resourceBundle[4] -> /text/text_*.bin
+slot 3 -> resourceBundle[5] -> /font/font_*.bin
+slot 4 -> resourceBundle[6] -> /select/select_cmn.bin
+slot 5 -> resourceBundle[7] -> /ssq/SSQ_CMN*.bin -> LargeResourceManager_ReloadFromLink
+slot 6 -> resourceBundle[8] -> /2Dcommon/comAF_*.bin -> UiRootManager_LoadResource
+slot 7 -> resourceBundle[9] -> /Pointer/Pointer.bin
+```
+
+Known path variants at `0x802A4390`:
+
+```text
+region 0: banner_US, RFLRes01, text_eng, font_us, select_cmn, SSQ_CMN,    comAF_US, Pointer
+region 1: banner_US, RFLRes01, text_eng, font_us, select_cmn, SSQ_CMN,    comAF_US, Pointer
+region 2: banner_US, RFLRes01, text_eng, font_us, select_cmn, SSQ_CMN,    comAF_US, Pointer
+region 3: banner_US, RFLRes01, text_fra, font_fr, select_cmn, SSQ_CMN_FR, comAF_FR, Pointer
+region 4: banner_US, RFLRes01, text_spa, font_sp, select_cmn, SSQ_CMN_SP, comAF_SP, Pointer
+region 5: banner_US, RFLRes01, text_eng, font_us, select_cmn, SSQ_CMN,    comAF_US, Pointer
+```
+
+`FUN_80021F58` applies a loaded boot/resource bundle into the global managers once.
+Suggested name:
+
+```text
+BootResourceBundle_ApplyLoadedResources
+```
+
+Confirmed behavior:
+
+```text
+if resourceBundle[0] == 1:
+  if resourceBundle[1] == 0:
+    begin global manager setup lock/scope
+    apply resource handle slots into global managers
+    end global manager setup lock/scope
+  resourceBundle[1] = 1
+```
+
+Confirmed resource handle slots:
+
+```text
+resourceBundle[3] +0x10 -> DAT_802E71F8 manager setup
+resourceBundle[4] +0x10 -> gManager_802E70B0 setup
+resourceBundle[5] +0x10 -> large sub-manager setup through FUN_800B72F8
+resourceBundle[6] +0x10 -> gCharacterAssetManager setup
+resourceBundle[7] +0x10 -> gLargeResourceManager via LargeResourceManager_ReloadFromLink
+resourceBundle[8] +0x10 -> gUiRootManager via UiRootManager_LoadResource
+resourceBundle[9] +0x10 -> gManager_802E70B4 setup
+```
+
+`GameMain` allocates `DAT_802E70BC` with size `0x3010B8`, constructor `0x80025A7C`.
+Suggested provisional name:
+
+```text
+gLargeResourceManager
+```
+
+`FUN_80025CA0` reloads this manager from a link resource passed in `r4`. Suggested name:
+
+```text
+LargeResourceManager_ReloadFromLink
+```
+
+Confirmed behavior:
+
+```text
+CzanLinkManager_InitAndSetLink(stackLinkManager, linkData)
+
+if manager[0] != 0:
+  tear down existing manager state
+
+block0 = CzanLinkManager_GetBlock(stackLinkManager, 0)
+FUN_800B6484(manager + 0x2FBA7C, block0)
+FUN_8002F1C8(manager + 0x10)
+
+for bankIndex in 0..6:
+  bank = manager + 0x91610 + bankIndex * 0x58534
+  setupValue = bankIndex < 5 ? 0x5460 : 0
+  FUN_800338BC(bank, setupValue)
+
+manager[0] = 1
+refresh manager state
+CzanLinkManager_Release(stackLinkManager, -1)
+```
+
+The stack link manager is released with `-1`, so it does not free allocator memory.
+
+The listing confirms `FUN_80025CA0` does not write `r4` before calling
+`CzanLinkManager_InitAndSetLink`, so the function has a hidden second parameter:
+
+```text
+r3 = largeResourceManager
+r4 = linkData
+```
+
+`FUN_8016032C` sets the CzanLinkManager vtable at `+0x10` to `PTR_PTR_802C0790`, then
+calls `CzanLinkManager_SetLink(linkManager, linkData)`. Suggested name:
+
+```text
+CzanLinkManager_InitAndSetLink
+```
+
+The listing confirms `r3` is preserved as `linkManager` and incoming `r4` is passed
+through as `linkData`.

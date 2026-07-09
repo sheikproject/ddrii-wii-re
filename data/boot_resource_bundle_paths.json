@@ -1,0 +1,107 @@
+{
+  "name": "Boot resource bundle path table",
+  "address": "0x802A4390",
+  "used_by": "BootResourceBundle_StartLoading / 0x80021E98",
+  "entry_count_per_region": 8,
+  "notes": [
+    "BootResourceBundle_StartLoading stores loaded handles at resourceBundle[slot + 2].",
+    "BootResourceBundle_ApplyLoadedResources consumes resourceBundle[3]..[9], so path slot 0 is loaded but not consumed by that apply function.",
+    "Region entries 0, 1, 2, and 6 are identical English/US sets in this dump."
+  ],
+  "slot_roles": [
+    { "path_slot": 0, "stored_at": "resourceBundle[2]", "apply_consumer": null, "role": "banner resource loaded but not consumed by BootResourceBundle_ApplyLoadedResources" },
+    { "path_slot": 1, "stored_at": "resourceBundle[3]", "apply_consumer": "DAT_802E71F8 manager setup" },
+    { "path_slot": 2, "stored_at": "resourceBundle[4]", "apply_consumer": "gManager_802E70B0 setup" },
+    { "path_slot": 3, "stored_at": "resourceBundle[5]", "apply_consumer": "large sub-manager setup through FUN_800B72F8" },
+    { "path_slot": 4, "stored_at": "resourceBundle[6]", "apply_consumer": "gCharacterAssetManager setup" },
+    { "path_slot": 5, "stored_at": "resourceBundle[7]", "apply_consumer": "gLargeResourceManager via LargeResourceManager_ReloadFromLink" },
+    { "path_slot": 6, "stored_at": "resourceBundle[8]", "apply_consumer": "gUiRootManager via UiRootManager_LoadResource" },
+    { "path_slot": 7, "stored_at": "resourceBundle[9]", "apply_consumer": "gManager_802E70B4 setup" }
+  ],
+  "regions": [
+    {
+      "region_index": 0,
+      "base_address": "0x802A4390",
+      "paths": [
+        "/banner/banner_US.bin",
+        "/mii/RFLRes01.arc",
+        "/text/text_eng.bin",
+        "/font/font_us.bin",
+        "/select/select_cmn.bin",
+        "/ssq/SSQ_CMN.bin",
+        "/2Dcommon/comAF_US.bin",
+        "/Pointer/Pointer.bin"
+      ]
+    },
+    {
+      "region_index": 1,
+      "base_address": "0x802A43B0",
+      "paths": [
+        "/banner/banner_US.bin",
+        "/mii/RFLRes01.arc",
+        "/text/text_eng.bin",
+        "/font/font_us.bin",
+        "/select/select_cmn.bin",
+        "/ssq/SSQ_CMN.bin",
+        "/2Dcommon/comAF_US.bin",
+        "/Pointer/Pointer.bin"
+      ]
+    },
+    {
+      "region_index": 2,
+      "base_address": "0x802A43D0",
+      "paths": [
+        "/banner/banner_US.bin",
+        "/mii/RFLRes01.arc",
+        "/text/text_eng.bin",
+        "/font/font_us.bin",
+        "/select/select_cmn.bin",
+        "/ssq/SSQ_CMN.bin",
+        "/2Dcommon/comAF_US.bin",
+        "/Pointer/Pointer.bin"
+      ]
+    },
+    {
+      "region_index": 3,
+      "base_address": "0x802A43F0",
+      "paths": [
+        "/banner/banner_US.bin",
+        "/mii/RFLRes01.arc",
+        "/text/text_fra.bin",
+        "/font/font_fr.bin",
+        "/select/select_cmn.bin",
+        "/ssq/SSQ_CMN_FR.bin",
+        "/2Dcommon/comAF_FR.bin",
+        "/Pointer/Pointer.bin"
+      ]
+    },
+    {
+      "region_index": 4,
+      "base_address": "0x802A4410",
+      "paths": [
+        "/banner/banner_US.bin",
+        "/mii/RFLRes01.arc",
+        "/text/text_spa.bin",
+        "/font/font_sp.bin",
+        "/select/select_cmn.bin",
+        "/ssq/SSQ_CMN_SP.bin",
+        "/2Dcommon/comAF_SP.bin",
+        "/Pointer/Pointer.bin"
+      ]
+    },
+    {
+      "region_index": 5,
+      "base_address": "0x802A4430",
+      "paths": [
+        "/banner/banner_US.bin",
+        "/mii/RFLRes01.arc",
+        "/text/text_eng.bin",
+        "/font/font_us.bin",
+        "/select/select_cmn.bin",
+        "/ssq/SSQ_CMN.bin",
+        "/2Dcommon/comAF_US.bin",
+        "/Pointer/Pointer.bin"
+      ]
+    }
+  ]
+}

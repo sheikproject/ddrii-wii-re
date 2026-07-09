@@ -181,7 +181,7 @@ int CSelModeEntry_Init(void *entry) {
 
 int CSelModeEntry_Update(void *entry, short activeCountOrFlag) {
     /* Original updates the shared UI-entry base state, then frees/releases the
-       entry through FUN_80144CF0 when the caller passes a positive flag/count. */
+       entry through MemoryPool_Free when the caller passes a positive flag/count. */
     if (entry != 0 && activeCountOrFlag > 0) {
         return 1;
     }
@@ -193,7 +193,7 @@ int CSelModeEntry_AddUiObject(void *entry, int linkBlock) {
     int slot;
 
     /* 0x80110524 creates/registers a UI object group from a non-null Czan link block
-       via CzanUiManager_CreateObjectGroup / FUN_80173414, stores the returned handle
+       via CzanUiManager_CreateObjectGroup, stores the returned handle
        at +0x14+n*4, and increments +0x34. */
     if (modeEntry == 0 || linkBlock == 0 || modeEntry->objectHandleCount >= 8) {
         return -1;
@@ -209,8 +209,8 @@ int CSelModeEntry_AddChildUiObject(void *entry, int objectId) {
     CSelModeEntryKnownFields *modeEntry = (CSelModeEntryKnownFields *)entry;
     int slot;
 
-    /* 0x8011058C creates/registers a child or alternate UI object from an object
-       ID through FUN_80173D18(uiManager), then stores the returned handle in the
+    /* 0x8011058C creates/registers a cloned/alternate UI object group through
+       CzanUiManager_CloneObjectGroup, then stores the returned handle in the
        same +0x14 handle array. */
     if (modeEntry == 0 || objectId == -1 || modeEntry->objectHandleCount >= 8) {
         return -1;
@@ -322,12 +322,78 @@ int CzanSpriteObject_Init(void *spriteObject) {
     return 1;
 }
 
+int CzanUiManager_CreateObjectGroup(
+    int uiManager,
+    void *linkData,
+    unsigned int flags,
+    int initialAnimIndex
+) {
+    /* 0x80173414 creates a new Czan object group from a WII/Czan link resource.
+       It finds a free group slot, links the resource, validates/relocates block 1 as
+       the group metadata, uses block 0 as a nested texture/TPL resource container,
+       then creates one CzanUiObjectInstance and CzanSpriteObject per 0x20-byte child
+       descriptor.
+
+       Descriptor type 0 loads a TPL block and creates a texture slot. Type 2 creates
+       an 8x8 dummy sprite. Other descriptor types copy/reuse texture state from a
+       previously-created child named by descriptor +0x12. The low byte of flags and
+       descriptor +0x1A flags drive the same initial animation/visibility setup used
+       by CzanUiManager_CloneObjectGroup. Flags 3/4 preplay the selected animation
+       through CzanUiObjectInstance_PreplayInitialAnimation. Returns the new group handle, -1 when no
+       group slot is free, or -2 when the metadata block fails validation. */
+    (void)uiManager;
+    (void)linkData;
+    (void)flags;
+    (void)initialAnimIndex;
+    return -1;
+}
+
+int CzanUiManager_ValidateAndRelocateObjectGroupMetadata(int uiManager, char *metadataBlock) {
+    /* 0x80174D14 validates that metadataBlock starts with "CAE_WII\0". If the
+       relocation byte at +0x0B is already nonzero, the block is accepted as already
+       relocated. Otherwise it sets +0x0B to 1, converts the descriptor-table offset
+       at +0x0C into an absolute pointer, then walks every 0x20-byte descriptor and
+       converts each descriptor animation-table offset at +0x1C into a pointer.
+
+       For every 0x10-byte animation entry, an entry with +0x04 == 0 has its +0x0C
+       pointer/value cleared to 0; otherwise +0x0C is relocated relative to the
+       metadata block base. The uiManager argument is present in the signature but
+       is not used by the decompiled body. */
+    (void)uiManager;
+    (void)metadataBlock;
+    return 0;
+}
+
+int CzanUiManager_CloneObjectGroup(
+    int uiManager,
+    int sourceObjectGroupHandle,
+    unsigned int cloneFlags,
+    int initialAnimIndex
+) {
+    /* 0x80173D18 finds a free object-group slot, copies the source group's
+       descriptor pointer and child count, allocates a new child-object handle array,
+       then creates a fresh CzanUiObjectInstance and CzanSpriteObject for every source
+       child. Real sprite descriptors copy texture information from the source child;
+       descriptor type 2 creates an 8x8 dummy sprite.
+
+       The low byte of cloneFlags controls initial animation behavior:
+       1/2 start and run the selected animation, 3/4 preplay the selected animation
+       through CzanUiObjectInstance_PreplayInitialAnimation.
+       Descriptor flags also set enabled/draw/animation fields on the cloned children.
+       The function returns the new group handle, or -1 if no free group slot exists. */
+    (void)uiManager;
+    (void)sourceObjectGroupHandle;
+    (void)cloneFlags;
+    (void)initialAnimIndex;
+    return -1;
+}
+
 void CzanUiObjectInstance_StartAnimation(double startFrame, int objectInstance, int animationIndex) {
     CzanUiObjectInstanceKnownFields *instance = (CzanUiObjectInstanceKnownFields *)objectInstance;
 
     /* 0x80172CC8 selects/starts an animation entry on a Czan UI object instance.
-       param_1/startFrame must be >= 0.0. param_2 is the object instance. param_3
-       is the animation index stored at +0x16C and used to index descriptor +0x1C. */
+       startFrame must be >= 0.0. objectInstance is the 0x1B4 Czan UI object instance.
+       animationIndex is stored at +0x16C and used to index descriptor +0x1C. */
     if (instance == 0 || startFrame < 0.0) {
         return;
     }
@@ -336,12 +402,24 @@ void CzanUiObjectInstance_StartAnimation(double startFrame, int objectInstance, 
     instance->currentAnimValue = 0;
 }
 
+void CzanUiObjectInstance_PreplayInitialAnimation(int objectInstance) {
+    CzanUiObjectInstanceKnownFields *instance = (CzanUiObjectInstanceKnownFields *)objectInstance;
+
+    /* 0x801728E4 temporarily forces object +0x175 to mode 3, starts the selected
+       animation at frame 0, sets +0xB4 to 0, then runs the animation script the old
+       +0xB4 value number of times. It restores +0x175 and resets the script pointer
+       and playback state back to the selected animation entry. */
+    if (instance == 0) {
+        return;
+    }
+}
+
 void CzanSpriteObject_SetRenderMode(int spriteObject, int mode) {
     CzanSpriteObjectKnownFields *sprite = (CzanSpriteObjectKnownFields *)spriteObject;
 
     /* 0x80170DEC maps an animation-entry mode byte to sprite render/blend state.
-       param_1 is the 0x1D8 Czan sprite object. param_2 is the mode byte copied
-       from animation entry +0x03. The original writes render parameters around
+       spriteObject is the 0x1D8 Czan sprite object. mode is the byte copied from
+       animation entry +0x03. The original writes render parameters around
        +0x178..+0x19C, then stores the raw mode byte at +0x1A4. */
     if (sprite == 0) {
         return;
@@ -354,8 +432,8 @@ void CzanUiObjectInstance_RunAnimationScript(int objectInstance, int allowUnknow
     CzanUiObjectInstanceKnownFields *instance = (CzanUiObjectInstanceKnownFields *)objectInstance;
 
     /* 0x80171B98 interprets the Czan animation command stream at object +0x19C.
-       param_1 is the 0x1B4 Czan UI object instance, passed through the compiler's
-       context helper in the decompile. param_2 controls the invalid-opcode assert
+       objectInstance is the 0x1B4 Czan UI object instance, passed through the compiler's
+       context helper in the decompile. allowUnknownOpcode controls the invalid-opcode assert
        path: nonzero tolerates unknown/default opcodes, zero asserts. */
     if (instance == 0) {
         return;
@@ -368,7 +446,7 @@ void CzanUiObjectInstance_ApplyColorBlocks(int objectInstance) {
     CzanUiObjectInstanceKnownFields *instance = (CzanUiObjectInstanceKnownFields *)objectInstance;
 
     /* 0x80172FC0 copies four color blocks from the UI object instance into the
-       attached sprite object's vertex/RGBA color blocks. param_1 is the 0x1B4
+       attached sprite object's vertex/RGBA color blocks. objectInstance is the 0x1B4
        Czan UI object instance. Flags at +0x182/+0x183 select alternate RGB and
        scaled alpha behavior. */
     if (instance == 0) {
@@ -453,6 +531,14 @@ void CzanUiManager_SetChildObjectEnabled(
     (void)enabled;
 }
 
+void CzanUiManager_SetObjectGroupDrawEnabled(int uiManager, int objectGroupHandle, unsigned char drawEnabled) {
+    /* 0x801750A8 sets object +0x181 for every child in the group. This is the
+       draw-list participation flag checked by CzanUiManager_DrawObjectListReverse. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)drawEnabled;
+}
+
 void CzanUiManager_LinkObjectGroupToReferenceObject(
     int uiManager,
     int targetObjectGroupHandle,
@@ -524,8 +610,8 @@ void CzanDrawTexturedOrColoredQuad(
     unsigned int height,
     unsigned char *vertexColors,
     int textureObject,
-    int param11,
-    int param12) {
+    int unknownArg11,
+    int unknownArg12) {
     /* 0x8016BE18 is the low-level GX quad emitter. textureObject == 0 emits a
        colored quad; nonzero loads a GX texture object and emits textured vertices. */
     (void)u0;
@@ -538,6 +624,6 @@ void CzanDrawTexturedOrColoredQuad(
     (void)height;
     (void)vertexColors;
     (void)textureObject;
-    (void)param11;
-    (void)param12;
+    (void)unknownArg11;
+    (void)unknownArg12;
 }

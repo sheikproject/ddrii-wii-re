@@ -127,6 +127,38 @@ FUN_8010EB78 -> UiManager_GetLabelOrTexture(uiManager, objectHandle, index)
 FUN_8010EEBC -> UiManager_SetVisibleOrEnabled(uiManager, enabled)
 ```
 
+`FUN_80160368` is the cleanup/release helper for a `CzanLinkManager`. Suggested name:
+
+```text
+CzanLinkManager_Release
+```
+
+Confirmed behavior:
+
+```text
+if linkManager != 0 and releaseMode > 0:
+  MemoryPool_Free(0, linkManager)
+return linkManager
+```
+
+Most local stack-link-manager cleanup calls pass `-1`, so they do not release allocator
+memory.
+
+`FUN_80144CF0` is the memory-pool free wrapper. Suggested name:
+
+```text
+MemoryPool_Free
+```
+
+Confirmed behavior:
+
+```text
+lock(DAT_802EE174 + poolIndex * 0x34)
+if allocation != 0:
+  FUN_801DC5D0((&DAT_802EE158)[poolIndex * 0x0D], allocation)
+unlock(DAT_802EE174 + poolIndex * 0x34)
+```
+
 Some calls pass extra zero arguments after the useful parameters. The callee decompiles
 for `CSelModeEntry_AddUiObject` and `CSelModeEntry_AddChildUiObject` show only the first
 two parameters are used; the extra registers appear to be caller convention/noise.
@@ -233,7 +265,7 @@ sets the entry vtable at `+0x40` to `PTR_PTR_802BEA38`.
 
 `CSelModeEntry_Update` calls the shared UI-entry update at `0x80110320(entry, 0)`.
 If the caller passes a positive short flag/count, it also releases/frees the entry via
-`FUN_80144CF0(0, entry)`.
+`MemoryPool_Free(0, entry)`.
 
 Confirmed entry field map:
 
@@ -256,7 +288,7 @@ FUN_80110524 -> CSelModeEntry_AddUiObject
   then increments objectHandleCount.
 
 FUN_8011058C -> CSelModeEntry_AddChildUiObject
-  If objectId != -1, calls FUN_80173D18(entry->uiManager), stores the returned handle
+  If objectId != -1, calls CzanUiManager_CloneObjectGroup(entry->uiManager), stores the returned handle
   in the same handle array, then increments objectHandleCount.
 
 FUN_80110754 -> CSelModeEntry_SetAnimationOrLayout
@@ -378,6 +410,460 @@ one object group, preserving the same reverse global draw order.
 
 `CzanUiManager_DrawChildObject` directly draws one child from a group.
 
+`FUN_801750A8` controls whether every child in an object group participates in draw
+traversal. Suggested name:
+
+```text
+CzanUiManager_SetObjectGroupDrawEnabled
+```
+
+Confirmed behavior:
+
+```text
+group = uiManager + 0x04 + objectGroupHandle * 0x28
+for each child in group:
+  object +0x181 = drawEnabled
+```
+
+This is separate from `CzanUiManager_SetObjectGroupEnabled` / `FUN_80174F04`, which
+writes `object +0x173`. The draw traversal in `CzanUiManager_DrawObjectListReverse`
+requires `object +0x181 == 1`.
+
+The global Czan UI draw is reached from `FUN_800FEB58`, suggested name:
+
+```text
+UiRootManager_DrawFrame
+```
+
+Its setup/resource-loading pair is `FUN_800FE548`, suggested name:
+
+```text
+UiRootManager_LoadResource
+```
+
+Confirmed behavior:
+
+```text
+linkData is a WII resource.
+
+blocks 0..3:
+  CzanUiManager_CreateObjectGroup(*(DAT_802E71B8 +0x270), block, 0, 0)
+  stored at uiRootManager[1..4]
+
+block 4:
+  allocates uiRootManager[0x0C], then calls UiRootSubManager_LoadCzanGroups / FUN_80100944
+
+block 5:
+  allocates uiRootManager[0x0D], then calls
+  UiRootSubManager_LoadCzanGroupsWithTexture / FUN_80104538
+
+after block 5:
+  allocates uiRootManager[0x0E], then calls
+  UiRootSubManager_InitTextureFrameGroups / FUN_80106054
+  This object is not initialized from a WII block directly.
+
+block 6:
+  allocates uiRootManager[0x0F], then calls
+  UiRootSubManager_LoadLinkedObjectGroup / FUN_80106C34
+
+block 7:
+  initializes uiRootManager[0x10]
+
+block 8:
+  initializes uiRootManager[0x12]
+
+blocks 9..13:
+  CreateTextureFromTplResource(*(DAT_802E71B8 +0x26C), block, blockSize, -1)
+  stored at uiRootManager[5..9]
+
+uiRootManager[0x11]:
+  initialized after block 8 using uiRootManager[8]
+
+uiRootManager[0] = 1 when setup finishes.
+```
+
+Observed Spanish resource:
+
+```text
+input/DATA/2Dcommon/comAF_SP.bin
+size = 0xA71C40
+top-level WII block count = 14
+
+block 0 -> uiRootManager[1] Czan object group
+block 1 -> uiRootManager[2] Czan object group
+block 2 -> uiRootManager[3] Czan object group
+block 3 -> uiRootManager[4] Czan object group
+block 4 -> uiRootManager[0x0C] via UiRootSubManager_LoadCzanGroups
+block 5 -> uiRootManager[0x0D] via UiRootSubManager_LoadCzanGroupsWithTexture
+block 6 -> uiRootManager[0x0F] via UiRootSubManager_LoadLinkedObjectGroup
+block 7 -> uiRootManager[0x10] loader still pending export
+block 8 -> uiRootManager[0x12] loader still pending export
+block 9 -> uiRootManager[5] texture slot
+block 10 -> uiRootManager[6] texture slot
+block 11 -> uiRootManager[7] texture slot
+block 12 -> uiRootManager[8] texture slot
+block 13 -> uiRootManager[9] texture slot
+```
+
+This is the missing construction step before `UiRootManager_DrawFrame` can draw anything
+from the global Czan object list.
+
+`FUN_800FEC3C` creates a UI-root reference object group. Suggested provisional name:
+
+```text
+UiRootManager_CreateReferenceObjectGroup
+```
+
+Confirmed behavior:
+
+```text
+if uiRootManager[1] == -1:
+  return -1
+
+newGroup = CzanUiManager_CloneObjectGroup(global Czan UI manager, uiRootManager[1], 2, 0)
+
+if referenceChildIndex != -1:
+  CzanUiManager_LinkObjectGroupToReferenceObject(global Czan UI manager,
+                                                 newGroup,
+                                                 referenceObjectGroupHandle,
+                                                 referenceChildIndex,
+                                                 linkMode)
+
+  if newGroup != -1:
+    referenceObject = FUN_80175804(global Czan UI manager,
+                                   referenceObjectGroupHandle,
+                                   referenceChildIndex)
+    FUN_8017559C(global Czan UI manager, newGroup, referenceObject - 8, 0)
+
+  color = FUN_801761E0(global Czan UI manager,
+                       referenceObjectGroupHandle,
+                       referenceChildIndex,
+                       0)
+  FUN_80175B00(global Czan UI manager, newGroup, colorBytes, -1)
+  CzanUiManager_SetChildObjectEnabled(global Czan UI manager,
+                                      referenceObjectGroupHandle,
+                                      referenceChildIndex,
+                                      1)
+
+return newGroup
+```
+
+So the function is not loading a resource by itself. It creates/clones a group from
+the UI root base group at `uiRootManager[1]`, then optionally attaches that new group
+to a reference child object and copies the child's color/settings.
+
+`FUN_80173D18` clones/derives a Czan object group from an existing group. Suggested
+name:
+
+```text
+CzanUiManager_CloneObjectGroup
+```
+
+Confirmed behavior:
+
+```text
+find first free object-group slot where group +0x20 == 0
+if none found:
+  return -1
+
+sourceGroup = uiManager->groups[sourceObjectGroupHandle]
+newGroup = first free group slot
+
+newGroup[+0x1C] = sourceGroup[+0x1C] descriptor pointer
+newGroup[+0x04] = *(ushort *)(descriptor + 0x08) child count
+newGroup[+0x20] = AllocObjectAligned(childCount * 4, align 0x20)
+
+for each child descriptor:
+  sprite = AllocObjectAligned(0x1D8, align 0x20)
+  CzanSpriteObject_Init(sprite)
+
+  if descriptor type == 2:
+    make dummy 8x8 sprite with no texture
+  else:
+    copy texture/resource fields from the matching source child sprite
+    BindTextureFromTextureSet(sprite->textureSlot, sprite, sprite->textureFrame)
+
+  object = AllocObjectAligned(0x1B4, align 0x20)
+  CzanUiObjectInstance_Init(object)
+  newGroup.childArray[index] = object
+
+  object[+0x20] = uiManager
+  object[+0x24] = sprite
+  object[+0x198] = child descriptor
+  object[+0x16C] = initialAnimIndex
+  object[+0x1A4] = newGroup handle
+
+  if cloneFlags low byte == 1 or 2:
+    start/run animation initialAnimIndex and reset animation state
+  else if cloneFlags low byte == 3 or 4:
+    call alternate setup helper
+
+  child descriptor flags at +0x1A set object enable/draw/animation fields
+
+mark UI manager and new group active
+return newGroup handle
+```
+
+This is why the PC host cannot fake this with only texture names: the original creates
+real object instances and sprite objects for each child, then copies texture bindings,
+animation state, flags, and descriptor pointers from a source Czan group.
+
+`FUN_80174D14` validates and relocates a `CAE_WII` object-group metadata block.
+Suggested name:
+
+```text
+CzanUiManager_ValidateAndRelocateObjectGroupMetadata
+```
+
+Confirmed behavior:
+
+```text
+if metadataBlock[0..7] != "CAE_WII\0":
+  return 0
+
+if metadataBlock[0x0B] != 0:
+  return 1
+
+metadataBlock[0x0B] = 1
+metadataBlock[0x0C] = metadataBlock + *(int *)(metadataBlock + 0x0C)
+
+for descriptorIndex in 0..*(ushort *)(metadataBlock + 0x08)-1:
+  descriptor = metadataBlock[0x0C] + descriptorIndex * 0x20
+  descriptor[0x1C] = metadataBlock + *(int *)(descriptor + 0x1C)
+
+  for animIndex in 0..*(ushort *)(descriptor + 0x16)-1:
+    animEntry = descriptor[0x1C] + animIndex * 0x10
+    if *(int *)(animEntry + 0x04) == 0:
+      *(int *)(animEntry + 0x0C) = 0
+    else:
+      *(int *)(animEntry + 0x0C) = metadataBlock + *(int *)(animEntry + 0x0C)
+
+return 1
+```
+
+The first `uiManager` argument is present in the call signature, but this function only
+uses the metadata block pointer.
+
+`FUN_80100944` is the loader for the sub-manager stored at `uiRootManager[0x0C]`.
+Suggested provisional name:
+
+```text
+UiRootSubManager_LoadCzanGroups
+```
+
+Confirmed behavior:
+
+```text
+subManager[0x27] = gManager_802E70B4
+
+nested blocks 0..3:
+  CzanUiManager_CreateObjectGroup(global Czan UI manager, block, flags=2, initialAnimIndex=0)
+  stored at subManager[0..3]
+
+several handles are cloned/derived from subManager[3] through CzanUiManager_CloneObjectGroup
+and stored at subManager[4..8].
+
+two temporary/root groups are allocated through FUN_801002E4(gUiRootManager),
+then linked to reference children:
+  subManager[9]  -> linked to subManager[1], child 0x0D, linkMode 0x1F
+  subManager[10] -> linked to subManager[2], child 0x10, linkMode 0x1F
+
+FUN_80175804 retrieves reference child/object handles.
+FUN_8017559C applies those handles to the temporary/root groups.
+
+subManager[0x1F], [0x20], and [0x21..0x26] are allocated helper objects
+initialized around specific object groups/children.
+```
+
+This is another place where the global Czan object list is populated before the
+`UiRootManager_DrawFrame` traversal.
+
+`FUN_80104538` is the loader for the sub-manager stored at `uiRootManager[0x0D]`.
+Suggested provisional name:
+
+```text
+UiRootSubManager_LoadCzanGroupsWithTexture
+```
+
+Confirmed behavior:
+
+```text
+nested blocks 0..3:
+  CzanUiManager_CreateObjectGroup(global Czan UI manager, block, flags=0, initialAnimIndex=0)
+  stored at subManager[0..3]
+
+subManager[4]:
+  created/retrieved through UiRootManager_CreateReferenceObjectGroup(gUiRootManager, -1, -1, 0x1F)
+
+all five groups are disabled/hidden with:
+  CzanUiManager_SetObjectGroupDrawEnabled(global Czan UI manager, group, 0)
+
+block 4:
+  CreateTextureFromTplResource(global texture manager, block4, block4Size, -1)
+  stored at subManager[0x0B]
+```
+
+This is similar to `UiRootSubManager_LoadCzanGroups`, but uses plain Czan group flags
+`0` instead of `2` and also owns one texture slot.
+
+`FUN_80106054` initializes the `0x7C8`-byte sub-manager stored at `uiRootManager[0x0E]`.
+Suggested provisional name:
+
+```text
+UiRootSubManager_InitTextureFrameGroups
+```
+
+Confirmed behavior:
+
+```text
+for row in 0..1:
+  rowBase = subManager + row * 0x3E0
+  for frame in 0..0x27:
+    group = FUN_801002E4(gUiRootManager)
+    *(rowBase + 0x08 + frame * 4) = group
+    if row == 1:
+      CzanUiManager_SetObjectGroupDrawEnabled(global Czan UI manager, group, 0)
+
+for frame in 0..0x27:
+  CzanUiManager_SetObjectTextureFrame(global Czan UI manager,
+                                      *(subManager + 0x08 + frame * 4),
+                                      0, frame, 0)
+
+for frame in 0..0x27:
+  CzanUiManager_SetObjectTextureFrame(global Czan UI manager,
+                                      *(subManager + 0x3E8 + frame * 4),
+                                      0, frame, 0)
+```
+
+This looks like a pair of texture-frame group banks. The second bank is created but
+hidden from draw traversal immediately.
+
+`FUN_80106C34` loads the `0x14`-byte sub-manager stored at `uiRootManager[0x0F]`.
+Suggested provisional name:
+
+```text
+UiRootSubManager_LoadLinkedObjectGroup
+```
+
+Confirmed behavior:
+
+```text
+group = CzanUiManager_CreateObjectGroup(global Czan UI manager, linkData, flags=2, initialAnimIndex=0)
+subManager[0] = group
+subManager[1] = UiRootManager_CreateReferenceObjectGroup(gUiRootManager, group, 0, 0x1F)
+```
+
+In the Spanish `comAF_SP.bin` resource, this loader consumes top-level block 6.
+
+`FUN_8011E0A4` loads six hidden Czan object groups and builds child lookup bytes.
+Suggested provisional name:
+
+```text
+UiRootSubManager_LoadIndexedHiddenGroups
+```
+
+Confirmed behavior:
+
+```text
+subManager[0xCC6] = -1
+subManager[0xCC7] = setupValue
+subManager[0xCC8] = 0
+subManager[0xCC9] = 1
+
+for groupIndex in 0..5:
+  block = CzanLinkManager_GetBlock(linkManager, groupIndex)
+  group = CzanUiManager_CreateObjectGroup(global Czan UI manager, block, flags=2, initialAnimIndex=0)
+  subManager[groupIndex] = group
+  CzanUiManager_SetObjectGroupDrawEnabled(global Czan UI manager, group, 0)
+
+  childCount = FUN_80175FB8(global Czan UI manager, group)
+  for childIndex in 0..childCount-1:
+    childObject = FUN_801761C4(global Czan UI manager, group, childIndex)
+    objectId = *(childObject + 0x160)
+    *(subManager + groupIndex * 0x80 + 0x17 + objectId) = childIndex
+
+  UiRootSubManager_ConfigureIndexedHiddenGroup(subManager, groupIndex, setupValue)
+```
+
+This gives the sub-manager a fast lookup from a Czan child object ID to that child's
+index inside one of six hidden object groups.
+
+`FUN_8011E3E8` configures one group created by `UiRootSubManager_LoadIndexedHiddenGroups`.
+Suggested provisional name:
+
+```text
+UiRootSubManager_ConfigureIndexedHiddenGroup
+```
+
+Confirmed behavior:
+
+```text
+if subManager[0xCC9] == 0:
+  return
+
+subManager[0xCC7] = setupValue
+config = DAT_80291AB0 + groupIndex * 0x14
+configuredChildCount = config[0]
+baseScaleX = *(float *)(config + 0x04)
+baseScaleY = *(float *)(config + 0x08)
+usesNormalizedQuad = config[0x0C]
+capturesOriginalChildData = config[0x10]
+
+perChildDataBase = subManager + groupIndex * 0x800 + 0x318
+
+for childIndex in 0..configuredChildCount-1:
+  if capturesOriginalChildData != 0:
+    read current child transform/color data
+
+  query child texture size / object data
+  bind/update the child sprite texture size
+  compute quad bounds and UV/normalized values
+  write one 0x10-byte data entry at perChildDataBase + childIndex * 0x10
+  FUN_80175998(global Czan UI manager, group, childIndex, entry)
+
+if widescreen mode is enabled:
+  for every child in the group:
+    apply a child transform/offset
+```
+
+Called helpers still needing separate bodies:
+
+```text
+FUN_80175FB8 -> get child count for a Czan object group
+FUN_80175FCC -> read child object data into a local struct
+FUN_801760EC -> query child texture size / object dimensions
+FUN_801761A4 -> get child sprite/object handle
+FUN_80175998 -> apply per-child quad/UV data
+FUN_801752AC -> apply alternate child transform data
+CzanUiManager_ApplyChildObjectOffset -> apply child transform/offset data
+```
+
+Confirmed behavior:
+
+```text
+if uiRootManager[0] != 0:
+  FUN_80105BCC(uiRootManager[0x0D])
+  if uiRootManager[0x0B] == 0:
+    CzanUiManager_DrawObjectListReverse(*(DAT_802E71B8 + 0x270), -1)
+    uiRootManager[0x0B] = 1
+  FUN_80105BAC(uiRootManager[0x0D])
+  FUN_80105B50(uiRootManager[0x0D])
+  FUN_801067DC(uiRootManager[0x0E])
+  FUN_8010D6B0(uiRootManager[0x11])
+  FUN_80121228(uiRootManager[0x12])
+  uiRootManager[0x0B] = 0
+```
+
+So the live UI render entry point is:
+
+```text
+UiRootManager_DrawFrame
+  -> CzanUiManager_DrawObjectListReverse(global Czan UI manager, -1)
+    -> CzanUiObjectInstance_Draw
+      -> CzanSpriteObject_Draw
+        -> CzanDrawTexturedOrColoredQuad
+```
+
 `FUN_80170354` is the higher-level Czan sprite draw dispatcher. Suggested name:
 
 ```text
@@ -463,7 +949,9 @@ High-level behavior:
 ```text
 1. Finds a free 0x28-byte object-group slot in the Czan UI manager.
 2. Treats linkData as a Czan/WII link container.
-3. Reads block 1 as the object-group metadata.
+3. Reads block 1 as the object-group metadata and validates/relocates it through
+   `CzanUiManager_ValidateAndRelocateObjectGroupMetadata`.
+   If validation fails, releases the link manager and returns `-2`.
 4. Allocates an array of object pointers using the object count at metadata +0x08.
 5. Reads block 0 as the nested texture/resource link container.
 6. For every 0x20-byte object descriptor at metadata +0x0C:
@@ -474,7 +962,7 @@ High-level behavior:
    descriptor pointer at object +0x198, and stores initialAnimIndex at object +0x16C.
 8. Applies initial animation/state depending on flags & 0xFF:
    - 1 or 2: start/reset animation through FUN_80172CC8 and FUN_80171B98.
-   - 3 or 4: call FUN_801728E4.
+   - 3 or 4: preplay the selected animation through CzanUiObjectInstance_PreplayInitialAnimation.
 9. Applies descriptor flags from descriptor +0x1A to object fields such as visibility,
    playback, loop/stop behavior, and group status bits.
 10. Updates widescreen/screen-size dependent bounds from DAT_802E71B8 + 0x258.
@@ -521,7 +1009,7 @@ The function creates two runtime objects per descriptor:
 
 This is the path that must be reproduced before the real mode-select background and
 animations can render correctly. The next missing pieces are the object instance update
-and animation functions: `FUN_801711DC`, `FUN_80171B98`, `FUN_801728E4`, `FUN_80172CC8`,
+and animation functions: `FUN_801711DC`, `FUN_80171B98`, `CzanUiObjectInstance_PreplayInitialAnimation`, `FUN_80172CC8`,
 and the `FUN_80175xxx` layout/animation commands.
 
 ## Czan UI Object Instance Init
@@ -583,7 +1071,7 @@ This initializer is mostly defaults. The actual motion likely comes from:
 ```text
 FUN_80172CC8 -> selects/starts an animation entry
 FUN_80171B98 -> interprets/runs the animation command stream
-FUN_801728E4 -> alternate start/stop/default animation setup
+CzanUiObjectInstance_PreplayInitialAnimation -> preplays the selected animation then resets script state
 ```
 
 ### Start Animation
@@ -636,6 +1124,49 @@ This function also reveals another helper:
 ```text
 FUN_80170DEC -> CzanSpriteObject_SetRenderMode(spriteObject, mode)
 ```
+
+### Preplay Initial Animation
+
+`FUN_801728E4` preplays the selected animation on a `CzanUiObjectInstance` and then
+resets its script state. Suggested name:
+
+```text
+CzanUiObjectInstance_PreplayInitialAnimation
+```
+
+Suggested signature:
+
+```c
+void CzanUiObjectInstance_PreplayInitialAnimation(int objectInstance);
+```
+
+Confirmed behavior:
+
+```text
+oldMode = object +0x175
+object +0x175 = 3
+
+CzanUiObjectInstance_StartAnimation(0.0, objectInstance, object +0x16C)
+
+preplayCount = object +0xB4
+object +0xB4 = 0.0
+
+for i in 0..preplayCount-1:
+  CzanUiObjectInstance_RunAnimationScript(objectInstance)
+
+object +0x175 = oldMode
+
+object +0x19C = *(object +0x198 descriptor +0x1C + object +0x16C * 0x10 + 0x0C)
+object +0x171 = 0
+object +0xB1 = 1
+object +0xB2 = 0
+object +0xB4 = 0.0
+object +0xC0 = 0
+```
+
+This is the path used by object-group creation when the low byte of the creation flags
+is `3` or `4`. In both cases it evaluates the animation for a number of script ticks,
+then leaves the object reset at the selected animation entry.
 
 `FUN_80170DEC` maps the animation entry mode byte to sprite render/blend parameters.
 Suggested name:

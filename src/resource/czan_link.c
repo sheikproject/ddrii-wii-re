@@ -1,5 +1,7 @@
 #include "resource/czan_link.h"
 
+#include "runtime/memory.h"
+
 #include <stddef.h>
 
 static unsigned int ReadBe32(const unsigned char *p) {
@@ -79,4 +81,24 @@ int CzanLinkResource_GetBlock(
     outBlock->data = data + offset;
     outBlock->size = size;
     return 1;
+}
+
+int CzanLinkManager_InitAndSetLink(int linkManager, int linkData) {
+    /* 0x8016032C sets the CzanLinkManager vtable at +0x10 to PTR_PTR_802C0790,
+       then calls CzanLinkManager_SetLink(linkManager, linkData). The listing confirms
+       r3 is preserved as linkManager and the incoming r4 is passed through as linkData. */
+    (void)linkData;
+    return linkManager;
+}
+
+int CzanLinkManager_Release(int linkManager, short releaseMode) {
+    /* 0x80160368 is the CzanLinkManager cleanup/release helper. It only calls
+       the allocator release function when linkManager is nonzero and releaseMode
+       is positive. Calls passing -1, which are common for stack managers, return
+       without releasing memory. */
+    if (linkManager != 0 && releaseMode > 0) {
+        MemoryPool_Free(0, linkManager);
+    }
+
+    return linkManager;
 }

@@ -1,0 +1,45 @@
+{
+  "name": "comAF_SP.bin WII resource layout",
+  "path": "input/DATA/2Dcommon/comAF_SP.bin",
+  "size": "0xA71C40",
+  "size_decimal": 10951744,
+  "used_by": "UiRootManager_LoadResource",
+  "top_level": {
+    "magic": "WII",
+    "block_count": 14,
+    "flags": "0x0"
+  },
+  "notes": [
+    "This is the Spanish region boot/CGame UI-root resource from boot resource bundle slot 6 / resourceBundle[8].",
+    "UiRootManager_LoadResource consumes blocks 0..13 directly.",
+    "Blocks 0..8 are WII resources used to create object groups/sub-managers.",
+    "Blocks 9..13 are large texture/TPL-like resources created through CreateTextureFromTplResource and stored at uiRootManager[5..9]."
+  ],
+  "blocks": [
+    { "index": 0, "offset": "0x80", "size": "0x4280", "magic": "WII", "ui_root_role": "uiRootManager[1] Czan object group" },
+    { "index": 1, "offset": "0x4300", "size": "0xB9E0", "magic": "WII", "ui_root_role": "uiRootManager[2] Czan object group" },
+    { "index": 2, "offset": "0xFCE0", "size": "0xD60", "magic": "WII", "ui_root_role": "uiRootManager[3] Czan object group" },
+    { "index": 3, "offset": "0x10A40", "size": "0xD60", "magic": "WII", "ui_root_role": "uiRootManager[4] Czan object group" },
+    { "index": 4, "offset": "0x117A0", "size": "0x9C9E0", "magic": "WII", "ui_root_role": "uiRootManager[0x0C] via UiRootSubManager_LoadCzanGroups" },
+    { "index": 5, "offset": "0xAE180", "size": "0x1FA120", "magic": "WII", "ui_root_role": "uiRootManager[0x0D] via UiRootSubManager_LoadCzanGroupsWithTexture" },
+    { "index": 6, "offset": "0x2A82A0", "size": "0x394A0", "magic": "WII", "ui_root_role": "uiRootManager[0x0F] via UiRootSubManager_LoadLinkedObjectGroup" },
+    { "index": 7, "offset": "0x2E1740", "size": "0x1E00", "magic": "WII", "ui_root_role": "uiRootManager[0x10] loader still pending export" },
+    { "index": 8, "offset": "0x2E3540", "size": "0x68DA0", "magic": "WII", "ui_root_role": "uiRootManager[0x12] loader still pending export" },
+    { "index": 9, "offset": "0x34C2E0", "size": "0x473E40", "magic": "TPL-like", "ui_root_role": "uiRootManager[5] texture slot" },
+    { "index": 10, "offset": "0x7C0120", "size": "0x182C40", "magic": "TPL-like", "ui_root_role": "uiRootManager[6] texture slot" },
+    { "index": 11, "offset": "0x942D60", "size": "0x114AE0", "magic": "TPL-like", "ui_root_role": "uiRootManager[7] texture slot" },
+    { "index": 12, "offset": "0xA57840", "size": "0x17880", "magic": "TPL-like", "ui_root_role": "uiRootManager[8] texture slot" },
+    { "index": 13, "offset": "0xA6F0C0", "size": "0x2B80", "magic": "TPL-like", "ui_root_role": "uiRootManager[9] texture slot" }
+  ],
+  "nested_summary": [
+    { "block": 0, "nested_block_count": 2, "cae_offset": "0x3DA0", "cae_size": "0x544" },
+    { "block": 1, "nested_block_count": 2, "cae_offset": "0xFC20", "cae_size": "0xA4" },
+    { "block": 2, "nested_block_count": 2, "cae_offset": "0x10560", "cae_size": "0x4D8" },
+    { "block": 3, "nested_block_count": 2, "cae_offset": "0x112C0", "cae_size": "0x4D8" },
+    { "block": 4, "nested_block_count": 4 },
+    { "block": 5, "nested_block_count": 5 },
+    { "block": 6, "nested_block_count": 2 },
+    { "block": 7, "nested_block_count": 2 },
+    { "block": 8, "nested_block_count": 2 }
+  ]
+}

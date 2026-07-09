@@ -1,0 +1,143 @@
+{
+  "name": "Resource and large runtime manager function map",
+  "notes": [
+    "This file tracks confirmed resource-manager functions that are not specific to CSelMode/Czan UI.",
+    "Offsets are RAM addresses from main_DDRII.dol unless stated otherwise."
+  ],
+  "global_managers": [
+    {
+      "symbol": "DAT_802E70BC",
+      "suggested_name": "gLargeResourceManager",
+      "allocated_size": "0x3010B8",
+      "constructor_address": "0x80025A7C",
+      "reload_address": "0x80025CA0",
+      "shutdown_address": "0x80025DEC",
+      "confidence": "role provisional; size and lifecycle confirmed from GameMain"
+    }
+  ],
+  "functions": [
+    {
+      "address": "0x80021E98",
+      "exported_name": "BootResourceBundle_StartLoading",
+      "source_file": "src/runtime/module_system.c",
+      "header_file": "include/runtime/module_system.h",
+      "params": [
+        {
+          "name": "resourceBundle",
+          "type": "int *",
+          "role": "gBootTempManager resource bundle object"
+        }
+      ],
+      "confirmed_behavior": [
+        "Runs only when resourceBundle[0] == 0.",
+        "Selects a region/layout variant with FUN_80143830(DAT_802E71B8).",
+        "Uses path table PTR_s_/banner/banner_US.bin_802A4390 + regionIndex * 8.",
+        "Loads eight resources with LoadResourceByPath(*(DAT_802E71B8 + 0x260), pathTable[slot], 0).",
+        "Stores each ResourceHandle pointer at resourceBundle[slot + 2].",
+        "Calls FUN_80023634(gManager_802E70A4).",
+        "Sets resourceBundle[0] = 1 after queuing/loading resources."
+      ],
+      "path_table": {
+        "address": "0x802A4390",
+        "entry_count_per_region": 8,
+        "first_known_path": "/banner/banner_US.bin",
+        "full_dump": "data/boot_resource_bundle_paths.json",
+        "notes": [
+          "ApplyLoadedResources consumes handles from resourceBundle[3]..[9], which correspond to StartLoading slots 1..7.",
+          "StartLoading slot 5 is the SSQ_CMN resource and feeds LargeResourceManager_ReloadFromLink.",
+          "StartLoading slot 6 is the 2Dcommon/comAF resource and feeds UiRootManager_LoadResource."
+        ]
+      },
+      "slot_relationship": [
+        { "start_loading_slot": 0, "stored_at": "resourceBundle[2]", "apply_slot": null, "notes": "Loaded but not consumed by current ApplyLoadedResources decompile." },
+        { "start_loading_slot": 1, "stored_at": "resourceBundle[3]", "apply_slot": 3 },
+        { "start_loading_slot": 2, "stored_at": "resourceBundle[4]", "apply_slot": 4 },
+        { "start_loading_slot": 3, "stored_at": "resourceBundle[5]", "apply_slot": 5 },
+        { "start_loading_slot": 4, "stored_at": "resourceBundle[6]", "apply_slot": 6 },
+        { "start_loading_slot": 5, "stored_at": "resourceBundle[7]", "apply_slot": 7 },
+        { "start_loading_slot": 6, "stored_at": "resourceBundle[8]", "apply_slot": 8 },
+        { "start_loading_slot": 7, "stored_at": "resourceBundle[9]", "apply_slot": 9 }
+      ]
+    },
+    {
+      "address": "0x80021F58",
+      "exported_name": "BootResourceBundle_ApplyLoadedResources",
+      "source_file": "src/runtime/module_system.c",
+      "header_file": "include/runtime/module_system.h",
+      "params": [
+        {
+          "name": "resourceBundle",
+          "type": "int *",
+          "role": "array/object containing loaded resource handles"
+        }
+      ],
+      "confirmed_behavior": [
+        "Runs only when resourceBundle[0] == 1.",
+        "Applies loaded resources only once when resourceBundle[1] == 0.",
+        "Wraps the manager setup calls with FUN_80144EA0(1) and FUN_80144EF4().",
+        "Sets resourceBundle[1] = 1 after attempting setup."
+      ],
+      "resource_slots": [
+        { "slot": 3, "link_data": "*(resourceBundle[3] + 0x10)", "consumer": "FUN_80188EFC(DAT_802E71F8, ...)" },
+        { "slot": 4, "link_data": "*(resourceBundle[4] + 0x10)", "consumer": "FUN_800C0D04(gManager_802E70B0, ...)" },
+        { "slot": 5, "link_data": "*(resourceBundle[5] + 0x10)", "consumer": "FUN_800B72F8(...)" },
+        { "slot": 6, "link_data": "*(resourceBundle[6] + 0x10)", "consumer": "FUN_800CC574(gCharacterAssetManager, ...)" },
+        { "slot": 7, "link_data": "*(resourceBundle[7] + 0x10)", "consumer": "LargeResourceManager_ReloadFromLink(gLargeResourceManager, ...)" },
+        { "slot": 8, "link_data": "*(resourceBundle[8] + 0x10)", "consumer": "UiRootManager_LoadResource(gUiRootManager, ...)" },
+        { "slot": 9, "link_data": "*(resourceBundle[9] + 0x10)", "consumer": "FUN_8010E770(gManager_802E70B4, ...)" }
+      ]
+    },
+    {
+      "address": "0x80025CA0",
+      "exported_name": "LargeResourceManager_ReloadFromLink",
+      "source_file": "src/resource/resource_manager.c",
+      "header_file": "include/resource/resource_manager.h",
+      "params": [
+        {
+          "name": "largeResourceManager",
+          "type": "int *",
+          "role": "huge global manager allocated at DAT_802E70BC, size 0x3010B8"
+        },
+        {
+          "name": "linkData",
+          "type": "int",
+          "role": "WII/link resource passed in r4 and forwarded to CzanLinkManager_InitAndSetLink"
+        }
+      ],
+      "confirmed_behavior": [
+        "Initializes a stack link manager through CzanLinkManager_InitAndSetLink(stackLinkManager, linkData).",
+        "Listing confirms incoming r4 is passed through as linkData.",
+        "Called by BootResourceBundle_ApplyLoadedResources with *(resourceBundle[7] + 0x10).",
+        "If largeResourceManager[0] is nonzero, tears down existing manager state before reinitializing.",
+        "Loads CzanLinkManager_GetBlock(linkManager, 0) into the sub-manager at largeResourceManager + 0x2FBA7C.",
+        "Initializes common/internal state at largeResourceManager + 0x10.",
+        "Initializes seven large banks starting at largeResourceManager + 0x91610.",
+        "Each bank has stride 0x58534.",
+        "Banks 0..4 are initialized with 0x5460.",
+        "Banks 5..6 are initialized with 0.",
+        "Sets largeResourceManager[0] = 1 before a final refresh.",
+        "Releases the stack link manager with CzanLinkManager_Release(linkManager, -1), so no allocator free occurs."
+      ],
+      "field_layout": [
+        { "offset": "0x000000", "meaning": "active/loaded flag" },
+        { "offset": "0x000004", "meaning": "state field cleared to 0 after reload/refresh" },
+        { "offset": "0x00000C", "meaning": "state field cleared to 0 after reload/refresh" },
+        { "offset": "0x000010", "meaning": "common/internal manager initialized by FUN_8002F1C8/FUN_8002F63C/FUN_8002F34C" },
+        { "offset": "0x091610", "meaning": "bank 0 base; seven banks total" },
+        { "offset": "0x058534", "meaning": "bank stride" },
+        { "offset": "0x2FBA7C", "meaning": "sub-manager loaded from link block 0 by FUN_800B6484" }
+      ],
+      "called_helpers_pending_export": [
+        { "address": "0x8016032C", "name": "CzanLinkManager_InitAndSetLink", "role": "initialize stack link manager and pass linkData through to CzanLinkManager_SetLink" },
+        { "address": "0x80026400", "role": "refresh/reset manager state" },
+        { "address": "0x8002F63C", "role": "clear/teardown common internal manager at +0x10" },
+        { "address": "0x8002F1C8", "role": "initialize common internal manager at +0x10" },
+        { "address": "0x8002F34C", "role": "finalize/release common internal manager at +0x10" },
+        { "address": "0x800338BC", "role": "initialize one large bank" },
+        { "address": "0x80033988", "role": "teardown one large bank" },
+        { "address": "0x800B6484", "role": "load sub-manager at +0x2FBA7C from link block 0" },
+        { "address": "0x800B6864", "role": "teardown sub-manager at +0x2FBA7C" }
+      ]
+    }
+  ]
+}

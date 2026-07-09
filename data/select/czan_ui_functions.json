@@ -1,0 +1,725 @@
+{
+  "name": "Czan UI and UI root function map",
+  "scope": "CSelMode / CSelect Czan UI object creation, animation, draw traversal, and UI-root resource setup",
+  "notes": [
+    "This file mirrors the exported .c/.h function names so confirmed Ghidra discoveries are not only stored in prose docs.",
+    "Many functions are currently exported as host stubs with confirmed parameter/field documentation, not full behavior.",
+    "Offsets are RAM addresses from main_DDRII.dol unless stated otherwise."
+  ],
+  "functions": [
+    {
+      "address": "0x8016032C",
+      "exported_name": "CzanLinkManager_InitAndSetLink",
+      "source_file": "src/resource/czan_link.c",
+      "header_file": "include/resource/czan_link.h",
+      "params": [
+        { "name": "linkManager", "type": "int", "role": "CzanLinkManager object or stack storage, passed in r3" },
+        { "name": "linkData", "type": "int", "role": "WII/link resource passed through to CzanLinkManager_SetLink in r4" }
+      ],
+      "field_writes": [
+        { "target": "linkManager", "offset": "0x10", "value": "PTR_PTR_802C0790 vtable" }
+      ],
+      "confirmed_behavior": [
+        "Sets the CzanLinkManager vtable at +0x10 to PTR_PTR_802C0790.",
+        "Calls CzanLinkManager_SetLink(linkManager, linkData) immediately after setting the vtable.",
+        "Listing confirms r3 is preserved as linkManager and incoming r4 is passed through as linkData.",
+        "Returns linkManager."
+      ]
+    },
+    {
+      "address": "0x80160368",
+      "exported_name": "CzanLinkManager_Release",
+      "source_file": "src/resource/czan_link.c",
+      "header_file": "include/resource/czan_link.h",
+      "params": [
+        { "name": "linkManager", "type": "int", "role": "CzanLinkManager object or pointer" },
+        { "name": "releaseMode", "type": "short", "role": "positive values release/free the manager through MemoryPool_Free" }
+      ],
+      "confirmed_behavior": [
+        "Returns linkManager.",
+        "If linkManager is nonzero and releaseMode > 0, calls MemoryPool_Free(0, linkManager).",
+        "Common stack cleanup calls pass -1, so no allocator release happens in those cases."
+      ],
+      "pseudocode": "if (linkManager != 0 && releaseMode > 0) MemoryPool_Free(0, linkManager); return linkManager;"
+    },
+    {
+      "address": "0x80144CF0",
+      "exported_name": "MemoryPool_Free",
+      "source_file": "src/runtime/memory.c",
+      "header_file": "include/runtime/memory.h",
+      "params": [
+        { "name": "poolIndex", "type": "int", "role": "selects allocator/pool slot" },
+        { "name": "allocation", "type": "int", "role": "allocation pointer/object to release" }
+      ],
+      "confirmed_behavior": [
+        "Locks the mutex at DAT_802EE174 + poolIndex * 0x34.",
+        "If allocation is nonzero, calls FUN_801DC5D0 on the allocator pointer at DAT_802EE158[poolIndex * 0x0D].",
+        "Unlocks the mutex at DAT_802EE174 + poolIndex * 0x34."
+      ],
+      "pseudocode": "lock(poolLock[poolIndex]); if (allocation != 0) allocatorFree(poolAllocator[poolIndex], allocation); unlock(poolLock[poolIndex]);"
+    },
+    {
+      "address": "0x800FE548",
+      "exported_name": "UiRootManager_LoadResource",
+      "source_file": "src/render/render_engine.c",
+      "header_file": "include/render/render_engine.h",
+      "params": [
+        { "name": "uiRootManager", "type": "int *", "role": "UI root manager object" },
+        { "name": "linkData", "type": "void *", "role": "WII UI-root resource" }
+      ],
+      "confirmed_behavior": [
+        "Creates Czan object groups from WII blocks 0..3 into uiRootManager[1..4].",
+        "Allocates/initializes sub-managers from blocks 4..8.",
+        "Creates five standalone TPL textures from blocks 9..13 into uiRootManager[5..9].",
+        "Sets uiRootManager[0] = 1 when setup completes."
+      ],
+      "observed_resource_layouts": [
+        {
+          "path": "input/DATA/2Dcommon/comAF_SP.bin",
+          "layout_json": "data/comaf_sp_resource_layout.json",
+          "block_count": 14,
+          "notes": "Spanish region UI-root resource passed from boot resource bundle slot 6 / resourceBundle[8]."
+        }
+      ],
+      "related_functions": [
+        "UiRootSubManager_LoadCzanGroups",
+        "UiRootSubManager_LoadCzanGroupsWithTexture",
+        "UiRootManager_DrawFrame"
+      ]
+    },
+    {
+      "address": "0x800FEC3C",
+      "exported_name": "UiRootManager_CreateReferenceObjectGroup",
+      "source_file": "src/render/render_engine.c",
+      "header_file": "include/render/render_engine.h",
+      "params": [
+        { "name": "uiRootManager", "type": "int *", "role": "UI root manager; uiRootManager[1] is the base/root Czan object group" },
+        { "name": "referenceObjectGroupHandle", "type": "int", "role": "Czan object group containing the reference child, or -1 when no reference child is used" },
+        { "name": "referenceChildIndex", "type": "int", "role": "child index in the reference object group; -1 skips linking/copying reference data" },
+        { "name": "linkMode", "type": "unsigned char", "role": "link mode passed to CzanUiManager_LinkObjectGroupToReferenceObject" }
+      ],
+      "confirmed_behavior": [
+        "Returns -1 if uiRootManager[1] is -1.",
+        "Otherwise creates/clones a Czan object group with CzanUiManager_CloneObjectGroup(global Czan UI manager, uiRootManager[1], 2, 0).",
+        "If referenceChildIndex is not -1, links the new group to referenceObjectGroupHandle/referenceChildIndex using linkMode.",
+        "If the new group is valid, fetches the reference child object with FUN_80175804 and applies referenceObject - 8 to the new group with FUN_8017559C.",
+        "Reads reference child color/settings through FUN_801761E0 and applies those bytes to the new group with FUN_80175B00.",
+        "Enables the reference child through CzanUiManager_SetChildObjectEnabled(..., 1).",
+        "Returns the new group handle."
+      ],
+      "field_reads": [
+        { "target": "uiRootManager", "offset": "0x04", "value": "base/root Czan object group handle" }
+      ],
+      "related_functions": [
+        "CzanUiManager_CloneObjectGroup",
+        "CzanUiManager_LinkObjectGroupToReferenceObject",
+        "FUN_80175804",
+        "FUN_8017559C",
+        "FUN_801761E0",
+        "FUN_80175B00",
+        "CzanUiManager_SetChildObjectEnabled"
+      ]
+    },
+    {
+      "address": "0x80173D18",
+      "exported_name": "CzanUiManager_CloneObjectGroup",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "uiManager", "type": "int", "role": "Czan UI manager / object group table owner" },
+        { "name": "sourceObjectGroupHandle", "type": "int", "role": "existing object group used as the clone source" },
+        { "name": "cloneFlags", "type": "unsigned int", "role": "low byte controls initial animation/setup behavior" },
+        { "name": "initialAnimIndex", "type": "int", "role": "animation index assigned to each cloned object instance" }
+      ],
+      "confirmed_behavior": [
+        "Finds the first free object-group slot whose child handle array at group +0x20 is zero.",
+        "Returns -1 if no free slot is available.",
+        "Copies the source group's descriptor pointer at +0x1C and child count from descriptor +0x08.",
+        "Allocates a new child handle array sized childCount * 4 and stores it at newGroup +0x20.",
+        "Initializes group bounds/scale fields at +0x0C, +0x10, +0x14, and +0x18.",
+        "For every source child descriptor, allocates a 0x1D8-byte CzanSpriteObject and a 0x1B4-byte CzanUiObjectInstance.",
+        "Descriptor type 2 creates an 8x8 dummy sprite with no texture.",
+        "Other descriptor types copy texture slot/resource fields from the matching source child sprite and bind the texture frame.",
+        "Stores each cloned object instance in the new group's child handle array.",
+        "Sets object +0x20 to the UI manager, object +0x24 to the cloned sprite, object +0x198 to the descriptor, object +0x16C to initialAnimIndex, and object +0x1A4 to the new group handle.",
+        "If cloneFlags low byte is 1 or 2, starts and runs the selected animation, then resets several animation state fields.",
+        "If cloneFlags low byte is 3 or 4, calls CzanUiObjectInstance_PreplayInitialAnimation; flag 4 also clears object +0xB0.",
+        "Descriptor flags at +0x1A control draw/enable/animation flags on the cloned object.",
+        "Marks the UI manager and new group as active and updates a group flag depending on whether any cloned child is drawable.",
+        "Returns the new object group handle."
+      ],
+      "field_writes": [
+        { "target": "new object group", "offset": "0x04", "value": "child count" },
+        { "target": "new object group", "offset": "0x08", "value": "group flag byte from descriptor flags" },
+        { "target": "new object group", "offset": "0x0C/0x10/0x14/0x18", "value": "initial bounds/scale fields" },
+        { "target": "new object group", "offset": "0x1C", "value": "source group descriptor pointer" },
+        { "target": "new object group", "offset": "0x20", "value": "allocated child object handle array" },
+        { "target": "new object group", "offset": "0x24", "value": "active/created flag bit OR 1" },
+        { "target": "cloned object instance", "offset": "0x020", "value": "uiManager" },
+        { "target": "cloned object instance", "offset": "0x024", "value": "cloned sprite object" },
+        { "target": "cloned object instance", "offset": "0x16C", "value": "initialAnimIndex" },
+        { "target": "cloned object instance", "offset": "0x198", "value": "child descriptor pointer" },
+        { "target": "cloned object instance", "offset": "0x1A4", "value": "new object group handle" }
+      ],
+      "related_functions": [
+        "AllocObjectAligned",
+        "CzanSpriteObject_Init",
+        "CzanUiObjectInstance_Init",
+        "BindTextureFromTextureSet",
+        "CzanUiObjectInstance_StartAnimation",
+        "CzanUiObjectInstance_RunAnimationScript",
+        "CzanUiObjectInstance_PreplayInitialAnimation"
+      ]
+    },
+    {
+      "address": "0x80173414",
+      "exported_name": "CzanUiManager_CreateObjectGroup",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "uiManager", "type": "int", "role": "Czan UI manager / object group table owner" },
+        { "name": "linkData", "type": "void *", "role": "WII/Czan link resource used to build the object group" },
+        { "name": "flags", "type": "unsigned int", "role": "low byte controls initial animation/setup behavior" },
+        { "name": "initialAnimIndex", "type": "int", "role": "animation index assigned to each created object instance" }
+      ],
+      "returns": [
+        { "value": "new object group handle", "meaning": "created successfully" },
+        { "value": "-1", "meaning": "no free object group slot was available" },
+        { "value": "-2", "meaning": "block 1 metadata validation failed" }
+      ],
+      "confirmed_behavior": [
+        "Finds the first free object-group slot whose child handle array at group +0x20 is zero.",
+        "Links linkData with a CzanLinkManager.",
+        "Reads block 1 as the object-group metadata block.",
+        "Validates and relocates block 1 with CzanUiManager_ValidateAndRelocateObjectGroupMetadata(uiManager, metadataBlock); if validation fails, releases the link manager and returns -2.",
+        "Stores metadata block pointer at group +0x1C and child count from metadata +0x08 at group +0x04.",
+        "Allocates a child handle array sized childCount * 4 and stores it at group +0x20.",
+        "Reads block 0 as a nested texture/resource link container.",
+        "For every 0x20-byte child descriptor, allocates a 0x1D8-byte CzanSpriteObject and a 0x1B4-byte CzanUiObjectInstance.",
+        "Descriptor type 2 creates an 8x8 dummy sprite with no texture.",
+        "Descriptor type 0 reads a TPL/resource block index from descriptor +0x10, creates a texture slot with CreateTextureFromTplResource, and binds it to the sprite.",
+        "Other descriptor types copy/reuse texture slot and texture metadata from a previously-created child selected by descriptor +0x12.",
+        "Stores each created object instance in the new group's child handle array.",
+        "Sets object +0x20 to the UI manager, object +0x24 to the sprite, object +0x198 to the descriptor, object +0x16C to initialAnimIndex, and object +0x1A4 to the new group handle.",
+        "If flags low byte is 1 or 2, starts and runs the selected animation, then resets several animation state fields.",
+        "If flags low byte is 3 or 4, calls CzanUiObjectInstance_PreplayInitialAnimation; flag 4 also clears object +0xB0.",
+        "Descriptor flags at +0x1A control draw/enable/animation flags on the created object.",
+        "Marks the UI manager and new group as active and updates a group flag depending on whether any child is drawable.",
+        "Releases temporary CzanLinkManagers with releaseMode -1 before returning."
+      ],
+      "resource_blocks": [
+        { "block": 0, "meaning": "nested texture/TPL resource link container" },
+        { "block": 1, "meaning": "object-group metadata block containing child count and child descriptors" }
+      ],
+      "descriptor_layout": [
+        { "offset": "0x10", "meaning": "texture/TPL block index when descriptor type is 0" },
+        { "offset": "0x12", "meaning": "source child index when descriptor reuses a previous child texture" },
+        { "offset": "0x14", "meaning": "descriptor type: 0 creates texture, 2 dummy, other values reuse previous child texture" },
+        { "offset": "0x18", "meaning": "two bytes copied to sprite +0x38/+0x39" },
+        { "offset": "0x1A", "meaning": "behavior flags controlling enabled/draw/animation/group status" },
+        { "offset": "0x1C", "meaning": "animation table pointer; initialAnimIndex selects a 0x10-byte entry" }
+      ],
+      "related_functions": [
+        "CzanLinkManager_Init",
+        "CzanLinkManager_SetLink",
+        "CzanLinkManager_GetBlock",
+        "CzanUiManager_ValidateAndRelocateObjectGroupMetadata",
+        "AllocObjectAligned",
+        "CzanSpriteObject_Init",
+        "CreateTextureFromTplResource",
+        "BindTextureFromTextureSet",
+        "CzanUiObjectInstance_Init",
+        "CzanUiObjectInstance_StartAnimation",
+        "CzanUiObjectInstance_RunAnimationScript",
+        "CzanUiObjectInstance_PreplayInitialAnimation",
+        "CzanLinkManager_Release"
+      ]
+    },
+    {
+      "address": "0x801728E4",
+      "exported_name": "CzanUiObjectInstance_PreplayInitialAnimation",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "objectInstance", "type": "int", "role": "0x1B4-byte Czan UI object instance" }
+      ],
+      "confirmed_behavior": [
+        "Saves object +0x175, then temporarily writes object +0x175 = 3.",
+        "Starts the selected animation with CzanUiObjectInstance_StartAnimation(0.0, objectInstance, object +0x16C).",
+        "Reads the current float at object +0xB4 as the preplay iteration count.",
+        "Sets object +0xB4 to 0.0 before preplaying.",
+        "Runs CzanUiObjectInstance_RunAnimationScript once per integer tick from 0 to preplayCount - 1.",
+        "Restores object +0x175 to its saved value.",
+        "Resets object +0x19C to the selected animation entry's command/script pointer at descriptor +0x1C + animationIndex * 0x10 + 0x0C.",
+        "Clears object +0x171.",
+        "Sets object +0xB1 = 1 and object +0xB2 = 0.",
+        "Sets object +0xB4 = 0.0 and object +0xC0 = 0."
+      ],
+      "field_reads": [
+        { "target": "objectInstance", "offset": "0x16C", "value": "selected animation index" },
+        { "target": "objectInstance", "offset": "0x175", "value": "saved mode/behavior byte" },
+        { "target": "objectInstance", "offset": "0x198", "value": "object descriptor pointer" },
+        { "target": "object descriptor", "offset": "0x1C", "value": "animation entry table pointer" }
+      ],
+      "field_writes": [
+        { "target": "objectInstance", "offset": "0x175", "value": "temporarily 3, restored before return" },
+        { "target": "objectInstance", "offset": "0x19C", "value": "selected animation entry script pointer" },
+        { "target": "objectInstance", "offset": "0x171", "value": "0" },
+        { "target": "objectInstance", "offset": "0x0B1", "value": "1" },
+        { "target": "objectInstance", "offset": "0x0B2", "value": "0" },
+        { "target": "objectInstance", "offset": "0x0B4", "value": "0.0" },
+        { "target": "objectInstance", "offset": "0x0C0", "value": "0" }
+      ],
+      "related_functions": [
+        "CzanUiObjectInstance_StartAnimation",
+        "CzanUiObjectInstance_RunAnimationScript"
+      ]
+    },
+    {
+      "address": "0x80174D14",
+      "exported_name": "CzanUiManager_ValidateAndRelocateObjectGroupMetadata",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "uiManager", "type": "int", "role": "present in signature; unused by decompiled body" },
+        { "name": "metadataBlock", "type": "char *", "role": "CAE_WII object-group metadata block" }
+      ],
+      "returns": [
+        { "value": "1", "meaning": "metadata block is valid; already relocated or relocation completed" },
+        { "value": "0", "meaning": "metadata block magic is not CAE_WII\\0" }
+      ],
+      "confirmed_behavior": [
+        "Checks metadataBlock[0..7] for the magic string CAE_WII\\0.",
+        "If metadataBlock[0x0B] is already nonzero, returns 1 without relocating again.",
+        "Sets metadataBlock[0x0B] = 1 before relocating offsets.",
+        "Relocates metadataBlock +0x0C from descriptor-table offset to descriptor-table pointer.",
+        "Uses the child/descriptor count at metadataBlock +0x08.",
+        "Walks each 0x20-byte descriptor and relocates descriptor +0x1C from animation-table offset to pointer.",
+        "Uses each descriptor's animation-entry count at descriptor +0x16.",
+        "For every 0x10-byte animation entry, clears entry +0x0C when entry +0x04 is zero.",
+        "Otherwise relocates animation entry +0x0C relative to metadataBlock."
+      ],
+      "metadata_layout": [
+        { "offset": "0x00", "meaning": "magic string CAE_WII\\0" },
+        { "offset": "0x08", "meaning": "descriptor count, u16" },
+        { "offset": "0x0B", "meaning": "relocated flag byte" },
+        { "offset": "0x0C", "meaning": "descriptor table offset before relocation, pointer after relocation" }
+      ],
+      "descriptor_layout": [
+        { "offset": "0x16", "meaning": "animation entry count, u16" },
+        { "offset": "0x1C", "meaning": "animation table offset before relocation, pointer after relocation" }
+      ],
+      "animation_entry_layout": [
+        { "offset": "0x04", "meaning": "nonzero means entry +0x0C is a relocatable offset" },
+        { "offset": "0x0C", "meaning": "offset/pointer relocated relative to metadataBlock, or cleared to 0" }
+      ]
+    },
+    {
+      "address": "0x80100944",
+      "exported_name": "UiRootSubManager_LoadCzanGroups",
+      "source_file": "src/render/render_engine.c",
+      "header_file": "include/render/render_engine.h",
+      "params": [
+        { "name": "subManager", "type": "int *", "role": "uiRootManager[0x0C] sub-manager" },
+        { "name": "linkData", "type": "void *", "role": "nested WII block resource" }
+      ],
+      "confirmed_behavior": [
+        "Creates Czan object groups from nested blocks 0..3 with flags=2.",
+        "Stores created groups at subManager[0..3].",
+        "Clones/derives handles from subManager[3] into subManager[4..8].",
+        "Creates temporary/root groups through FUN_801002E4(gUiRootManager).",
+        "Links those temporary/root groups to reference children with linkMode 0x1F.",
+        "Allocates helper objects at subManager[0x1F], [0x20], and [0x21..0x26]."
+      ]
+    },
+    {
+      "address": "0x80104538",
+      "exported_name": "UiRootSubManager_LoadCzanGroupsWithTexture",
+      "source_file": "src/render/render_engine.c",
+      "header_file": "include/render/render_engine.h",
+      "params": [
+        { "name": "subManager", "type": "int *", "role": "uiRootManager[0x0D] sub-manager" },
+        { "name": "linkData", "type": "void *", "role": "nested WII block resource" }
+      ],
+      "confirmed_behavior": [
+        "Creates Czan object groups from nested blocks 0..3 with flags=0.",
+        "Stores created groups at subManager[0..3].",
+        "Creates/retrieves subManager[4] through UiRootManager_CreateReferenceObjectGroup(gUiRootManager, -1, -1, 0x1F).",
+        "Calls CzanUiManager_SetObjectGroupDrawEnabled(..., 0) for subManager[0], [2], [3], [1], and [4].",
+        "Creates one TPL texture from nested block 4 and stores the texture slot at subManager[0x0B]."
+      ],
+      "related_functions": [
+        "CzanUiManager_SetObjectGroupDrawEnabled",
+        "CreateTextureFromTplResource"
+      ]
+    },
+    {
+      "address": "0x80106054",
+      "exported_name": "UiRootSubManager_InitTextureFrameGroups",
+      "source_file": "src/render/render_engine.c",
+      "header_file": "include/render/render_engine.h",
+      "params": [
+        { "name": "subManager", "type": "int *", "role": "0x7C8-byte sub-manager stored at uiRootManager[0x0E]" }
+      ],
+      "confirmed_behavior": [
+        "Creates two banks of 0x28 root/object groups through FUN_801002E4(gUiRootManager).",
+        "Stores bank 0 handles at subManager + 0x08.",
+        "Stores bank 1 handles at subManager + 0x3E8.",
+        "Immediately hides every bank 1 group with CzanUiManager_SetObjectGroupDrawEnabled(..., 0).",
+        "Assigns texture frames 0..0x27 to bank 0 groups.",
+        "Assigns texture frames 0..0x27 to bank 1 groups.",
+        "This object is allocated after the block 5 loader, but it is not initialized from a WII block directly."
+      ],
+      "layout": [
+        { "offset": "0x000", "meaning": "bank 0 object header/unknown fields" },
+        { "offset": "0x008", "meaning": "bank 0 group handle array, 0x28 entries" },
+        { "offset": "0x3E0", "meaning": "bank 1 object header/unknown fields" },
+        { "offset": "0x3E8", "meaning": "bank 1 group handle array, 0x28 entries" }
+      ],
+      "related_functions": [
+        "CzanUiManager_SetObjectGroupDrawEnabled",
+        "CzanUiManager_SetObjectTextureFrame"
+      ]
+    },
+    {
+      "address": "0x80106C34",
+      "exported_name": "UiRootSubManager_LoadLinkedObjectGroup",
+      "source_file": "src/render/render_engine.c",
+      "header_file": "include/render/render_engine.h",
+      "params": [
+        { "name": "subManager", "type": "int *", "role": "0x14-byte sub-manager stored at uiRootManager[0x0F]" },
+        { "name": "linkData", "type": "void *", "role": "WII/Czan object group resource; comAF_SP top-level block 6" }
+      ],
+      "field_writes": [
+        { "target": "subManager", "offset": "0x00", "value": "Czan object group handle" },
+        { "target": "subManager", "offset": "0x04", "value": "linked/reference group handle returned by UiRootManager_CreateReferenceObjectGroup" }
+      ],
+      "confirmed_behavior": [
+        "Creates one Czan object group from linkData with flags=2 and initialAnimIndex=0.",
+        "Stores the group handle at subManager[0].",
+        "Calls UiRootManager_CreateReferenceObjectGroup(gUiRootManager, group, 0, 0x1F).",
+        "Stores the linked/reference group handle at subManager[1]."
+      ],
+      "observed_resource_layouts": [
+        {
+          "path": "input/DATA/2Dcommon/comAF_SP.bin",
+          "top_level_block": 6,
+          "offset": "0x2A82A0",
+          "size": "0x394A0"
+        }
+      ],
+      "related_functions": [
+        "UiRootManager_CreateReferenceObjectGroup",
+        "CzanUiManager_CreateObjectGroup"
+      ]
+    },
+    {
+      "address": "0x8011E0A4",
+      "exported_name": "UiRootSubManager_LoadIndexedHiddenGroups",
+      "source_file": "src/render/render_engine.c",
+      "header_file": "include/render/render_engine.h",
+      "params": [
+        { "name": "subManager", "type": "int *", "role": "large UI sub-manager with six group handles and lookup tables" },
+        { "name": "linkData", "type": "void *", "role": "WII resource containing six Czan object group blocks" },
+        { "name": "setupValue", "type": "int", "role": "stored at subManager[0xCC7] and passed to UiRootSubManager_ConfigureIndexedHiddenGroup" }
+      ],
+      "field_writes": [
+        { "target": "subManager", "offset": "0x0000..0x0014", "value": "six Czan object group handles" },
+        { "target": "subManager", "offset": "0x3318", "value": "-1 / subManager[0xCC6]" },
+        { "target": "subManager", "offset": "0x331C", "value": "setupValue / subManager[0xCC7]" },
+        { "target": "subManager", "offset": "0x3320", "value": "0 / subManager[0xCC8]" },
+        { "target": "subManager", "offset": "0x3324", "value": "1 / subManager[0xCC9]" }
+      ],
+      "lookup_formula": "*(subManager + groupIndex * 0x80 + 0x17 + objectId) = childIndex, where objectId is read from childObject +0x160",
+      "confirmed_behavior": [
+        "Links the supplied WII resource with CzanLinkManager.",
+        "Creates six Czan object groups from blocks 0..5 with flags=2.",
+        "Stores group handles at subManager[0..5].",
+        "Immediately hides every group with CzanUiManager_SetObjectGroupDrawEnabled(..., 0).",
+        "Builds a byte lookup table for each group from child object ID to child index.",
+        "Calls UiRootSubManager_ConfigureIndexedHiddenGroup(subManager, groupIndex, setupValue) after each group is loaded."
+      ],
+      "related_functions": [
+        "CzanUiManager_SetObjectGroupDrawEnabled",
+        "FUN_80175FB8",
+        "FUN_801761C4",
+        "UiRootSubManager_ConfigureIndexedHiddenGroup"
+      ]
+    },
+    {
+      "address": "0x8011E3E8",
+      "exported_name": "UiRootSubManager_ConfigureIndexedHiddenGroup",
+      "source_file": "src/render/render_engine.c",
+      "header_file": "include/render/render_engine.h",
+      "params": [
+        { "name": "subManager", "type": "int *", "role": "same sub-manager passed to UiRootSubManager_LoadIndexedHiddenGroups" },
+        { "name": "groupIndex", "type": "int", "role": "which of the six hidden groups to configure" },
+        { "name": "setupValue", "type": "int", "role": "stored at subManager[0xCC7] and passed through from the loader" }
+      ],
+      "confirmed_behavior": [
+        "Returns early if subManager[0xCC9] is zero.",
+        "Writes setupValue to subManager[0xCC7].",
+        "Reads a five-word config row from DAT_80291AB0 + groupIndex * 0x14.",
+        "Uses config[0] as the configured child count.",
+        "Uses config[0x0C] to choose raw versus normalized quad values.",
+        "Uses config[0x10] to decide whether to capture current child data before rewriting it.",
+        "Writes one 0x10-byte per-child data entry at subManager + groupIndex * 0x800 + 0x318 + childIndex * 0x10.",
+        "Applies the per-child data through FUN_80175998.",
+        "In widescreen mode, applies additional child transform/offset data."
+      ],
+      "config_table": {
+        "address": "0x80291AB0",
+        "stride": "0x14",
+        "fields": [
+          { "offset": "0x00", "name": "configured_child_count", "type": "s32" },
+          { "offset": "0x04", "name": "base_scale_x", "type": "float" },
+          { "offset": "0x08", "name": "base_scale_y", "type": "float" },
+          { "offset": "0x0C", "name": "uses_normalized_quad", "type": "s32" },
+          { "offset": "0x10", "name": "captures_original_child_data", "type": "s32" }
+        ]
+      },
+      "called_helpers_pending_export": [
+        { "address": "0x80175FB8", "role": "get child count for a Czan object group" },
+        { "address": "0x80175FCC", "role": "read child object data into a local struct" },
+        { "address": "0x801760EC", "role": "query child texture size / object dimensions" },
+        { "address": "0x801761A4", "role": "get child sprite/object handle" },
+        { "address": "0x80175998", "role": "apply per-child quad/UV data" },
+        { "address": "0x801752AC", "role": "apply alternate child transform data" },
+        { "name": "CzanUiManager_ApplyChildObjectOffset", "role": "apply child transform/offset data" }
+      ]
+    },
+    {
+      "address": "0x800FEB58",
+      "exported_name": "UiRootManager_DrawFrame",
+      "source_file": "src/render/render_engine.c",
+      "header_file": "include/render/render_engine.h",
+      "params": [
+        { "name": "uiRootManager", "type": "int *", "role": "UI root manager object" }
+      ],
+      "confirmed_behavior": [
+        "If uiRootManager[0] is nonzero, runs the UI-root draw/update pass.",
+        "When uiRootManager[0x0B] is zero, calls CzanUiManager_DrawObjectListReverse(global Czan UI manager, -1).",
+        "Uses uiRootManager[0x0B] as a draw/reentrancy guard and resets it at the end."
+      ],
+      "draw_chain": [
+        "UiRootManager_DrawFrame",
+        "CzanUiManager_DrawObjectListReverse",
+        "CzanUiObjectInstance_Draw",
+        "CzanSpriteObject_Draw",
+        "CzanDrawTexturedOrColoredQuad"
+      ]
+    },
+    {
+      "address": "0x80175448",
+      "exported_name": "CzanUiManager_SetObjectTextureFrame",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "uiManager", "type": "int", "role": "Czan UI manager" },
+        { "name": "objectGroupHandle", "type": "int", "role": "object group index/handle" },
+        { "name": "childObjectIndex", "type": "int", "role": "child object index inside group" },
+        { "name": "textureFrameOrAuto", "type": "int", "role": "texture frame; -2 means object +0xA8 + object +0x14C" },
+        { "name": "updateSpriteDimensions", "type": "int", "role": "when nonzero, copies TPL dimensions into the sprite" }
+      ],
+      "field_writes": [
+        { "target": "CzanUiObjectInstance", "offset": "0x148", "value": "requested texture frame" },
+        { "target": "CzanSpriteObject", "offset": "0x034", "value": "active texture frame" },
+        { "target": "CzanSpriteObject", "offset": "0x100/0x108", "value": "texture dimensions when updateSpriteDimensions != 0" },
+        { "target": "CzanSpriteObject", "offset": "0x078/0x07C", "value": "half texture dimensions as floats" }
+      ]
+    },
+    {
+      "address": "0x801750E4",
+      "exported_name": "CzanUiManager_ApplyObjectGroupPositionLayout",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "uiManager", "type": "int", "role": "Czan UI manager" },
+        { "name": "objectGroupHandle", "type": "int", "role": "object group index/handle" },
+        { "name": "xyOffset", "type": "float *", "role": "x/y position offset applied to every child" }
+      ],
+      "field_writes": [
+        { "target": "each child object", "offset": "0x0D0/0x0D4", "value": "input x/y offset" },
+        { "target": "attached sprite", "offset": "0x03C/0x040", "value": "object base position + x/y offset" }
+      ]
+    },
+    {
+      "address": "0x8017515C",
+      "exported_name": "CzanUiManager_ApplyChildObjectPositionLayout",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "uiManager", "type": "int", "role": "Czan UI manager" },
+        { "name": "objectGroupHandle", "type": "int", "role": "object group index/handle" },
+        { "name": "childObjectIndex", "type": "int", "role": "child object index inside group" },
+        { "name": "xyOffset", "type": "float *", "role": "x/y position offset applied to one child" }
+      ],
+      "field_writes": [
+        { "target": "child object", "offset": "0x0D0/0x0D4", "value": "input x/y offset" },
+        { "target": "attached sprite", "offset": "0x03C/0x040", "value": "object base position + x/y offset" }
+      ]
+    },
+    {
+      "address": "0x801751B8",
+      "exported_name": "CzanUiManager_ApplyObjectGroupAnimationOffset",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "uiManager", "type": "int", "role": "Czan UI manager" },
+        { "name": "objectGroupHandle", "type": "int", "role": "object group index/handle" },
+        { "name": "xyOffset", "type": "float *", "role": "x/y animation offset applied to every child" }
+      ],
+      "field_writes": [
+        { "target": "each child object", "offset": "0x0E8/0x0EC", "value": "input x/y animation offset" },
+        { "target": "attached sprite", "offset": "0x090/0x094", "value": "object scale factors * (object base animation offset + input offset)" }
+      ]
+    },
+    {
+      "address": "0x80175240",
+      "exported_name": "CzanUiManager_ApplyChildObjectAnimationOffset",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "uiManager", "type": "int", "role": "Czan UI manager" },
+        { "name": "objectGroupHandle", "type": "int", "role": "object group index/handle" },
+        { "name": "childObjectIndex", "type": "int", "role": "child object index inside group" },
+        { "name": "xyOffset", "type": "float *", "role": "x/y animation offset applied to one child" }
+      ],
+      "field_writes": [
+        { "target": "child object", "offset": "0x0E8/0x0EC", "value": "input x/y animation offset" },
+        { "target": "attached sprite", "offset": "0x090/0x094", "value": "object scale factors * (object base animation offset + input offset)" }
+      ]
+    },
+    {
+      "address": "0x801750A8",
+      "exported_name": "CzanUiManager_SetObjectGroupDrawEnabled",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "uiManager", "type": "int", "role": "Czan UI manager" },
+        { "name": "objectGroupHandle", "type": "int", "role": "object group index/handle" },
+        { "name": "drawEnabled", "type": "unsigned char", "role": "value written to object +0x181" }
+      ],
+      "field_writes": [
+        { "target": "each child object in group", "offset": "0x181", "value": "drawEnabled" }
+      ],
+      "confirmed_behavior": [
+        "Loops over uiManager->groups[objectGroupHandle].children.",
+        "Writes the draw-list participation flag for every child.",
+        "CzanUiManager_DrawObjectListReverse draws only objects with object +0x181 == 1."
+      ],
+      "distinguish_from": [
+        {
+          "function": "CzanUiManager_SetObjectGroupEnabled / 0x80174F04",
+          "field": "object +0x173",
+          "meaning": "enabled/visibility flag checked by CzanUiObjectInstance_Draw"
+        }
+      ]
+    },
+    {
+      "address": "0x80174F04",
+      "exported_name": "CzanUiManager_SetObjectGroupEnabled",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "field_writes": [
+        { "target": "each child object in group", "offset": "0x173", "value": "enabled" }
+      ]
+    },
+    {
+      "address": "0x80174F40",
+      "exported_name": "CzanUiManager_SetChildObjectEnabled",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "field_writes": [
+        { "target": "one child object", "offset": "0x173", "value": "enabled" }
+      ]
+    },
+    {
+      "address": "0x80176D68",
+      "exported_name": "CzanUiManager_LinkObjectGroupToReferenceObject",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "uiManager", "type": "int", "role": "Czan UI manager" },
+        { "name": "targetObjectGroupHandle", "type": "int", "role": "target object group whose children receive the link" },
+        { "name": "referenceObjectGroupHandle", "type": "int", "role": "object group containing the reference child" },
+        { "name": "referenceChildIndex", "type": "int", "role": "child object used as reference" },
+        { "name": "linkMode", "type": "unsigned char", "role": "value written to target sprite +0x1B4" }
+      ],
+      "field_writes": [
+        { "target": "each target child object", "offset": "0x190", "value": "reference object" },
+        { "target": "each target child sprite", "offset": "0x1B0", "value": "reference sprite" },
+        { "target": "each target child sprite", "offset": "0x1B4", "value": "linkMode" }
+      ]
+    },
+    {
+      "address": "0x80174BA8",
+      "exported_name": "CzanUiManager_DrawObjectListReverse",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "confirmed_behavior": [
+        "Draws the global object list from last to first.",
+        "Skips when object list +0x19 is set or +0x1C is null.",
+        "Draws only objects with object +0x181 == 1.",
+        "Filters by object +0x18C unless drawLayerFilter is -1."
+      ]
+    },
+    {
+      "address": "0x80174C58",
+      "exported_name": "CzanUiManager_DrawObjectGroupInListOrder",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "confirmed_behavior": [
+        "Filters the global object list down to objects belonging to one object group.",
+        "Preserves the same reverse global draw order."
+      ]
+    },
+    {
+      "address": "0x80174CF8",
+      "exported_name": "CzanUiManager_DrawChildObject",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "confirmed_behavior": [
+        "Directly draws one child from uiManager->groups[objectGroupHandle].children[childObjectIndex]."
+      ]
+    },
+    {
+      "address": "0x801729B4",
+      "exported_name": "CzanUiObjectInstance_Draw",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "key_fields": [
+        { "offset": "0x024", "meaning": "attached CzanSpriteObject passed to CzanSpriteObject_Draw" },
+        { "offset": "0x028", "meaning": "linked sprite/reference state copied to sprite +0x1A8" },
+        { "offset": "0x148", "meaning": "texture-frame override" },
+        { "offset": "0x16C", "meaning": "current animation index" },
+        { "offset": "0x173", "meaning": "enabled/visibility flag" },
+        { "offset": "0x181", "meaning": "draw-list participation flag" },
+        { "offset": "0x18C", "meaning": "draw layer/filter" },
+        { "offset": "0x198", "meaning": "CAE descriptor" },
+        { "offset": "0x1A4", "meaning": "owning object-group handle" }
+      ]
+    },
+    {
+      "address": "0x80170354",
+      "exported_name": "CzanSpriteObject_Draw",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "confirmed_behavior": [
+        "High-level sprite draw dispatcher.",
+        "Checks sprite active state, texture frame, and nonzero draw dimensions.",
+        "Copies/adjusts vertex color blocks and dispatches to a low-level quad emitter."
+      ]
+    },
+    {
+      "address": "0x8016BE18",
+      "exported_name": "CzanDrawTexturedOrColoredQuad",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "confirmed_behavior": [
+        "Low-level GX quad emitter.",
+        "Binds a texture if a texture object is provided; otherwise emits a colored quad."
+      ]
+    }
+  ]
+}

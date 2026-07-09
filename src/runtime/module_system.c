@@ -41,6 +41,38 @@ int MainLoopManager_Tick(int *mainLoopManager) {
     return 0;
 }
 
+void BootResourceBundle_ApplyLoadedResources(int *resourceBundle) {
+    /* 0x80021F58 applies a loaded boot/resource bundle to the global managers.
+       It runs once when resourceBundle[0] == 1 and resourceBundle[1] == 0, then
+       marks resourceBundle[1] = 1.
+
+       Confirmed resource handle slots:
+       [3] -> DAT_802E71F8 / system manager, link data at handle +0x10
+       [4] -> gManager_802E70B0
+       [5] -> gLargeResourceManager-related sub-manager setup
+       [6] -> gCharacterAssetManager
+       [7] -> gLargeResourceManager via LargeResourceManager_ReloadFromLink
+       [8] -> gUiRootManager via UiRootManager_LoadResource
+       [9] -> gManager_802E70B4
+
+       The original wraps the manager setup calls with FUN_80144EA0(1) / FUN_80144EF4(). */
+    (void)resourceBundle;
+}
+
+void BootResourceBundle_StartLoading(int *resourceBundle) {
+    /* 0x80021E98 starts loading the boot/CGame resource bundle into gBootTempManager.
+       If resourceBundle[0] is zero, it selects a region/layout path table using
+       FUN_80143830(DAT_802E71B8), then loads eight resources with LoadResourceByPath.
+
+       Slot layout is one int per resourceBundle slot:
+       resourceBundle[slot + 2] = ResourceHandle*
+
+       The path table starts at PTR_s_/banner/banner_US.bin_802A4390 + regionIndex * 8.
+       After queuing/loading resources, it calls FUN_80023634(gManager_802E70A4) and
+       marks resourceBundle[0] = 1. */
+    (void)resourceBundle;
+}
+
 void ModuleController_ApplyPendingModule(int *moduleController) {
     ModuleControllerKnownFields *controller = (ModuleControllerKnownFields *)moduleController;
 

@@ -21,6 +21,8 @@ int MainLoopManager_Tick(int *mainLoopManager);
 void ModuleController_ApplyPendingModule(int *moduleController);
 void ModuleController_CreatePendingModule(int *moduleController);
 int ModuleController_Update(ModuleControllerKnownFields *moduleController);
+void BootResourceBundle_StartLoading(int *resourceBundle);
+void BootResourceBundle_ApplyLoadedResources(int *resourceBundle);
 
 int CSelect_Init(void *cSelect);
 

@@ -13,5 +13,7 @@ int CzanLinkResource_GetBlock(
     unsigned int resourceSize,
     unsigned int blockIndex,
     CzanLinkBlock *outBlock);
+int CzanLinkManager_InitAndSetLink(int linkManager, int linkData);
+int CzanLinkManager_Release(int linkManager, short releaseMode);
 
 #endif

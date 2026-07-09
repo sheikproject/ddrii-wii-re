@@ -43,5 +43,19 @@ unsigned int CreateTextureFromTplResource(
 int TextureSlot_InitFromTpl(TextureSlotKnownFields *textureSlot);
 int BindTextureFromTextureSet(void *textureHandle, void *outTextureObject, int textureIndex);
 void DrawFilledRect(int x, int y, int z, int width, int height, const unsigned int *color, int flags);
+void UiRootManager_LoadResource(int *uiRootManager, void *linkData);
+int UiRootManager_CreateReferenceObjectGroup(
+    int *uiRootManager,
+    int referenceObjectGroupHandle,
+    int referenceChildIndex,
+    unsigned char linkMode
+);
+void UiRootSubManager_LoadCzanGroups(int *subManager, void *linkData);
+void UiRootSubManager_LoadCzanGroupsWithTexture(int *subManager, void *linkData);
+void UiRootSubManager_InitTextureFrameGroups(int *subManager);
+void UiRootSubManager_LoadLinkedObjectGroup(int *subManager, void *linkData);
+void UiRootSubManager_LoadIndexedHiddenGroups(int *subManager, void *linkData, int setupValue);
+void UiRootSubManager_ConfigureIndexedHiddenGroup(int *subManager, int groupIndex, int setupValue);
+void UiRootManager_DrawFrame(int *uiRootManager);
 
 #endif

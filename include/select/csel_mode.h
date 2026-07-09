@@ -100,7 +100,19 @@ void CSelModeEntry_PlayObject(void *entry, int objectSlot);
 void CSelModeEntry_SetTransformTriplet(void *entry, const int *values);
 int CzanUiObjectInstance_Init(void *objectInstance);
 int CzanSpriteObject_Init(void *spriteObject);
+int CzanUiManager_CreateObjectGroup(
+    int uiManager,
+    void *linkData,
+    unsigned int flags,
+    int initialAnimIndex);
+int CzanUiManager_ValidateAndRelocateObjectGroupMetadata(int uiManager, char *metadataBlock);
+int CzanUiManager_CloneObjectGroup(
+    int uiManager,
+    int sourceObjectGroupHandle,
+    unsigned int cloneFlags,
+    int initialAnimIndex);
 void CzanUiObjectInstance_StartAnimation(double startFrame, int objectInstance, int animationIndex);
+void CzanUiObjectInstance_PreplayInitialAnimation(int objectInstance);
 void CzanSpriteObject_SetRenderMode(int spriteObject, int mode);
 void CzanUiObjectInstance_RunAnimationScript(int objectInstance, int allowUnknownOpcode);
 void CzanUiObjectInstance_ApplyColorBlocks(int objectInstance);
@@ -128,6 +140,7 @@ void CzanUiManager_SetChildObjectEnabled(
     int objectGroupHandle,
     int childObjectIndex,
     unsigned char enabled);
+void CzanUiManager_SetObjectGroupDrawEnabled(int uiManager, int objectGroupHandle, unsigned char drawEnabled);
 void CzanUiManager_LinkObjectGroupToReferenceObject(
     int uiManager,
     int targetObjectGroupHandle,
@@ -150,8 +163,8 @@ void CzanDrawTexturedOrColoredQuad(
     unsigned int height,
     unsigned char *vertexColors,
     int textureObject,
-    int param11,
-    int param12);
+    int unknownArg11,
+    int unknownArg12);
 void CSelMode_SetHostLinkResourceSize(unsigned int resourceSize);
 int CSelMode_ModeIdToSelectedIndex(int modeId);
 const CSelModeChoice *CSelMode_GetChoice(int selectedModeIndex);

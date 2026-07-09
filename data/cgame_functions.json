@@ -1,0 +1,96 @@
+{
+  "name": "CGame function map",
+  "notes": [
+    "Offsets are RAM addresses from main_DDRII.dol unless stated otherwise.",
+    "This file tracks CGame factory/setup functions separately from CSelect and generic resource managers."
+  ],
+  "functions": [
+    {
+      "address": "0x8003CDC4",
+      "exported_name": "CGame_PrepareManagersAndResources",
+      "source_file": "src/game/cgame.c",
+      "header_file": "include/game/cgame.h",
+      "params": [
+        {
+          "name": "cgame",
+          "type": "int *",
+          "role": "CGame object created by CGameFactorySetup"
+        }
+      ],
+      "key_fields": [
+        { "offset": "0x008", "meaning": "next/active module state; set to 5 on error and 2 when setup completes" },
+        { "offset": "0x00C", "meaning": "setup substate" },
+        { "offset": "0x0B8", "meaning": "setup mode; -1 takes direct player-data setup path" },
+        { "offset": "0x0BC..0x0D8", "meaning": "player-data-derived setup fields copied before subsystem +0x3F0 is configured" },
+        { "offset": "0x3F0", "meaning": "owned subsystem pointer" },
+        { "offset": "0x3F4", "meaning": "owned subsystem pointer" },
+        { "offset": "0x3F8", "meaning": "owned subsystem pointer" },
+        { "offset": "0x3FC", "meaning": "owned subsystem pointer" },
+        { "offset": "0x400", "meaning": "owned subsystem pointer" },
+        { "offset": "0x404", "meaning": "owned subsystem pointer" },
+        { "offset": "0x408", "meaning": "owned subsystem pointer" },
+        { "offset": "0x40C", "meaning": "owned subsystem pointer" },
+        { "offset": "0x410", "meaning": "owned subsystem pointer" },
+        { "offset": "0x428", "meaning": "owned subsystem pointer" },
+        { "offset": "0x42C", "meaning": "optional owned object/resource pointer; released during substate 0 reset" }
+      ],
+      "substates": [
+        {
+          "value": "0",
+          "meaning": "reset managers/subsystems and choose setup path",
+          "notes": [
+            "If cgame +0x0B8 == -1, copies player data into cgame setup fields and moves to substate 3.",
+            "Otherwise starts gBootTempManager loading through BootResourceBundle_StartLoading and moves to substate 1."
+          ]
+        },
+        {
+          "value": "1",
+          "meaning": "wait for gBootTempManager load completion",
+          "notes": [
+            "When FUN_8002202C(gBootTempManager) returns nonzero, calls BootResourceBundle_ApplyLoadedResources(gBootTempManager) and moves to substate 2."
+          ]
+        },
+        {
+          "value": "2",
+          "meaning": "run CGame readiness check",
+          "notes": [
+            "Calls FUN_8003C9A0(cgame).",
+            "If result is -1, writes cgame +0x08 = 5.",
+            "If result is 1, configures subsystem +0x3F0 and moves to substate 3."
+          ]
+        },
+        {
+          "value": "3",
+          "meaning": "wait for resource managers and wire CGame subsystem outputs",
+          "notes": [
+            "Waits for archive/resource manager and gManager_802E70A4 readiness.",
+            "Uses subsystem +0x3F0 output handles to configure +0x428, +0x40C, +0x3FC, and +0x404.",
+            "Moves to substate 8."
+          ]
+        },
+        {
+          "value": "8",
+          "meaning": "wait for DAT_802E71F8 +0x0C to clear",
+          "notes": ["Moves to substate 0x0C when the field is zero."]
+        },
+        {
+          "value": "0x0C",
+          "meaning": "setup complete",
+          "notes": ["Writes cgame +0x08 = 2."]
+        }
+      ],
+      "resource_flow": [
+        "CGame_PrepareManagersAndResources substate 1",
+        "BootResourceBundle_ApplyLoadedResources(gBootTempManager)",
+        "LargeResourceManager_ReloadFromLink(gLargeResourceManager, *(resourceBundle[7] + 0x10))",
+        "UiRootManager_LoadResource(gUiRootManager, *(resourceBundle[8] + 0x10))"
+      ],
+      "called_helpers_pending_export": [
+        { "address": "0x8003C9A0", "role": "CGame readiness/check function used in substate 2" },
+        { "address": "0x80021E98", "name": "BootResourceBundle_StartLoading", "role": "starts gBootTempManager/resource-bundle loading" },
+        { "address": "0x8002202C", "role": "checks gBootTempManager/resource-bundle load completion" },
+        { "address": "0x80026AC8", "role": "resets/updates gLargeResourceManager during substate 0" }
+      ]
+    }
+  ]
+}

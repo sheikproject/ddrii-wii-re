@@ -2,6 +2,92 @@
 
 `CSelMode` controls the game mode selection screen inside `CSelect`.
 
+Important resource split:
+
+```text
+select/select_cmn.bin    -> common select background/model/animation resources.
+                            Confirmed blocks include ZMB GC / ZAB GC data, not the
+                            CAE_WII/TPL-only sprite path used by CSelMode entries.
+
+select/select_bin_sp.bin -> region-specific CSelect/CSelMode UI sprite groups.
+                            CSelMode_OnEnter receives the nested WII resource at
+                            select_bin_sp.bin + 0xA0 for the Spanish build.
+```
+
+So the main-menu background cannot be fixed by drawing every `select_bin_sp.bin`
+object group. The next renderer target for the real background is the `ZMB GC` /
+`ZAB GC` model-animation path from `select_cmn.bin`.
+
+`FUN_80055DF4` is a confirmed helper in that path. Suggested name:
+
+```text
+FindZmbZabSectionByTag
+```
+
+Observed behavior:
+
+```c
+int FindZmbZabSectionByTag(int sectionBase, int outPayloadPtr);
+```
+
+It loops over seven known section/tag strings beginning at `PTR_s_DRAW__802B9684`.
+For each tag, it gets the tag length with `FUN_801297D8`, compares that tag against
+`sectionBase` with `FUN_8012F388`, and returns the matching index. If `outPayloadPtr`
+is nonzero, it stores `sectionBase + tagLength` through `FUN_801331C0`, which means
+the caller receives a pointer to the payload after the matched tag text.
+
+This function is probably not the final model loader. Its callers are the important
+next targets, because they decide what to do with the matched `DRAW`/model-animation
+sections.
+
+`FUN_8004F3BC` is one confirmed caller/parser. Suggested name:
+
+```text
+ParseZmbZabSectionNameAndFlags
+```
+
+Suggested signature while types are incomplete:
+
+```c
+uint ParseZmbZabSectionNameAndFlags(
+    int *linkManager,
+    int sectionIndex,
+    int *sectionSpanOut,
+    int *sectionTagIndexOut,
+    char *sectionName);
+```
+
+Confirmed behavior:
+
+```text
+1. Clears *sectionSpanOut.
+2. Gets the current section/block pointer through FUN_80160618.
+3. Calls FindZmbZabSectionByTag(sectionPointer, stackPayloadPtr).
+4. Stores the returned tag index in *sectionTagIndexOut.
+5. Copies/extracts the section name with FUN_80055D34(stackPayloadPtr, sectionName).
+6. Strips known suffixes from sectionName and encodes them into high flag bits:
+   first suffix group:
+     DAT_802713EC -> 0x080000
+     DAT_802713F0 -> 0x100000
+     DAT_802713F4 -> 0x200000
+   second suffix group:
+     DAT_802713F8 -> 0x040000
+     DAT_802713FC -> 0x020000
+   four-character suffix:
+     DAT_80271400 -> 0x010000
+7. Advances sectionSpanOut by 1 for tag index 2, otherwise by 2.
+8. Scans following sections while FUN_80055D34(nextSection, 0) returns 2.
+   Each continuation increments sectionSpanOut and a 16-bit repeat/extra count.
+9. Returns:
+   low bits  -> base section mask, 1 for tag index 2, 3 otherwise
+   bits 2-17 -> continuation count
+   high bits -> stripped suffix flags
+```
+
+This looks like the function that normalizes a `ZMB/ZAB` section name, identifies the
+section tag type, and computes how many following sections belong to the same logical
+entry.
+
 ## Functions
 
 ```text
@@ -875,6 +961,17 @@ is active, has a valid texture frame, and has nonzero draw dimensions, copies/ad
 the four vertex color blocks, applies GX render state, chooses a draw mode, and then
 calls a low-level quad emitter.
 
+`FUN_8012A164` is another runtime/compiler context helper, not sprite logic. It stores
+`r27..r31` to the implicit `r11` context area:
+
+```text
+*(r11 - 0x14) = r27
+*(r11 - 0x10) = r28
+*(r11 - 0x0C) = r29
+*(r11 - 0x08) = r30
+*(r11 - 0x04) = r31
+```
+
 Important fields consumed:
 
 ```text
@@ -965,8 +1062,14 @@ High-level behavior:
    - 3 or 4: preplay the selected animation through CzanUiObjectInstance_PreplayInitialAnimation.
 9. Applies descriptor flags from descriptor +0x1A to object fields such as visibility,
    playback, loop/stop behavior, and group status bits.
-10. Updates widescreen/screen-size dependent bounds from DAT_802E71B8 + 0x258.
-11. Returns/stores the new group index through FUN_8012A18C.
+10. Copies the group's left/top/right/bottom bounds into each child object. In
+    widescreen/screen-dependent cases it adjusts the attached sprite offsets when
+    sprite bytes +0x38/+0x39 request horizontal or vertical anchoring.
+11. After all children are built, sets `uiManager +0x18 = 1`, `uiManager +0x19 = 1`,
+    and sets object group `+0x24` bit 0.
+12. Sums each child object's `+0x17D` byte. If none are active and group `+0x00 == -1`,
+    sets object group `+0x24` bit 3; otherwise clears bit 3.
+13. Returns/stores the new group index through FUN_8012A18C.
 ```
 
 Important inferred structures:
@@ -975,11 +1078,14 @@ Important inferred structures:
 CzanUiManager
 +0x00 -> max object group count
 +0x04 -> object group slot array
++0x18 -> set to 1 after a group is created
++0x19 -> draw/list-ready flag set to 1 after a group is created
 
 CzanUiObjectGroup slot, size 0x28
 +0x00 -> current animation/state value, initialized to -1
 +0x04 -> object count
-+0x08 -> group flags/state byte area
++0x08 -> group flags/state byte area; byte +0x08 starts at 0
++0x09 -> secondary group flags/state byte
 +0x0C -> left/bounds float
 +0x10 -> top/bounds float
 +0x14 -> right/bounds float
@@ -987,6 +1093,7 @@ CzanUiObjectGroup slot, size 0x28
 +0x1C -> object-group metadata block pointer
 +0x20 -> object pointer array
 +0x24 -> group status flags byte; bit 0 set after creation, bit 3 means no active visible objects
++0x25 -> initialized to 0
 ```
 
 Object descriptor fields inside the group metadata block:
@@ -998,6 +1105,21 @@ Object descriptor fields inside the group metadata block:
 +0x18 -> two bytes copied to sprite object +0x38/+0x39
 +0x1A -> behavior flags
 +0x1C -> animation table pointer; initialAnimIndex selects 0x10-byte entries
+```
+
+Descriptor `+0x1A` confirmed flag effects:
+
+```text
+0x001 -> object +0x173 = 1, enabled/visible for object draw wrapper.
+0x002 -> object +0x174 = 1 and object +0x0B1 = 0, playback/end state override.
+0x004 -> starts animation 0 immediately.
+0x008 -> contributes 1 to object +0x175 mode value.
+0x010 -> contributes 2 to object +0x175 mode value.
+0x020 -> contributes 3 to object +0x175 mode value.
+0x040 -> object +0x17D = 0.
+0x080 -> group byte +0x08 = 0xFF if not already set.
+0x100 -> group byte +0x08 |= 1 if not already set by 0x80.
+0x200 -> group byte +0x08 |= 2 if not already set by 0x80.
 ```
 
 The function creates two runtime objects per descriptor:
@@ -1238,8 +1360,25 @@ allowUnknownOpcode  -> nonzero skips/assert-suppresses unknown/default opcodes; 
 ```
 
 The decompiler for this function shows no formal params because the compiler/runtime
-context helper `FUN_8012A160` recovers them internally. The call site in
-`CzanUiManager_CreateObjectGroup` passes `(objectInstance, 1)`.
+context helper `FUN_8012A160` spills saved registers `r26..r31` into a stack/context
+area at `r11 - 0x18 .. r11 - 0x04`. Ghidra then presents those context values as if
+they were recovered/returned arguments. The call site in `CzanUiManager_CreateObjectGroup`
+passes `(objectInstance, 1)`.
+
+`FUN_8012A160` itself is not game UI logic:
+
+```text
+*(r11 - 0x18) = r26
+*(r11 - 0x14) = r27
+*(r11 - 0x10) = r28
+*(r11 - 0x0C) = r29
+*(r11 - 0x08) = r30
+*(r11 - 0x04) = r31
+```
+
+`FUN_8012A1AC` is the paired helper seen after this kind of context handling. Its
+decompiled body is only `return;`, so it should be documented as runtime/decompiler
+glue, not exported as a real game/UI routine.
 
 This function appears in xrefs to `BindTextureFromTextureSet`, but it is not the final
 sprite draw function. It interprets CAE animation commands and writes derived state into

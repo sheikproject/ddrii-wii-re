@@ -204,7 +204,9 @@
         "If flags low byte is 1 or 2, starts and runs the selected animation, then resets several animation state fields.",
         "If flags low byte is 3 or 4, calls CzanUiObjectInstance_PreplayInitialAnimation; flag 4 also clears object +0xB0.",
         "Descriptor flags at +0x1A control draw/enable/animation flags on the created object.",
-        "Marks the UI manager and new group as active and updates a group flag depending on whether any child is drawable.",
+        "Sets uiManager +0x18 and +0x19 to 1 after building children.",
+        "Sets group +0x24 bit 0 after creation.",
+        "Sums object +0x17D across all children; if the sum is zero and group +0x00 is -1, sets group +0x24 bit 3, otherwise clears bit 3.",
         "Releases temporary CzanLinkManagers with releaseMode -1 before returning."
       ],
       "resource_blocks": [
@@ -218,6 +220,28 @@
         { "offset": "0x18", "meaning": "two bytes copied to sprite +0x38/+0x39" },
         { "offset": "0x1A", "meaning": "behavior flags controlling enabled/draw/animation/group status" },
         { "offset": "0x1C", "meaning": "animation table pointer; initialAnimIndex selects a 0x10-byte entry" }
+      ],
+      "descriptor_flag_effects": [
+        { "flag": "0x001", "effect": "sets object +0x173 = 1" },
+        { "flag": "0x002", "effect": "sets object +0x174 = 1 and object +0x0B1 = 0" },
+        { "flag": "0x004", "effect": "starts animation 0 immediately" },
+        { "flag": "0x008", "effect": "contributes 1 to object +0x175 mode value" },
+        { "flag": "0x010", "effect": "contributes 2 to object +0x175 mode value" },
+        { "flag": "0x020", "effect": "contributes 3 to object +0x175 mode value" },
+        { "flag": "0x040", "effect": "sets object +0x17D = 0" },
+        { "flag": "0x080", "effect": "sets group byte +0x08 = 0xFF if the group byte is still zero" },
+        { "flag": "0x100", "effect": "sets group byte +0x08 bit 0 if the group byte is still zero and 0x080 is not set" },
+        { "flag": "0x200", "effect": "sets group byte +0x08 bit 1 if the group byte is still zero and 0x080 is not set" }
+      ],
+      "important_group_fields": [
+        { "offset": "0x00", "meaning": "current animation/state value; initialized to -1" },
+        { "offset": "0x04", "meaning": "child object count" },
+        { "offset": "0x08", "meaning": "group state byte affected by descriptor flags 0x080/0x100/0x200" },
+        { "offset": "0x09", "meaning": "secondary group state byte" },
+        { "offset": "0x1C", "meaning": "object-group metadata block pointer" },
+        { "offset": "0x20", "meaning": "child object pointer array" },
+        { "offset": "0x24", "meaning": "status flags; bit 0 set after creation, bit 3 indicates no active drawable children when state is -1" },
+        { "offset": "0x25", "meaning": "initialized to zero" }
       ],
       "related_functions": [
         "CzanLinkManager_Init",
@@ -273,6 +297,124 @@
       "related_functions": [
         "CzanUiObjectInstance_StartAnimation",
         "CzanUiObjectInstance_RunAnimationScript"
+      ]
+    },
+    {
+      "address": "0x80171B98",
+      "exported_name": "CzanUiObjectInstance_RunAnimationScript",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "params": [
+        { "name": "objectInstance", "type": "int", "role": "0x1B4-byte Czan UI object instance; passed by caller but obscured by register-spill context helper in decompile" },
+        { "name": "allowUnknownOpcode", "type": "int", "role": "nonzero tolerates unknown/default opcodes; zero asserts" }
+      ],
+      "confirmed_behavior": [
+        "Interprets a float-aligned CAE animation command stream at objectInstance +0x19C.",
+        "Opcode is read as (int)*(float *)currentCommand.",
+        "Loops until it reaches a wait/end condition.",
+        "When object +0xC0 is nonzero, increments object +0xB4, decrements +0xC0, and returns the current +0xB1 state through the paired context return helper.",
+        "Unknown/default opcodes return if allowUnknownOpcode is nonzero; otherwise they assert through FUN_801A5710."
+      ],
+      "opcode_groups": [
+        { "opcodes": "0x00", "meaning": "end/restart/stop command; may reset +0x19C to selected animation entry and set +0xB2" },
+        { "opcodes": "0x01", "meaning": "set object +0x160" },
+        { "opcodes": "0x04", "meaning": "set texture frame/index at object +0xA8; may update sprite +0x34 and rebind texture" },
+        { "opcodes": "0x05..0x12", "meaning": "position/size/scale commands writing object float fields and attached sprite fields +0x3C..+0xA4" },
+        { "opcodes": "0x15..0x16", "meaning": "wait/timer commands writing object +0xC0 and +0xB0" },
+        { "opcodes": "0x18", "meaning": "set object alpha byte +0xA4 and apply color blocks" },
+        { "opcodes": "0x19", "meaning": "append one value to dynamic int list at object +0xCC, count byte +0xCA" },
+        { "opcodes": "0x1A..0x1D", "meaning": "skip commands with no confirmed side effect" },
+        { "opcodes": "0x1E", "meaning": "set sprite render mode through CzanSpriteObject_SetRenderMode" },
+        { "opcodes": "0x1F..0x21", "meaning": "skip one value / currently no confirmed side effect" },
+        { "opcodes": "0x22..0x24", "meaning": "write object +0x60/+0x64/+0x68 and sprite +0xA8/+0xAC/+0xB0" },
+        { "opcodes": "0x25..0x33", "meaning": "write color bytes and call CzanUiObjectInstance_ApplyColorBlocks" },
+        { "opcodes": "0x36..0x40", "meaning": "write normalized/pivot/dimension-related object fields and sprite +0xD8..+0xFC" },
+        { "opcodes": "0x41..0x42", "meaning": "write sprite width/height shorts at +0x100 and +0x108" },
+        { "opcodes": "0x43..0x46", "meaning": "advance one value / currently no confirmed side effect" }
+      ],
+      "important_fields": [
+        { "target": "objectInstance", "offset": "0x019C", "meaning": "current animation command pointer" },
+        { "target": "objectInstance", "offset": "0x00B1", "meaning": "playback/end state checked before returning" },
+        { "target": "objectInstance", "offset": "0x00B4", "meaning": "animation frame/timer float" },
+        { "target": "objectInstance", "offset": "0x00C0", "meaning": "wait tick counter" },
+        { "target": "objectInstance", "offset": "0x0024", "meaning": "attached CzanSpriteObject pointer" }
+      ],
+      "related_functions": [
+        "FUN_8012A160",
+        "FUN_8012A1AC",
+        "BindTextureFromTextureSet",
+        "CzanUiObjectInstance_ApplyColorBlocks",
+        "CzanSpriteObject_SetRenderMode",
+        "MemoryPool_Free"
+      ]
+    },
+    {
+      "address": "0x8012A160",
+      "exported_name": "RuntimeContext_SpillSavedRegisters",
+      "source_file": null,
+      "header_file": null,
+      "params": [
+        { "name": "contextBaseR11", "type": "int", "role": "implicit r11 stack/context base" },
+        { "name": "savedR26ToR31", "type": "registers", "role": "implicit saved registers r26..r31" }
+      ],
+      "confirmed_behavior": [
+        "Not game UI logic; this is a compiler/runtime context helper.",
+        "Stores r26 at r11 - 0x18.",
+        "Stores r27 at r11 - 0x14.",
+        "Stores r28 at r11 - 0x10.",
+        "Stores r29 at r11 - 0x0C.",
+        "Stores r30 at r11 - 0x08.",
+        "Stores r31 at r11 - 0x04.",
+        "Ghidra may make callers look like they receive hidden arguments or return pairs through this context."
+      ],
+      "related_functions": [
+        "CzanUiObjectInstance_RunAnimationScript",
+        "CzanDrawTexturedOrColoredQuad",
+        "RuntimeContext_SpillSavedRegistersR27ToR31",
+        "FUN_8012A1AC"
+      ]
+    },
+    {
+      "address": "0x8012A164",
+      "exported_name": "RuntimeContext_SpillSavedRegistersR27ToR31",
+      "source_file": null,
+      "header_file": null,
+      "params": [
+        { "name": "contextBaseR11", "type": "int", "role": "implicit r11 stack/context base" },
+        { "name": "savedR27ToR31", "type": "registers", "role": "implicit saved registers r27..r31" }
+      ],
+      "confirmed_behavior": [
+        "Not game UI logic; this is a compiler/runtime context helper.",
+        "Stores r27 at r11 - 0x14.",
+        "Stores r28 at r11 - 0x10.",
+        "Stores r29 at r11 - 0x0C.",
+        "Stores r30 at r11 - 0x08.",
+        "Stores r31 at r11 - 0x04.",
+        "Same helper family as RuntimeContext_SpillSavedRegisters, but without the r26 store.",
+        "Seen in the Czan sprite draw path, so it explains Ghidra context artifacts but is not the reason menu sprites are missing."
+      ],
+      "related_functions": [
+        "RuntimeContext_SpillSavedRegisters",
+        "RuntimeContext_ReturnNoOp",
+        "CzanSpriteObject_Draw",
+        "CzanDrawTexturedOrColoredQuad"
+      ]
+    },
+    {
+      "address": "0x8012A1AC",
+      "exported_name": "RuntimeContext_ReturnNoOp",
+      "source_file": null,
+      "header_file": null,
+      "params": [],
+      "confirmed_behavior": [
+        "Not game UI logic; this is the paired no-op return/context helper seen around compiler/runtime context handling.",
+        "The decompiled body is only return; no registers, memory, UI objects, textures, or animation state are modified.",
+        "Used near functions that also reference RuntimeContext_SpillSavedRegisters, so it should be treated as decompiler/runtime glue rather than a game function to port."
+      ],
+      "related_functions": [
+        "RuntimeContext_SpillSavedRegisters",
+        "CzanUiObjectInstance_RunAnimationScript",
+        "CzanDrawTexturedOrColoredQuad"
       ]
     },
     {

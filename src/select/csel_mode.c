@@ -1,10 +1,183 @@
 #include "select/csel_mode.h"
 
+#include "render/render_engine.h"
 #include "resource/czan_link.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static unsigned int gCSelModeHostLinkResourceSize;
+
+#define HOST_CZAN_MAX_GROUPS 64
+#define HOST_CZAN_MAX_OBJECTS 512
+#define HOST_CZAN_MAX_LINK_SIZES 128
+#define HOST_CZAN_TEXTURE_SLOTS 256
+
+typedef struct HostCzanObject {
+    int used;
+    int groupHandle;
+    int childIndex;
+    int descriptorType;
+    int enabled;
+    int drawEnabled;
+    int activeByte17d;
+    int textureSlot;
+    int textureIndex;
+    float x;
+    float y;
+    int width;
+    int height;
+    unsigned char color[4];
+    char name[17];
+} HostCzanObject;
+
+typedef struct HostCzanGroup {
+    int used;
+    int state;
+    int childCount;
+    int firstObjectIndex;
+    unsigned char groupByte08;
+    unsigned char groupByte09;
+    unsigned char statusFlags24;
+    unsigned char byte25;
+} HostCzanGroup;
+
+typedef struct HostLinkSizeEntry {
+    const void *data;
+    unsigned int size;
+} HostLinkSizeEntry;
+
+static TextureSlotKnownFields gHostTextureSlots[HOST_CZAN_TEXTURE_SLOTS];
+static TextureManagerKnownFields gHostTextureManager = {
+    gHostTextureSlots,
+    0,
+    HOST_CZAN_TEXTURE_SLOTS
+};
+static HostCzanGroup gHostCzanGroups[HOST_CZAN_MAX_GROUPS];
+static HostCzanObject gHostCzanObjects[HOST_CZAN_MAX_OBJECTS];
+static HostLinkSizeEntry gHostLinkSizes[HOST_CZAN_MAX_LINK_SIZES];
+
+static void HostCzan_Reset(void) {
+    memset(gHostCzanGroups, 0, sizeof(gHostCzanGroups));
+    memset(gHostCzanObjects, 0, sizeof(gHostCzanObjects));
+    memset(gHostLinkSizes, 0, sizeof(gHostLinkSizes));
+    memset(gHostTextureSlots, 0, sizeof(gHostTextureSlots));
+    gHostTextureManager.nextTextureSlot = 0;
+}
+
+static void HostCzan_RegisterLinkSize(const void *data, unsigned int size) {
+    int i;
+
+    if (data == 0 || size == 0) {
+        return;
+    }
+
+    for (i = 0; i < HOST_CZAN_MAX_LINK_SIZES; i++) {
+        if (gHostLinkSizes[i].data == data || gHostLinkSizes[i].data == 0) {
+            gHostLinkSizes[i].data = data;
+            gHostLinkSizes[i].size = size;
+            return;
+        }
+    }
+}
+
+static unsigned int HostCzan_GetRegisteredLinkSize(const void *data) {
+    int i;
+
+    for (i = 0; i < HOST_CZAN_MAX_LINK_SIZES; i++) {
+        if (gHostLinkSizes[i].data == data) {
+            return gHostLinkSizes[i].size;
+        }
+    }
+
+    return 0;
+}
+
+static int HostCzan_FindFreeGroup(void) {
+    int i;
+
+    for (i = 0; i < HOST_CZAN_MAX_GROUPS; i++) {
+        if (!gHostCzanGroups[i].used) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static int HostCzan_FindFreeObject(void) {
+    int i;
+
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        if (!gHostCzanObjects[i].used) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static void HostCzan_DefaultObjectPlacement(HostCzanObject *object, int groupHandle, int childIndex) {
+    int column = childIndex % 4;
+    int row = childIndex / 4;
+
+    object->x = 70.0f + (float)column * 120.0f + (float)(groupHandle % 3) * 16.0f;
+    object->y = 74.0f + (float)row * 88.0f + (float)(groupHandle % 4) * 8.0f;
+}
+
+static void HostCzan_DrawObject(HostCzanObject *object) {
+    RenderQuad quad;
+    unsigned int dummyColor;
+
+    if (object == 0 ||
+        HostCzan_ShouldSkipObject(object) ||
+        !object->used ||
+        !object->drawEnabled ||
+        object->width <= 0 ||
+        object->height <= 0) {
+        return;
+    }
+
+    quad.x = object->x;
+    quad.y = object->y;
+    quad.z = 0.0f;
+    quad.width = (float)object->width;
+    quad.height = (float)object->height;
+
+    if (object->textureSlot >= 0) {
+        DrawTexturedQuad(
+            &quad,
+            object->width,
+            object->height,
+            object->color,
+            (void *)(long)object->textureSlot,
+            object->textureIndex);
+    }
+    else {
+        dummyColor = 0xFFFFFF80u;
+        DrawFilledRect((int)object->x, (int)object->y, 0, object->width, object->height, &dummyColor, 0);
+    }
+}
+
+static int HostCzan_IsWindowLikeObject(const HostCzanObject *object) {
+    if (object == 0) {
+        return 0;
+    }
+
+    return strncmp(object->name, "white_window", 12) == 0 ||
+           object->width > 360 ||
+           object->height > 280;
+}
+
+static int HostCzan_ShouldSkipObject(const HostCzanObject *object) {
+    if (object == 0) {
+        return 1;
+    }
+
+    return strncmp(object->name, "cha_sil", 7) == 0 ||
+           strncmp(object->name, "@dummy", 6) == 0;
+}
 
 static unsigned short ReadBe16(const unsigned char *p) {
     return (unsigned short)(((unsigned int)p[0] << 8) | (unsigned int)p[1]);
@@ -126,6 +299,7 @@ void CSelMode_OnEnter(void *cselMode, void *linkData) {
        applies region-specific position/animation tables to entries 6..13, and
        sets modeState at +0x130 to 1. */
     puts("CSelMode: on enter");
+    HostCzan_Reset();
 
     blockCount = CzanLinkResource_GetBlockCount(linkData, gCSelModeHostLinkResourceSize);
     if (blockCount == 0) {
@@ -328,6 +502,16 @@ int CzanUiManager_CreateObjectGroup(
     unsigned int flags,
     int initialAnimIndex
 ) {
+    unsigned int linkSize;
+    CzanLinkBlock textureContainer;
+    CzanLinkBlock metadataBlock;
+    unsigned int descriptorCount;
+    unsigned int descriptorOffset;
+    int groupHandle;
+    HostCzanGroup *group;
+    int i;
+    int activeCount;
+
     /* 0x80173414 creates a new Czan object group from a WII/Czan link resource.
        It finds a free group slot, links the resource, validates/relocates block 1 as
        the group metadata, uses block 0 as a nested texture/TPL resource container,
@@ -339,13 +523,153 @@ int CzanUiManager_CreateObjectGroup(
        previously-created child named by descriptor +0x12. The low byte of flags and
        descriptor +0x1A flags drive the same initial animation/visibility setup used
        by CzanUiManager_CloneObjectGroup. Flags 3/4 preplay the selected animation
-       through CzanUiObjectInstance_PreplayInitialAnimation. Returns the new group handle, -1 when no
-       group slot is free, or -2 when the metadata block fails validation. */
+       through CzanUiObjectInstance_PreplayInitialAnimation.
+
+       After every child is created, the original sets uiManager +0x18 and +0x19 to 1,
+       sets group +0x24 bit 0, and computes group +0x24 bit 3 from child +0x17D
+       activity. Missing those manager/group flags means the later draw traversal has
+       no drawable object list even if textures loaded correctly. Returns the new
+       group handle, -1 when no group slot is free, or -2 when metadata validation fails. */
     (void)uiManager;
-    (void)linkData;
-    (void)flags;
     (void)initialAnimIndex;
-    return -1;
+
+    linkSize = HostCzan_GetRegisteredLinkSize(linkData);
+    if (!CzanLinkResource_IsValid(linkData, linkSize)) {
+        return -2;
+    }
+
+    if (!CzanLinkResource_GetBlock(linkData, linkSize, 1, &metadataBlock) ||
+        !CzanLinkResource_GetBlock(linkData, linkSize, 0, &textureContainer) ||
+        !CzanLinkResource_IsValid(textureContainer.data, textureContainer.size)) {
+        return -2;
+    }
+
+    if (!CzanUiManager_ValidateAndRelocateObjectGroupMetadata(0, (char *)metadataBlock.data)) {
+        return -2;
+    }
+
+    descriptorCount = ReadBe16(metadataBlock.data + 8);
+    descriptorOffset = ReadBe32(metadataBlock.data + 0x0C);
+    if (descriptorOffset >= metadataBlock.size ||
+        descriptorCount > HOST_CZAN_MAX_OBJECTS ||
+        descriptorOffset + descriptorCount * 0x20u > metadataBlock.size) {
+        return -2;
+    }
+
+    groupHandle = HostCzan_FindFreeGroup();
+    if (groupHandle < 0) {
+        return -1;
+    }
+
+    group = &gHostCzanGroups[groupHandle];
+    memset(group, 0, sizeof(*group));
+    group->used = 1;
+    group->state = -1;
+    group->childCount = (int)descriptorCount;
+    group->firstObjectIndex = -1;
+    group->byte25 = 0;
+
+    activeCount = 0;
+    for (i = 0; i < (int)descriptorCount; i++) {
+        const unsigned char *descriptor = metadataBlock.data + descriptorOffset + (unsigned int)i * 0x20u;
+        unsigned int descriptorFlags = ReadBe16(descriptor + 0x1A);
+        unsigned int descriptorType = descriptor[0x14];
+        int objectIndex = HostCzan_FindFreeObject();
+        HostCzanObject *object;
+
+        if (objectIndex < 0) {
+            break;
+        }
+
+        if (group->firstObjectIndex < 0) {
+            group->firstObjectIndex = objectIndex;
+        }
+
+        object = &gHostCzanObjects[objectIndex];
+        memset(object, 0, sizeof(*object));
+        object->used = 1;
+        object->groupHandle = groupHandle;
+        object->childIndex = i;
+        object->descriptorType = (int)descriptorType;
+        object->enabled = (descriptorFlags & 0x001u) != 0;
+        object->drawEnabled = 1;
+        object->activeByte17d = (descriptorFlags & 0x040u) == 0;
+        object->textureSlot = -1;
+        object->textureIndex = 0;
+        object->width = 8;
+        object->height = 8;
+        object->color[0] = 0xFF;
+        object->color[1] = 0xFF;
+        object->color[2] = 0xFF;
+        object->color[3] = 0xFF;
+        memcpy(object->name, descriptor, 16);
+        object->name[16] = '\0';
+        HostCzan_DefaultObjectPlacement(object, groupHandle, i);
+
+        if (descriptorType == 0) {
+            unsigned int textureBlockIndex = ReadBe16(descriptor + 0x10);
+            CzanLinkBlock textureBlock;
+
+            if (CzanLinkResource_GetBlock(textureContainer.data, textureContainer.size, textureBlockIndex, &textureBlock)) {
+                unsigned int slot = CreateTextureFromTplResource(
+                    &gHostTextureManager,
+                    (void *)textureBlock.data,
+                    (int)textureBlock.size,
+                    0xFFFFFFFFu);
+                object->textureSlot = (int)slot;
+                GetTextureDimensions((void *)(long)object->textureSlot, 0, &object->width, &object->height);
+                if (strncmp(object->name, "white_window", 12) == 0) {
+                    object->color[3] = 0x78;
+                }
+            }
+        }
+        else if (descriptorType != 2) {
+            unsigned int sourceIndex = ReadBe16(descriptor + 0x12);
+            int j;
+
+            for (j = 0; j < HOST_CZAN_MAX_OBJECTS; j++) {
+                if (gHostCzanObjects[j].used &&
+                    gHostCzanObjects[j].groupHandle == groupHandle &&
+                    gHostCzanObjects[j].childIndex == (int)sourceIndex) {
+                    object->textureSlot = gHostCzanObjects[j].textureSlot;
+                    object->textureIndex = gHostCzanObjects[j].textureIndex;
+                    object->width = gHostCzanObjects[j].width;
+                    object->height = gHostCzanObjects[j].height;
+                    object->color[3] = gHostCzanObjects[j].color[3];
+                    break;
+                }
+            }
+        }
+
+        if ((descriptorFlags & 0x080u) != 0 && group->groupByte08 == 0) {
+            group->groupByte08 = 0xFF;
+        }
+        else if (group->groupByte08 == 0) {
+            if ((descriptorFlags & 0x100u) != 0) {
+                group->groupByte08 |= 1;
+            }
+            if ((descriptorFlags & 0x200u) != 0) {
+                group->groupByte08 |= 2;
+            }
+        }
+
+        activeCount += object->activeByte17d != 0;
+    }
+
+    group->statusFlags24 |= 1;
+    if (activeCount == 0 && group->state == -1) {
+        group->statusFlags24 |= 8;
+    }
+    else {
+        group->statusFlags24 &= (unsigned char)~8u;
+    }
+
+    printf("CzanUiManager: created group %d children=%d firstObject=%d flags=0x%02X\n",
+           groupHandle,
+           group->childCount,
+           group->firstObjectIndex,
+           group->statusFlags24);
+    return groupHandle;
 }
 
 int CzanUiManager_ValidateAndRelocateObjectGroupMetadata(int uiManager, char *metadataBlock) {
@@ -360,8 +684,19 @@ int CzanUiManager_ValidateAndRelocateObjectGroupMetadata(int uiManager, char *me
        metadata block base. The uiManager argument is present in the signature but
        is not used by the decompiled body. */
     (void)uiManager;
-    (void)metadataBlock;
-    return 0;
+
+    if (metadataBlock == 0) {
+        return 0;
+    }
+
+    return metadataBlock[0] == 'C' &&
+           metadataBlock[1] == 'A' &&
+           metadataBlock[2] == 'E' &&
+           metadataBlock[3] == '_' &&
+           metadataBlock[4] == 'W' &&
+           metadataBlock[5] == 'I' &&
+           metadataBlock[6] == 'I' &&
+           metadataBlock[7] == '\0';
 }
 
 int CzanUiManager_CloneObjectGroup(
@@ -434,7 +769,11 @@ void CzanUiObjectInstance_RunAnimationScript(int objectInstance, int allowUnknow
     /* 0x80171B98 interprets the Czan animation command stream at object +0x19C.
        objectInstance is the 0x1B4 Czan UI object instance, passed through the compiler's
        context helper in the decompile. allowUnknownOpcode controls the invalid-opcode assert
-       path: nonzero tolerates unknown/default opcodes, zero asserts. */
+       path: nonzero tolerates unknown/default opcodes, zero asserts.
+
+       Confirmed opcodes update playback/end state, texture frames, sprite position,
+       size, scale, render mode, color bytes, dynamic value lists, and wait timers.
+       The interpreter loops until it reaches a wait/end condition. */
     if (instance == 0) {
         return;
     }
@@ -513,10 +852,16 @@ void CzanUiManager_ApplyChildObjectAnimationOffset(
 }
 
 void CzanUiManager_SetObjectGroupEnabled(int uiManager, int objectGroupHandle, unsigned char enabled) {
+    int i;
+
     /* 0x80174F04 sets object +0x173 for every child in the group. */
     (void)uiManager;
-    (void)objectGroupHandle;
-    (void)enabled;
+
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        if (gHostCzanObjects[i].used && gHostCzanObjects[i].groupHandle == objectGroupHandle) {
+            gHostCzanObjects[i].enabled = enabled != 0;
+        }
+    }
 }
 
 void CzanUiManager_SetChildObjectEnabled(
@@ -524,19 +869,33 @@ void CzanUiManager_SetChildObjectEnabled(
     int objectGroupHandle,
     int childObjectIndex,
     unsigned char enabled) {
+    int i;
+
     /* 0x80174F40 sets object +0x173 for one child in the group. */
     (void)uiManager;
-    (void)objectGroupHandle;
-    (void)childObjectIndex;
-    (void)enabled;
+
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        if (gHostCzanObjects[i].used &&
+            gHostCzanObjects[i].groupHandle == objectGroupHandle &&
+            gHostCzanObjects[i].childIndex == childObjectIndex) {
+            gHostCzanObjects[i].enabled = enabled != 0;
+            return;
+        }
+    }
 }
 
 void CzanUiManager_SetObjectGroupDrawEnabled(int uiManager, int objectGroupHandle, unsigned char drawEnabled) {
+    int i;
+
     /* 0x801750A8 sets object +0x181 for every child in the group. This is the
        draw-list participation flag checked by CzanUiManager_DrawObjectListReverse. */
     (void)uiManager;
-    (void)objectGroupHandle;
-    (void)drawEnabled;
+
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        if (gHostCzanObjects[i].used && gHostCzanObjects[i].groupHandle == objectGroupHandle) {
+            gHostCzanObjects[i].drawEnabled = drawEnabled != 0;
+        }
+    }
 }
 
 void CzanUiManager_LinkObjectGroupToReferenceObject(
@@ -576,27 +935,58 @@ void CzanUiObjectInstance_Draw(int objectInstance) {
 }
 
 void CzanUiManager_DrawObjectListReverse(int objectList, int drawLayerFilter) {
+    int i;
+    int pass;
+
     /* 0x80174BA8 draws an object list from last to first. It skips when list
        +0x19 is set or +0x1C is null, draws only objects with +0x181 == 1, and
        filters by object +0x18C unless drawLayerFilter is -1. */
     (void)objectList;
     (void)drawLayerFilter;
+
+    for (pass = 0; pass < 2; pass++) {
+        for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+            if (gHostCzanObjects[i].used &&
+                gHostCzanObjects[i].drawEnabled &&
+                HostCzan_IsWindowLikeObject(&gHostCzanObjects[i]) == (pass == 0)) {
+                HostCzan_DrawObject(&gHostCzanObjects[i]);
+            }
+        }
+    }
 }
 
 void CzanUiManager_DrawObjectGroupInListOrder(int uiManager, int objectGroupHandle) {
+    int i;
+
     /* 0x80174C58 draws only children belonging to one object group, while
        preserving the global object-list reverse order from uiManager +0x1C.
        The group is uiManager +0x04 + objectGroupHandle * 0x28. */
     (void)uiManager;
-    (void)objectGroupHandle;
+
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        if (gHostCzanObjects[i].used &&
+            gHostCzanObjects[i].groupHandle == objectGroupHandle &&
+            gHostCzanObjects[i].drawEnabled) {
+            HostCzan_DrawObject(&gHostCzanObjects[i]);
+        }
+    }
 }
 
 void CzanUiManager_DrawChildObject(int uiManager, int objectGroupHandle, int childObjectIndex) {
+    int i;
+
     /* 0x80174CF8 directly draws one child:
        uiManager->groups[objectGroupHandle].children[childObjectIndex]. */
     (void)uiManager;
-    (void)objectGroupHandle;
-    (void)childObjectIndex;
+
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        if (gHostCzanObjects[i].used &&
+            gHostCzanObjects[i].groupHandle == objectGroupHandle &&
+            gHostCzanObjects[i].childIndex == childObjectIndex) {
+            HostCzan_DrawObject(&gHostCzanObjects[i]);
+            return;
+        }
+    }
 }
 
 void CzanDrawTexturedOrColoredQuad(

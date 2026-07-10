@@ -91,6 +91,23 @@ int CzanLinkManager_InitAndSetLink(int linkManager, int linkData) {
     return linkManager;
 }
 
+int CzanLinkManager_GetBlockInfo(int *linkManager, int blockIndex, void **outBlock, int *outSize) {
+    /* 0x80160504 reads one CzanLinkManager block-table entry. Original behavior:
+       if blockIndex < *(int *)(*linkManager + 8), it writes the entry size to
+       outSize, writes the block pointer to outBlock when size > 0 else NULL, and
+       returns 1. Otherwise it leaves zero outputs and returns 0. */
+    if (outBlock != 0) {
+        *outBlock = 0;
+    }
+    if (outSize != 0) {
+        *outSize = 0;
+    }
+
+    (void)linkManager;
+    (void)blockIndex;
+    return 0;
+}
+
 int CzanLinkManager_Release(int linkManager, short releaseMode) {
     /* 0x80160368 is the CzanLinkManager cleanup/release helper. It only calls
        the allocator release function when linkManager is nonzero and releaseMode

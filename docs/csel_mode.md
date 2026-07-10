@@ -88,6 +88,3062 @@ This looks like the function that normalizes a `ZMB/ZAB` section name, identifie
 section tag type, and computes how many following sections belong to the same logical
 entry.
 
+`FUN_80053EC0` is the larger caller that consumes those parsed sections. Suggested name:
+
+```text
+LoadZmbZabModelEntryList
+```
+
+The decompile is polluted by context-helper register recovery, but the control flow is
+clear:
+
+```text
+1. Sets a CzanLinkManager link to the incoming WII container.
+2. First pass over all WII blocks:
+   - calls ParseZmbZabSectionNameAndFlags for each logical section
+   - advances by sectionSpanOut
+   - counts how many 0x270-byte model-entry records are needed
+3. Allocates count * 0x270 + 0x10 bytes and initializes a list/controller with
+   callbacks FUN_8004D4E8 / FUN_8004D6BC.
+4. Second pass over the same sections:
+   - parses section flags/name/tag again
+   - if returned mask bit 0 is set, consumes the primary block
+   - if returned mask bit 1 is set, consumes the secondary block
+   - uses bits 2..15 as the number of following continuation blocks
+   - calls the entry vtable method at +0x10 to initialize the entry from the
+     primary/secondary blocks
+   - calls vtable method +0x20 for each continuation block
+   - optionally calls vtable method +0x24 to start/setup animation when continuation
+     data exists and the entry mode flag allows it
+5. Stores the normalized section name at entry +0x74.
+6. Stores the original packed flags at entry +0x70.
+7. Groups entries by tag index in manager arrays at the active bank selected by
+   byte manager +0x2C.
+8. Scans model object names for references:
+   - `OBJSET_` references are matched against loaded entries by name
+   - `03_XX` references are tracked separately
+   - a 0x104-name table at DAT_802BD620 is indexed for many object-name matches
+   - `LIGPOS_#` and `LIGTAR_#` record light position/target object indices
+   - `COL_pos_` records a color-position object index
+9. Builds per-entry OBJSET reference arrays at entry +0xB4/+0xB8 after counting how
+   many references each entry receives.
+```
+
+Important entry fields seen here:
+
+```text
+entry size 0x270
++0x000 -> vtable/object pointer used by FUN_8015Dxxx model helpers
++0x070 -> packed flags returned by ParseZmbZabSectionNameAndFlags
++0x074 -> normalized section/name string copied from parser output
++0x0B4 -> allocated int array of OBJSET reference indices
++0x0B8 -> OBJSET reference count
++0x26C -> temporary OBJSET reference counter, reset after array allocation
++0x258 -> gManager_802E70A4
++0x25C -> gLargeResourceManager
++0x268 -> vtable / method table used for entry setup
+```
+
+This is much closer to the real `select_cmn.bin` background/model path than the Czan
+UI sprite group code. The next useful targets are the entry callbacks/methods:
+`FUN_8004D4E8`, `FUN_8004D6BC`, and the vtable methods reached through
+`entry[0x1B] + 0x10/+0x20/+0x24`.
+
+`FUN_8004D4E8` is the constructor/initializer for each `0x270` model entry record.
+Suggested name:
+
+```text
+ZmbZabModelEntry_Init
+```
+
+Confirmed initialization:
+
+```text
+calls FUN_80058D90 first
+entry +0x06C -> vtable PTR_PTR_802B9624
+entry +0x070 -> packed parser flags, initialized to 0
+entry +0x074 -> normalized section/model name buffer, cleared for 0x40 bytes
+entry +0x0B4 -> OBJSET reference index array pointer, initialized to 0
+entry +0x0B8 -> OBJSET reference count, initialized to 0
+entry +0x0BC -> first 4 bytes set to FF, then next 4 bytes zeroed by overlapping clears
+entry +0x0C0 -> 4 bytes set to FF
+entry +0x0C4..+0x160 -> first table of 40 int slots initialized to -1
+entry +0x164..+0x200 -> second table of 40 int slots initialized to -1
+entry +0x204..+0x250 -> paired 10-entry vector/field table initialized to 0
+entry +0x254 -> initialized to 1
+entry +0x258 -> manager pointer slot, initialized to 0 then filled by loader with gManager_802E70A4
+entry +0x25C -> manager pointer slot, initialized to 0 then filled by loader with gLargeResourceManager
+entry +0x260/+0x264 -> initialized to 0
+entry +0x268 -> 2-byte state/flags field cleared
+entry +0x26C -> temporary OBJSET reference counter, initialized to 0
+```
+
+The two `-1` tables and the paired `0x204..0x250` zero table are likely per-bone,
+per-object, or per-material lookup caches used after ZMB/ZAB model data is loaded.
+
+`FUN_8004D6BC` is the paired destructor/release callback. Suggested name:
+
+```text
+ZmbZabModelEntry_Destroy
+```
+
+Confirmed behavior:
+
+```text
+if entry is non-null:
+  reset entry +0x06C to PTR_PTR_802B9624
+  if entry +0x0B4 is nonzero:
+    MemoryPool_Free(0, entry +0x0B4)
+  entry +0x0B4 = 0
+  entry +0x0B8 = 0
+  FUN_80058E18(entry, 0)
+  if releaseMode > 0:
+    MemoryPool_Free(0, entry)
+return entry
+```
+
+So `+0x0B4/+0x0B8` is definitely owned temporary/reference-list storage, not a
+borrowed pointer from the model resource.
+
+`FUN_80058E18` is the deeper CtsStageObj destructor/reset wrapper. Suggested name:
+
+```text
+CtsStageObj_Destroy
+```
+
+Confirmed behavior:
+
+```text
+if entry != 0:
+  entry +0x6C = PTR_PTR_802B97A8
+  calls CtsStageObj_ResetModelBlocks through PTR_CtsStageObj_ResetModelBlocks_802B97BC
+  if releaseMode > 0:
+    MemoryPool_Free(0, entry)
+return entry
+```
+
+`FUN_80058D90` initializes the base CtsStageObj fields before the derived ZMB/ZAB
+entry constructor changes the vtable at `+0x6C`. Suggested name:
+
+```text
+CtsStageObj_InitBase
+```
+
+Confirmed behavior:
+
+```text
+entry[0x1B] = PTR_PTR_802B97A8
+entry[0] = 0
+entry[1] = -1
+entry[2] = -1
+entry[3] = 0
+entry[4] = 0
+entry[5] = FLOAT_802E84D8
+entry[6] = FLOAT_802E84D8
+thunk_FUN_801B0120(entry + 7)
+clears 0x18 bytes at entry +0x13
+entry[0x19] = 0
+entry[0x1A] = 0
+return entry
+```
+
+The model entry vtable is at `PTR_PTR_802B9624`. The type/name pointer shown in the
+table is `PTR_s_CtsStageObj_802E6448`, so these entries appear to be the game's
+`CtsStageObj` model/stage-object class.
+
+Confirmed vtable layout from Ghidra:
+
+```text
+802B9624 +0x00 -> PTR_s_CtsStageObj_802E6448
+802B962C +0x08 -> ZmbZabModelEntry_Destroy / FUN_8004D6BC
+802B9630 +0x0C -> CtsStageObj_LoadModelBlocks / FUN_80058EA8
+802B9634 +0x10 -> CtsStageObj_LoadPrimarySecondaryBlocks / FUN_80059058
+802B9638 +0x14 -> CtsStageObj_ResetModelBlocks / FUN_80059060
+802B963C +0x18 -> FUN_80059150
+802B9640 +0x1C -> FUN_80059154
+802B9644 +0x20 -> CtsStageObj_LoadContinuationBlock / FUN_80059158
+802B9648 +0x24 -> CtsStageObj_StartAnimation / LAB_800591BC
+802B964C +0x28 -> LAB_800591E0
+802B9650 +0x2C -> LAB_800591FC
+802B9654 +0x30 -> LAB_80059218
+802B9658 +0x34 -> FUN_8004E140
+802B965C +0x38 -> LAB_80059260
+802B9660 +0x3C -> CtsStageObj_ApplyModelTransform / FUN_800594B8
+802B9664 +0x40 -> ZmbZabModelEntry_UpdatePresentation / FUN_8004E220
+802B9668 +0x44 -> PTR_s_CzanModel_802E6450
+```
+
+Confirmed method behavior:
+
+```text
+CtsStageObj_LoadPrimarySecondaryBlocks
+  0x80059058 simply forwards to CtsStageObj_LoadModelBlocks. LoadZmbZabModelEntryList
+  calls this with the primary block, optional secondary block, their block sizes, and
+  the continuation count.
+
+CtsStageObj_LoadModelBlocks
+  calls CtsStageObj_ResetModelBlocks first
+  if secondaryTextureBlock != 0:
+    entry[1] = CreateTextureFromTplResource(global texture manager, secondaryTextureBlock,
+                                            secondaryTextureBlockSize, -1)
+  entry[0] = AllocObjectAligned(0, 0x2D0, 0x20, 0), initialized by FUN_8014BE78
+  if continuationCount > 0:
+    CzanModel_SetContinuationCount(entry[0], continuationCount)
+  if fallbackTextureSlot != -1:
+    CzanModel_SetFallbackRenderSlot(entry[0], textureManager slot fallbackTextureSlot, 6, 1, 0xFF)
+  FUN_8014C67C(entry[0], primaryModelBlock, primaryModelBlockSize)
+  if entry[1] != -1:
+    FUN_8014E828(entry[0], textureManager slot entry[1])
+  FUN_8014E7D0(entry[0], 1)
+  *(entry[0] + 0x148) = 1
+  *(entry[0] + 0x1A0) = 2
+  if continuationCount > 0:
+    entry[3] = continuationCount
+    entry[4] = AllocObjectAligned(0, continuationCount * 4, 0x20, 0)
+    memset(entry[4], 0, continuationCount * 4)
+entry[2] = FUN_8014E8E8(entry[0], DAT_80271640)
+```
+
+Confirmed helper names:
+
+```text
+FUN_8015C540 -> CzanModel_SetContinuationCount
+FUN_8015C3CC -> CzanModel_SetFallbackRenderSlot
+```
+
+`CzanModel_SetContinuationCount` stores the continuation/animation block count at
+model `+0x9C`.
+
+`CzanModel_SetFallbackRenderSlot` initializes the fallback/synthetic render slot at
+model `+0x280..+0x2BC`. The call from `CtsStageObj_LoadModelBlocks` passes render mode
+`6`, enabled flag `1`, and alpha `0xFF`.
+
+`FUN_8005C540` is called from active gameplay controller update/setup code after a
+position/model marker is queried. Suggested cautious name:
+
+```text
+CtsStageObj_SelectAndApplyModelSlot
+```
+
+Important Ghidra note: this may show a strange signature because the function begins
+with `RuntimeContext_SpillSavedRegisters`; the recovered high word is the stage/model
+object pointer and the low word is a count/slot value.
+
+Confirmed behavior:
+
+```text
+sum per-entry counters at stageObj +0x16C.. over the recovered count
+compute aspect/display scale from DAT_802E71B8 +0x258 screen fields
+if modelSlotOrSpecialId < stageObj +0x15C:
+  descriptor = stageObj +0x180 + (counterSum + modelSlotOrSpecialId) * 0x7C
+  if FUN_8005A5F4(descriptor, 0) == 0:
+    use fallback/wrapped placement behavior
+else:
+  resolve special ids:
+    700 -> random among three configured ranges
+    800 -> random in second configured range
+    900 -> random in first configured range
+    101..199 / 201..299 / 301..399 / 601..699 -> remapped range ids
+prepare descriptor through FUN_8005A9C4
+apply calculated frame/position through FUN_8005993C
+apply timing/frame through FUN_800599C0
+store final resolved id at stageObj +0x10C
+```
+
+This function is not the raw ZMB renderer. It is a model/stage-object slot selector and
+application helper. The next useful targets are:
+
+```text
+FUN_8005993C -> applies calculated frame/position data to a descriptor/model entry
+FUN_800599C0 -> applies timing/frame data to the same entry
+FUN_8005A5F4 -> validates/initializes a selected slot descriptor
+FUN_8005ABE8 -> reads descriptor duration/length for wrap calculations
+```
+
+Confirmed helper names:
+
+```text
+FUN_8005993C -> CtsStageObjDescriptor_SetFrameProgress
+FUN_800599C0 -> CtsStageObjDescriptor_SetCurrentTime
+FUN_8005A5F4 -> CtsStageObjDescriptor_GetEntryHandle
+FUN_8005ABE8 -> CtsStageObjDescriptor_GetCurrentDuration
+FUN_8005A9C4 -> CtsStageObjDescriptor_ActivateEntry
+```
+
+`CtsStageObjDescriptor_SetFrameProgress` clamps negative progress to zero, reads the
+first float of the descriptor entry table as a duration, then writes descriptor fields
+`+0x28`, `+0x2C`, and `+0x30`.
+
+`CtsStageObjDescriptor_SetCurrentTime` simply writes the current time/frame float at
+descriptor `+0x30`.
+
+`CtsStageObjDescriptor_GetEntryHandle` bounds-checks `entryIndex` against descriptor
+`+0x08`, then returns the value at entry table offset `entryIndex * 0xA8 + 0xA4`.
+
+`CtsStageObjDescriptor_GetCurrentDuration` returns zero when no active entry exists,
+otherwise returns the first float at `descriptor[0] + descriptor[1] * 0xA8`.
+
+`CtsStageObjDescriptor_ActivateEntry` switches a descriptor to `entryIndex`. It snapshots
+the previous/current transform block when a blend duration is active, resets the selected
+entry at `descriptor[0] + entryIndex * 0xA8`, writes the entry handle at `+0x24`, clears
+frame/position fields at `+0x20..+0x48`, resets transform defaults at `+0x4C/+0x58/+0x6C`,
+and stores the active index in `descriptor[1]`.
+
+`FUN_8014BE78` initializes the `0x2D0` model object allocated by
+`CtsStageObj_LoadModelBlocks`. Suggested name:
+
+```text
+CzanModel_Init
+```
+
+The vtable at `PTR_PTR_802C0720` identifies this object as `CzanModel`:
+
+```text
+802C0720 +0x00 -> PTR_s_CzanModel_802E6940
+802C0728 +0x08 -> CzanModel_Destroy / FUN_8014C0B0
+```
+
+Only one real vtable method is visible here, so most CzanModel work is performed by
+helper/free functions rather than virtual methods.
+
+`FUN_8014C0B0` is the CzanModel destructor/free pass. Suggested name:
+
+```text
+CzanModel_Destroy
+```
+
+Confirmed behavior:
+
+```text
+if model != 0:
+  model[0] = PTR_PTR_802C0720
+  frees runtime arrays/pointers at:
+    model[0x11], [7], [8], [9], [10], [5], [6], [0x1A], [0x0B]
+  if model[0x0D] exists:
+    walks model[0x0D] records, count model[0x0E], stride 0x1C
+    frees nested display-list/remap/helper arrays
+    frees model[0x0D]
+  if model[0x2D] exists:
+    walks model[0x2D] records, count model[0x2C], stride 8
+    frees nested per-entry arrays
+    frees model[0x2D]
+  clears/frees model[0x70], [0x73], [0x72]/[0x71], [0x17], [0x18]
+  if releaseMode > 0:
+    MemoryPool_Free(0, model)
+return model
+```
+
+Confirmed high-level behavior:
+
+```text
+model[0] = PTR_PTR_802C0720
+clears many model state fields
+sets byte at model +0x50 = 1
+sets byte at model +0x6C = 1
+clears model +0x230 for 0x48 bytes
+sets color fields at model +0x3C and +0x40 to 0xFFFFFFFF
+model[0x27] = 1
+model[0x30] = -1
+model[0x4C] = -1
+model[0x51] = 0x111
+model[0x55] = 1
+model[0x5A] = 1
+model[0x67] = widescreen/display dependent float
+model[0x68] = 1
+model[0x6B] = 1
+model[0x9E] = FLOAT_802E9DA8
+model[0xA0] = -1
+return model
+```
+
+This is the owned model instance stored at `CtsStageObj entry[0]`.
+
+`FUN_8014C67C` stores the primary model resource on a `CzanModel`. Suggested name:
+
+```text
+CzanModel_SetPrimaryBlock
+```
+
+Confirmed behavior:
+
+```text
+model +0x04 = primaryModelBlock
+model +0x08 = primaryModelBlockSize
+return 1
+```
+
+`FUN_8014E828` attaches a texture set to a `CzanModel`. Suggested name:
+
+```text
+CzanModel_AttachTextureSet
+```
+
+Confirmed behavior:
+
+```text
+model +0x54 = textureSet
+if model primary block != 0 and textureSet != 0 and *(primaryBlock +0x18) != 0:
+  textureFrameTable = *(primaryBlock +0x18)
+  if *(primaryBlock +0x24) == 0:
+    textureFrameTable = primaryBlock + textureFrameTable
+  textureCount = FUN_80146540(textureSet)
+  requiredCount = textureFrameTable[0]
+  if requiredCount == 0:
+    requiredCount = textureFrameTable[1]
+  if textureCount < requiredCount:
+    error through FUN_801A5710(DAT_80294477, textureCount)
+```
+
+So this function does not decode geometry; it links the texture set and checks that
+the texture resource has enough frames for what the model block expects.
+
+`FUN_8014E7D0` sets/normalizes enabled state on a `CzanModel`. Suggested name:
+
+```text
+CzanModel_SetEnabled
+```
+
+Confirmed behavior:
+
+```text
+enabled = enabled != 0
+result = FUN_8014C6CC(model, enabled)
+if result != 0:
+  CzanModel_UpdateObjectTransforms(1.0, model)
+return result != 0
+```
+
+`FUN_8014E780` builds runtime data with disabled/zero mode and then performs the first
+transform update. Suggested name:
+
+```text
+CzanModel_BuildRuntimeDataAndUpdateTransforms
+```
+
+Confirmed behavior:
+
+```text
+result = CzanModel_BuildRuntimeData(model, 0)
+if result != 0:
+  CzanModel_UpdateObjectTransforms(0.0, model)
+return result != 0
+```
+
+`FUN_8015EBAC` is a tiny owner-side wrapper that builds runtime data for the
+`CzanModel` pointer stored at owner `+0x80`. Suggested name:
+
+```text
+CzanModelOwner_BuildRuntimeDataAt80
+```
+
+Confirmed behavior:
+
+```text
+if owner +0x80 != 0:
+  CzanModel_BuildRuntimeDataAndUpdateTransforms(*(owner +0x80))
+```
+
+`FUN_8015EAE0` is the owner-side constructor for the `CzanModel` pointer at
+owner `+0x80`. Suggested name:
+
+```text
+CzanModelOwner_CreateModelFromPrimaryBlock
+```
+
+Confirmed behavior:
+
+```text
+if owner +0x80 != 0:
+  destroy old CzanModel with release=1
+  owner +0x80 = 0
+
+model = AllocObjectAligned(0, 0x2D0, 0x20, 0)
+if model != 0:
+  CzanModel_Init(model)
+owner +0x80 = model
+CzanModel_SetPrimaryBlock(model, primaryBlock, primaryBlockSize)
+```
+
+`FUN_8015EB98` and `FUN_8015EBC8` are the matching owner-side continuation helpers.
+The decompiler can lose their arguments, but the `select_cmn` call site confirms the
+real shape:
+
+```text
+CzanModelOwner_SetContinuationCount(owner, continuationCount)
+CzanModelOwner_LoadContinuationBlock(owner, continuationBlock, continuationIndex)
+```
+
+`FUN_8015EB98(owner, 10)` forwards to `CzanModel_SetContinuationCount(*(owner+0x80), 10)`.
+`FUN_8015EBC8(owner, block, index)` checks `owner +0x80` and then forwards to the
+model continuation loader at `0x8014C68C`. In `select_cmn`, this is called for blocks
+`6..0xF`, indices `0..9`, so these are the ten ZAB/continuation blocks for the model
+created from block `5`.
+
+`FUN_8014C68C` is now confirmed. Suggested name:
+
+```text
+CzanModel_LoadContinuationBlock
+```
+
+Confirmed behavior:
+
+```text
+if continuationIndex < model +0x9C:
+  model +0x0C = continuationBlock
+  FUN_8014E464(model, continuationIndex)
+  return true
+return false
+```
+
+So this function is not the real ZAB parser; it is the checked attach wrapper. The
+parser/builder we need next is `FUN_8014E464`.
+
+`FUN_8014E464` is now confirmed. Suggested name:
+
+```text
+CzanModel_ParseContinuationAnimationBlock
+```
+
+Confirmed behavior:
+
+```text
+zab = model +0x0C
+duration = zab +0x10 converted from integer ticks by FLOAT_802E9E38
+model +0x240 = duration
+animationRecordBase =
+  model +0x14 + continuationIndex * modelObjectCount * 0x74
+animationRecordBase +0x34 = duration
+
+for every model object:
+  clear translation/rotation/scale key counts and cached key indices in its 0x74 record
+
+for each ZAB channel entry:
+  name = zab +0x30 + channelIndex * 0x40
+  objectIndex = CzanModel_FindObjectIndexByName(model, name)
+  if objectIndex exists:
+    record = model +0x14 + (objectIndex + continuationIndex * modelObjectCount) * 0x74
+    record +0x34 = duration
+
+  keyTable = zab + *(channel +0x3C)
+  for each key group in channel +0x34:
+    type 0:
+      record +0x00 = keyCount
+      record +0x04 = zab + keyOffset
+      if zab +0x28 == 0, convert each translation key time, stride 0x10
+    type 1:
+      record +0x08 = keyCount
+      record +0x0C = zab + keyOffset
+      if zab +0x28 == 0, convert each rotation key time, stride 0x14
+    type 2:
+      record +0x10 = keyCount
+      record +0x14 = zab + keyOffset
+      if zab +0x28 == 0, convert each scale key time, stride 0x10
+
+zab +0x28 = 1
+```
+
+This ties the `.zab` format directly to the key evaluators already named:
+
+```text
+type 0 -> CzanModel_EvaluateTranslationKeys
+type 1 -> CzanModel_EvaluateRotationKeys
+type 2 -> CzanModel_EvaluateScaleKeys
+```
+
+Status after this: the ZAB attach/parse chain is identified from
+`CSelectCommon_LoadResource` down to per-object key arrays. The remaining rendering gap
+is host-side implementation of the runtime allocations and draw submission, not mystery
+about where the ZAB blocks go.
+
+`FUN_8015EBF4` is the owner-side frame/start value setter. Suggested name:
+
+```text
+CzanModelOwner_SetAnimationStartFrame
+```
+
+Confirmed behavior:
+
+```text
+if owner +0x80 != 0:
+  *(*(owner +0x80) + 0x250) = startFrame
+```
+
+In `select_cmn`, it is called with `1.0` after attaching all ten continuation blocks.
+
+`FUN_80177CA8` loads a collection/bank of `CzanModel` objects from a WII link
+resource. Suggested name:
+
+```text
+CzanModelCollection_LoadFromLinkBlocks
+```
+
+Confirmed behavior:
+
+```text
+collectionIndex = param4 & 0xFF
+collection[collectionIndex].modelCount = modelCount
+collection[collectionIndex].models =
+  AllocObjectAligned(0, modelCount * 0x2D0 + 0x10, 0x20, 0)
+  initialized by FUN_80129C64(..., CzanModel_Init, CzanModel_Destroy, 0x2D0, modelCount)
+collection[collectionIndex].textureSlots =
+  AllocObjectAligned(0, modelCount * 4, 0x20, 0)
+
+for i in 0..modelCount-1:
+  modelBlockIndex = i * 2
+  textureBlockIndex = i * 2 + 1
+
+  textureSize = CzanLinkManager_GetBlockSize(link, textureBlockIndex)
+  textureBlock = CzanLinkManager_GetBlock(link, textureBlockIndex)
+  textureSlot = CreateTextureFromTplResource(global texture manager, textureBlock, textureSize, -1)
+  textureSlots[i] = textureSlot
+
+  modelSize = CzanLinkManager_GetBlockSize(link, modelBlockIndex)
+  modelBlock = CzanLinkManager_GetBlock(link, modelBlockIndex)
+  CzanModel_SetPrimaryBlock(models[i], modelBlock, modelSize)
+  CzanModel_AttachTextureSet(models[i], globalTextureManagerBase + textureSlot * 0x14)
+  CzanModel_BuildRuntimeDataAndUpdateTransforms(models[i])
+
+return -1
+```
+
+This is important because it confirms a higher-level non-`CtsStageObj` path also
+loads CzanModels directly from paired model/texture blocks.
+
+`FUN_8017872C` is the manager-level loader for one CzanModel resource bank.
+Suggested name:
+
+```text
+CzanModelManager_LoadResource
+```
+
+Confirmed behavior:
+
+```text
+bank = manager + (bankIndex & 0xFF) * 0x10
+link = CzanLinkManager(linkData)
+
+block0 = CzanLinkManager_GetBlock(link, 0)
+bank +0x124 = block0
+bank +0x128 = block0 +0x10
+
+if link block count < 2:
+  manager +0x18 = -1
+else:
+  block1 = texture/TPL resource
+  textureSlot = CreateTextureFromTplResource(global texture manager, block1, block1Size, -1)
+  bank +0x12C = textureSlot
+  manager +0x18 = textureSlot
+
+if link block count > 2:
+  block2 = model collection WII/link resource
+  modelCount = *(ushort *)(bank +0x128 +6)
+  CzanModelCollection_LoadFromLinkBlocks(manager +0xAC, block2, modelCount, bankIndex)
+
+return 1
+```
+
+Manager/bank fields seen here:
+
+```text
+manager +0x18 -> active/last texture slot, or -1
+manager +0xAC -> CzanModel collection array/base
+bank +0x124 -> block 0 metadata base
+bank +0x128 -> block 0 metadata payload at +0x10
+bank +0x12C -> texture slot for block 1
+bank stride -> 0x10, selected by low byte of bankIndex
+```
+
+`FUN_80178B8C` unloads/releases one CzanModel manager bank. Suggested name:
+
+```text
+CzanModelManager_UnloadBank
+```
+
+Confirmed behavior:
+
+```text
+bankIndex = bankIndex & 0xFF
+if manager[bankIndex * 4 +0x4A] == 0:
+  return 0
+
+FUN_801780FC(manager +0x2B)
+
+for each live object pointer in manager[0x69], count manager[0]:
+  if object exists and object byte +0x12C == bankIndex:
+    FUN_8017E5F8(...)
+    call object destructor through vtable at object +0x134, releaseMode=1
+    clear object pointer
+
+if manager[bankIndex * 4 +0x4B] != -1:
+  release texture slot through FUN_80146B8C(global texture manager)
+
+manager[bankIndex * 4 +0x4A] = 0
+manager[bankIndex * 4 +0x4B] = -1
+FUN_8017C760(manager +2)
+return 1
+```
+
+This matches the loader fields: `+0x4A` is the bank-loaded flag/metadata pointer slot,
+and `+0x4B` is the bank texture slot.
+
+`FUN_80178A68` clears the whole CzanModel manager. Suggested name:
+
+```text
+CzanModelManager_Clear
+```
+
+Confirmed behavior:
+
+```text
+for each live object pointer in manager[0x69], count manager[0]:
+  if object exists:
+    CzanModelObject_UnregisterManagerEntries(object)
+    call object destructor through vtable at object +0x134, releaseMode=1
+    clear object pointer
+
+for bankIndex in 0..7:
+  CzanModelManager_UnloadBank(manager, bankIndex)
+
+free manager[0x69]
+manager[0x69] = 0
+FUN_801A1E58(manager +0x45)
+FUN_80177F98(manager +0x2B)
+FUN_8017C76C(manager +2)
+FUN_8017C760(manager +2)
+```
+
+So the manager tracks up to 8 banks, plus a live object pointer array at `manager[0x69]`.
+
+`FUN_80178C8C` clears only the live object pointer array contents. Suggested name:
+
+```text
+CzanModelManager_ClearLiveObjects
+```
+
+Confirmed behavior:
+
+```text
+for each live object pointer in manager[0x69], count manager[0]:
+  if object exists:
+    CzanModelObject_UnregisterManagerEntries(object)
+    call object destructor through vtable at object +0x134, releaseMode=1
+    clear object pointer
+return 1
+```
+
+Unlike `CzanModelManager_Clear`, this does not unload banks 0..7 and does not free
+`manager[0x69]`.
+
+`FUN_80178DE4` updates live manager objects filtered by object group/layer byte.
+Suggested name:
+
+```text
+CzanModelManager_UpdateVisibleGroup
+```
+
+Confirmed behavior:
+
+```text
+manager = recovered from RuntimeContext_SpillSavedRegisters()
+if recovered low value == 0:
+  calls vtable method at manager[0x6AD] +0x30 +0x0C
+  computes manager[1] as a scaled delta/aspect value
+  updates/copies matrices/vectors from manager +0x6A/+0x7A into manager +0x9A
+  normalizes/finalizes manager +0x9A through FUN_80180C54
+
+  for each live object in manager[0x69], count manager[0]:
+    if object exists:
+      if object byte +0x12D == groupId:
+        FUN_8017F418(object, 1)
+        if FUN_8017F6D8(object, 3) == 0:
+          CzanModelObject_Update(manager[1], object)
+        else if removeFinished != 0:
+          CzanModelObject_UnregisterManagerEntries(object)
+          call object destructor through object +0x134 vtable, releaseMode=1
+          clear object pointer
+      else:
+        FUN_8017F418(object, 0)
+
+  FUN_8017C8B0(manager +2)
+```
+
+Object fields:
+
+```text
+object +0x12D -> group/layer id used by this update filter
+```
+
+This puts `FUN_8017E720` directly on the live-object update path.
+
+`FUN_8017E720` updates one live model-manager object. Suggested name:
+
+```text
+CzanModelObject_Update
+```
+
+Confirmed behavior:
+
+```text
+if object flags & 4:
+  checks all registration records at object +0x118
+  for type 1:
+    waits while registered manager +0x0C object has nonzero short at +0xD8
+  for type 3:
+    waits while FUN_801A1B48(manager +0x118 object) returns 0
+  if all dependencies are ready:
+    object flags |= 8
+    return
+
+if object flags & 1:
+  CzanModelObject_UpdateRegistrationTarget(delta, object, object +0x118 registrations)
+  if FUN_8017E120(object +1, 0x1C) != 0:
+    applies FUN_8017E0EC(1.0, target) to each registered target:
+      type 0 -> object +1
+      type 1 -> manager +0x0C target
+      type 2 -> manager +0xB0 target
+      type 3 -> manager +0x118 target
+
+  if neither fade flag 0x10 nor fade flag 0x20 is set:
+    if FUN_8017E120(object +1, 0x1D) != 0:
+      object flags |= 4
+
+  if fade-out flag 0x20 is set:
+    object +0x124 = fades from object +0x128 to 0 over duration object +0x11C
+    when complete:
+      clears flags 0x20 and 1
+      sends command 0x1F,0 to each registered target through its vtable +0x10
+      object flags |= 4
+
+  if fade-in flag 0x10 is set:
+    object +0x124 = fades from 0 to 1 over duration object +0x11C
+    when complete:
+      clears flag 0x10
+      object +0x124 = 1.0
+```
+
+Object fields:
+
+```text
+object +0x000 -> state flags
+object +0x110 -> metadata; byte +8 is registration count
+object +0x118 -> registration records, stride 0x10
+object +0x11C -> fade duration
+object +0x120 -> fade elapsed timer
+object +0x124 -> fade/current alpha-like value
+object +0x128 -> fade source/max value
+```
+
+This still is not the draw function. It controls lifecycle, registration updates, and
+fade state for live objects.
+
+`FUN_8017F7F8` updates one registered target for a live model-manager object, then
+recursively updates linked child/effect registrations. Suggested name:
+
+```text
+CzanModelObject_UpdateRegistrationTarget
+```
+
+Confirmed behavior:
+
+```text
+registration type = *(byte *)(registration[0] +2)
+
+type 0:
+  call object-local vtable at object +0xD8, method +0x0C, target object +4
+
+type 1:
+  target = manager +0x0C list entry registration[3]
+  target +0xCC = object +0x124
+  call target vtable at target +0xD4, method +0x0C
+
+type 2:
+  target = manager +0xB0 list entry registration[3]
+  target +0xCC = object +0x124
+  call target vtable at target +0xD4, method +0x0C
+
+type 3:
+  target = manager +0x118 list entry registration[3]
+  target +0xCC = object +0x124
+  call target vtable at target +0xD4, method +0x0C
+
+for linked entries starting at registration[1]:
+  validates high-bit/link pointers
+  logs effect debug info on invalid pointers
+  recursively calls CzanModelObject_UpdateRegistrationTarget(delta, object, linkedEntry)
+```
+
+This still dispatches updates into registered targets; the target vtable method `+0x0C`
+is now the interesting next hop for render/update behavior.
+
+`FUN_8017E5F8` unregisters a live model object from manager-side lists before object
+destruction. Suggested name:
+
+```text
+CzanModelObject_UnregisterManagerEntries
+```
+
+Confirmed behavior:
+
+```text
+registrations = object +0x118
+registrationCount = *(byte *)(*(object +0x110) +8)
+
+for each 0x10-byte registration record:
+  if record[3] >= 0:
+    type = *(byte *)(record[0] +2)
+    if type == 1:
+      manager = FUN_80178270()
+      FUN_8017C848(manager +8, record[3])
+    else if type == 2:
+      manager = FUN_80178270()
+      FUN_80178204(manager +0xAC, record[3])
+    else if type == 3:
+      manager = FUN_80178270()
+      FUN_801A1F2C(manager +0x114, record[3])
+    record[3] = -1
+
+free object +0x118
+object +0x118 = 0
+```
+
+Type codes:
+
+```text
+1 -> unregister from manager +0x08 via FUN_8017C848
+2 -> unregister from manager +0xAC via FUN_80178204
+3 -> unregister from manager +0x114 via FUN_801A1F2C
+```
+
+`FUN_8004EBA8` is a small wrapper that loads model-manager bank 1 into
+`gManager_802E70B8`. Suggested name:
+
+```text
+CzanModelManager_LoadBank1Resource
+```
+
+Confirmed behavior:
+
+```text
+CzanModelManager_LoadResource(gManager_802E70B8, 1, linkData)
+```
+
+`FUN_8004EC4C` bridges the CzanModel manager and the CtsStageObj wrapper path.
+Suggested name:
+
+```text
+CzanModelManager_SetupBank3AndStageObjects
+```
+
+Confirmed behavior:
+
+```text
+context = recovered from FUN_8012A154()
+activeGroupIndex = recovered low word/int from FUN_8012A154()
+
+for 5 existing stage-object slots at context +0xB02C:
+  if slot exists:
+    call vtable +0x14, currently CtsStageObj_ResetModelBlocks
+    call destructor vtable +0x08 with releaseMode=1
+    clear slot
+
+FUN_80178B8C(gManager_802E70B8, 3)
+clear context +0xB018 for 0x28 bytes
+context +0xB01C = -1
+
+if bank3LinkData != 0:
+  CzanModelManager_LoadResource(gManager_802E70B8, 3, bank3LinkData)
+
+context +0xB028 = activeGroupIndex
+context +0x8A05 = flagA
+context +0x8A06 = flagB
+
+if stageObjectLinkData != 0 and activeGroupIndex != -1:
+  offsets = DAT_802712F0 + activeGroupIndex * 0x14
+  for 5 stage objects:
+    alloc 0x70 bytes
+    CtsStageObj_InitBase(slot)
+    first block = model block
+    second block = texture block
+    remaining blocks in range = continuation blocks
+    vtable +0x10 -> CtsStageObj_LoadPrimarySecondaryBlocks
+    vtable +0x20 -> CtsStageObj_LoadContinuationBlock for each continuation
+    if continuationCount == 1:
+      vtable +0x24 -> CtsStageObj_StartAnimation(FLOAT_802E8408, FLOAT_802E8410, ...)
+```
+
+This function shows one real owner-side path for five `CtsStageObj` wrappers. It uses
+`DAT_802712F0` as a table of block ranges for the five stage-object slots.
+
+`FUN_80054CF4` loads one owner-side stage/model resource group from a WII link.
+Suggested name:
+
+```text
+CzanModelOwner_LoadStageResourceGroup
+```
+
+Confirmed owner fields:
+
+```text
+owner +0x002C -> current resource group index, incremented when useful blocks exist
+owner +0x8A04 -> group/category byte passed to FUN_80054C00
+owner +0xB324 + group -> metadata type/id byte copied from nested metadata block
+owner +0xB328 + group*4 -> allocated metadata string copied from nested metadata +4
+```
+
+Confirmed resource block flow:
+
+```text
+root block 0 -> LoadZmbZabModelEntryList(owner, block0)
+root block 2 -> model-manager bank 5 resource candidate
+root block 3 -> nested WII link
+  nested block 0 -> small metadata/name record
+  nested block 1 -> extra link passed to FUN_80054C00
+
+if nested metadata exists:
+  owner[0xB324 + group] = metadata[0]
+  owner[0xB328 + group*4] = copy of string at metadata +4
+
+FUN_80054C00(owner, owner[0x8A04], rootBlock2, nestedBlock1)
+
+if rootBlock2 != 0 and nestedBlock1 != 0 and group == 0:
+  CzanModelManager_LoadResource(gManager_802E70B8, 5, rootBlock2)
+
+FUN_800554B0(owner, group)
+if any useful block was found:
+  group++
+```
+
+This explains how the model owner prepares ZMB/ZAB entries and bank-5 resources
+before the later live-object creation path. It still is not a draw function. The
+next functions that matter from this loader are:
+
+```text
+FUN_80054C00 -> CzanModelOwner_SetupResourceGroupEntries
+FUN_800554B0 -> CzanModelOwner_EnsureResourceGroupHandle
+```
+
+`FUN_80054C00` stores the current resource group's category, bank/resource pointer,
+and optional 0x0C-byte entry records. Suggested name:
+
+```text
+CzanModelOwner_SetupResourceGroupEntries
+```
+
+Confirmed parameters:
+
+```text
+param_1 -> owner
+param_2 -> group/category byte
+param_3 -> resource pointer, stored for this group
+param_4 -> optional entry-list link parsed by FUN_8018CD38/FUN_8018CDBC
+```
+
+Confirmed fields:
+
+```text
+owner +0x002C -> current group index
+owner +0xB0D0 + group -> group/category byte from param_2
+owner +0xB0D4 + group*4 -> resource pointer from param_3
+owner +0xB0EC + group*0xC0 + entry*0x0C +0 -> source record byte 1
+owner +0xB0EC + group*0xC0 + entry*0x0C +1 -> source record byte 2
+owner +0xB0EC + group*0xC0 + entry*0x0C +2 -> source record byte 0
+```
+
+Confirmed flow:
+
+```text
+if entryListLinkData != 0:
+  parse it with FUN_8018CD38/FUN_8018CDBC
+  count = FUN_8018CFA0(parsed)
+  for entry in 0..count-1:
+    record = FUN_8018D004(parsed, entry)
+    store record[1], record[2], record[0] into the group table
+
+owner[0xB0D0 + group] = groupCategory
+owner[0xB0D4 + group*4] = bank/resource pointer
+release parsed list
+```
+
+This confirms the group entry stride is `0x0C`, and each group gets a `0xC0`-byte
+table, so the table can hold up to 16 compact entries.
+
+`FUN_800554B0` creates a per-group handle/id when the loaded group needs one.
+Suggested name:
+
+```text
+CzanModelOwner_EnsureResourceGroupHandle
+```
+
+Confirmed fields:
+
+```text
+owner +0xB324 + group -> metadata byte copied by CzanModelOwner_LoadStageResourceGroup
+owner +0xB340 + group*4 -> normal per-group handle/id, initialized to -1
+owner +0xB34C -> special handle/id for group 3
+owner +0xB354 + group*4 -> per-group resource/link presence check
+owner +0xB36C -> lock/disable flag; when nonzero this returns 0
+```
+
+Confirmed behavior:
+
+```text
+if owner +0xB36C != 0:
+  return 0
+
+if group == 3 and owner +0xB34C != -1:
+  return 0
+
+if normal handle table entry owner +0xB340 + group*4 == -1:
+  if group == 3:
+    owner +0xB34C = ResourceSlotManager_AllocateSlot(gManager_802E70A8, 0)
+    return 1
+  else if owner +0xB354 + group*4 != 0 or owner +0xB324 + group != 0:
+    owner +0xB340 + group*4 = ResourceSlotManager_AllocateSlot(gManager_802E70A8, 0)
+    return 1
+
+return 0
+```
+
+This function still does not draw. It decides whether the owner needs an auxiliary
+handle for a loaded resource group.
+
+`FUN_80024EA8` allocates one slot/handle from `gManager_802E70A8`. Suggested name:
+
+```text
+ResourceSlotManager_AllocateSlot
+```
+
+Confirmed behavior:
+
+```text
+slotIndex = -1
+if slotManager[0] != 0:
+  slotIndex = ResourceSlotManager_ClaimFreeSlot(slotManager[0])
+  if slotIndex != -1:
+    slotObject = ResourceSlotManager_GetClaimedSlot(slotManager[0], slotIndex)
+    if setupData != 0:
+      FUN_801843CC(slotObject, setupData)
+return slotIndex
+```
+
+In the model-owner path, `setupData` is passed as `0`, so this only allocates or
+reserves a slot index. To know exactly what kind of slot this is, the next targets are
+`FUN_80186F4C`, `FUN_801871A8`, and `FUN_801843CC`.
+
+`FUN_80186F4C` claims the first free slot from that slot pool. Suggested name:
+
+```text
+ResourceSlotManager_ClaimFreeSlot
+```
+
+Confirmed pool fields:
+
+```text
+slotPool +0x56B8 -> slot record array base
+slotPool +0x56BC -> slot record count
+slot record stride -> 0x290
+slot record +0x04 bit 0 -> in-use flag
+```
+
+Confirmed behavior:
+
+```text
+for slotIndex in 0..slotCount-1:
+  slot = slotArray + slotIndex * 0x290
+  if (slot[+0x04] & 1) == 0:
+    slot[+0x04] |= 1
+    return slotIndex
+return -1
+```
+
+`FUN_801871A8` validates a slot index and returns the actual claimed record pointer.
+Suggested name:
+
+```text
+ResourceSlotManager_GetClaimedSlot
+```
+
+Confirmed behavior:
+
+```text
+if slotIndex < 0:
+  return 0
+if slotIndex >= slotPool +0x56BC count:
+  return 0
+slot = *(slotPool +0x56B8) + slotIndex * 0x290
+if (slot[+0x04] & 1) == 0:
+  return 0
+return slot
+```
+
+So `FUN_801871A8` is not creating or loading anything. It is only a safe accessor for
+already-claimed `0x290` slot records.
+
+`FUN_80025668` is a wrapper that releases an old slot, allocates a new one, and binds
+payload/resource data into it. Suggested name:
+
+```text
+ResourceSlotHandle_Rebind
+```
+
+Confirmed behavior:
+
+```text
+if handle[0] != 0:
+  FUN_80186FB8(handle[0], handle[1])
+handle[1] = -1
+
+if handle[0] != 0:
+  slotIndex = ResourceSlotManager_ClaimFreeSlot(handle[0])
+  if slotIndex != -1 and setupData != 0:
+    slotObject = ResourceSlotManager_GetClaimedSlot(handle[0], slotIndex)
+    FUN_801843CC(slotObject, setupData)
+handle[1] = slotIndex
+
+if handle[0] != 0:
+  slotObject = ResourceSlotManager_GetClaimedSlot(handle[0], slotIndex)
+if slotObject != 0:
+  CzanMovieObj_Reset(slotObject)
+  CzanMovieObj_LoadResource(slotObject, resourceOrPayload)
+```
+
+`FUN_80024FA4` checks one flag state on the current slot record. Suggested name:
+
+```text
+ResourceSlotHandle_IsActivePending
+```
+
+Confirmed behavior:
+
+```text
+slot = 0
+if handle[0] != 0:
+  slot = ResourceSlotManager_GetClaimedSlot(handle[0], handle[1])
+if slot != 0:
+  if (slot[+0x230] & 1) != 0 and (slot[+0x230] & 2) == 0:
+    return 1
+return 0
+```
+
+New slot-record field:
+
+```text
+slot +0x230 bit 0 -> active/started flag
+slot +0x230 bit 1 -> finished/blocked flag
+```
+
+This tells us `gManager_802E70A8` exposes reusable `0x290`-byte records, but not yet
+what every record field means.
+
+`FUN_801843CC`, `FUN_80184678`, and `FUN_801844E8` identify the slot record as a
+`CzanMovieObj` through assert strings from `zanMovie.cpp`.
+
+```text
+FUN_801843CC -> CzanMovieObj_AllocBuffer
+FUN_80184678 -> CzanMovieObj_Reset
+FUN_801844E8 -> CzanMovieObj_LoadResource
+FUN_80184108 -> CzanMovieObj_InitDefaults
+FUN_80197DD0 -> CzanSndRead_Open
+```
+
+`CzanMovieObj_AllocBuffer` confirmed fields:
+
+```text
+movieObj +0x220 -> allocated buffer pointer
+movieObj +0x224 -> allocated buffer size
+movieObj +0x230 bit 0 -> active/allocated flag; AllocBuffer asserts if already set
+```
+
+Confirmed behavior:
+
+```text
+if movieObj +0x230 bit 0 is set:
+  assert "CzanMovieObj::AllocBuffer() already..."
+
+if inactive:
+  if movieObj +0x220 != 0:
+    MemoryPool_Free(0, movieObj +0x220)
+    movieObj +0x220 = 0
+    movieObj +0x224 = 0
+
+  if bufferSize != 0:
+    movieObj +0x224 = bufferSize
+    movieObj +0x220 = AllocObjectAligned(0, bufferSize, 0x20, 0)
+```
+
+`CzanMovieObj_Reset` confirmed fields and flags:
+
+```text
+movieObj +0x008 -> subobject with vtable at +0x8C
+movieObj +0x0E4 -> subobject reset by FUN_801A016C/FUN_801A01EC
+movieObj +0x114 -> subobject registered through DAT_802E71B8 +0x268
+movieObj +0x228 -> optional allocation freed during reset
+movieObj +0x230 -> main flags
+movieObj +0x234/+0x238/+0x23C/+0x240 -> runtime state cleared by reset
+
++0x230 bit 0x00001 -> active/loaded
++0x230 bit 0x00002 -> cleanup-needed state
++0x230 bit 0x10000 -> +0x08 subobject registered/started
++0x230 bit 0x20000 -> +0xE4 subobject active
++0x230 bit 0x40000 -> +0x114 subobject active/registered
+```
+
+Confirmed reset flow:
+
+```text
+if active and cleanup-needed:
+  if bit 0x40000:
+    FUN_8018FB20(movieObj +0x114, 0)
+    FUN_8019EAEC(movieObj +0x114)
+    clear bit 0x40000
+  if bit 0x10000:
+    call vtable method +0x18 on movieObj +0x08
+    FUN_8019D96C(movieObj +0x08)
+    clear bit 0x10000
+  if bit 0x20000:
+    FUN_801A01EC(movieObj +0xE4)
+    clear bit 0x20000
+
+clear +0x238, +0x23C, +0x240, +0x234
+movieObj +0x230 &= 0xFFFFC3FF
+
+FUN_8019DFE8(movieObj +0x114)
+call vtable method +0x14 on movieObj +0x08
+FUN_801A016C(movieObj +0xE4)
+free +0x228 if present
+FUN_80169B0C(*(DAT_802E71B8 +0x268), movieObj +0x114)
+CzanMovieObj_InitDefaults(movieObj)
+```
+
+`CzanMovieObj_LoadResource` does that same reset first, then:
+
+```text
+FUN_80169AC4(*(DAT_802E71B8 +0x268), movieObj +0x114)
+CzanSndRead_Open(movieObj +0x08, resourceOrPayload)
+movieObj +0x230 |= 1
+FUN_8019CE38(movieObj +0x08)
+```
+
+`CzanMovieObj_InitDefaults` confirmed fields:
+
+```text
+movieObj +0x228 -> cleared
+movieObj +0x22C -> cleared
+movieObj +0x230 -> flags cleared
+movieObj +0x234/+0x238/+0x23C/+0x240 -> runtime state cleared
+movieObj +0x244 -> 0x10-byte block cleared
+movieObj +0x254/+0x25C/+0x264/+0x26C -> 8-byte blocks cleared
+movieObj +0x274 -> default float
+movieObj +0x278 -> set to 1
+movieObj +0x27C -> 4 bytes set to 0xFF
+movieObj +0x280/+0x284/+0x288 -> cleared
+movieObj +0x14C..+0x180 -> clamped config values from FUN_80166D54
+movieObj +0x170/+0x188/+0x18C/+0x190 -> config words copied from FUN_80166D54
+```
+
+The clamp writes show `FUN_80166D54` supplies playback/config defaults, but the exact
+meaning of each float should stay unnamed until that function is mapped.
+
+`CzanSndRead_Open` is identified by `zanSndRead.cpp` assert strings. Confirmed flow:
+
+```text
+if pathOrResource == 0:
+  assert dvd_Open error
+
+fileHandle = FUN_801B1620(pathOrResource)
+if fileHandle == -1:
+  assert dvd_Open error "%s"
+
+call sndRead vtable +0x14 reset/destructor-like method
+if FUN_801B1930(fileHandle, sndRead +1) == 0:
+  assert dvd_Open error
+
+sndRead[0x10] = sndRead[0x0E]
+sndRead[0x0C] = sndRead
+sndRead[0x00] = fileHandle
+if fileHandle != -1:
+  validate sndRead[0x1B] reset-block state
+  FUN_80198220(sndRead, 0, sndRead[0x0E], 1, sndRead[0x0E], sndRead[0x0E], 1, 1)
+```
+
+So `movieObj +0x08` is a `CzanSndRead`-like subobject that opens/reads a DVD/file
+resource. That supports the idea that `gManager_802E70A8` is auxiliary playback
+plumbing, not the ZMB model renderer.
+
+This means the `gManager_802E70A8` handles created by the model-owner setup are movie
+object slots. For the main-menu background/model path this is probably auxiliary
+movie/screen resource plumbing, not the ZMB model draw path itself. The next most useful
+functions here are `FUN_80166D54` for the movie config defaults and `FUN_80198220` for
+the actual read scheduling.
+
+`CzanSndRead_Open` has been split into its own source/header in the host because the
+assert strings identify it as `zanSndRead.cpp`, separate from `zanMovie.cpp`.
+
+`FUN_80004350` is a plain clear/fill wrapper. Suggested name:
+
+```text
+ClearMemory
+```
+
+Confirmed behavior:
+
+```text
+FUN_8000429C(dest, value, size)
+return dest
+```
+
+Call sites use it like `memset(dest, value, size)`.
+
+`FUN_801B0120` initializes a 3x4 matrix to identity. Suggested name:
+
+```text
+Matrix34_SetIdentity
+```
+
+Confirmed layout:
+
+```text
+[1, 0, 0, 0]
+[0, 1, 0, 0]
+[0, 0, 1, 0]
+```
+
+`FUN_801459EC` is now named:
+
+```text
+Matrix34_Copy
+```
+
+It is a tiny wrapper around `FUN_801B0150(src, dest)` and is used anywhere the game
+copies a 3x4 transform matrix without composition.
+
+Additional matrix helper names:
+
+```text
+FUN_80145A0C -> Matrix34_Multiply
+FUN_80145CA4 -> Matrix34_GetTranslation
+FUN_80145C88 -> Matrix34_SetTranslation
+```
+
+`Matrix34_Multiply` wraps `FUN_801B0190(lhs, rhs, dest)` and composes parent/object
+3x4 transforms. `Matrix34_GetTranslation` reads offsets `+0x0C/+0x1C/+0x2C` into a
+compact vec3, and `Matrix34_SetTranslation` writes the same three offsets.
+
+`FUN_801568FC` initializes visible-part UV runtime state for a `CzanModel`. Confirmed
+name:
+
+```text
+CzanModel_InitVisiblePartUvRuntime
+```
+
+Important Ghidra note: this decompiles as `void(void)` because it begins with the
+saved-register helper. The recovered object is the `CzanModel` pointer.
+
+Confirmed behavior:
+
+```text
+partTable = *(model +0x04) +0x1C
+partFormatOrVersion = partTable != 0 ? *(partTable +4) : default
+runtimePart = model +0x44
+runtimePartCount = model +0x48
+
+for each visible runtime part, stride 0x50:
+  clear +0x0C, +0x1C, +0x40, +0x44
+  clear bytes +0x4A/+0x4B
+  sourcePart = runtimePart +0x30
+  if sourcePart exists and part format supports UV keys:
+    keyCount = *(short *)(sourcePart +0x3A)
+    keyTable = *(sourcePart +0x3C)
+    choose starting key indices into runtime +0x4A/+0x4B
+    compute starting offsets at runtime +0x0C/+0x1C
+    initialize timers/ranges at runtime +0x34/+0x38/+0x3C
+```
+
+This is the setup pair for `CzanModel_UpdatePartUvAnimation`: `InitVisiblePartUvRuntime`
+initializes the per-part UV state, and `UpdatePartUvAnimation` advances it each frame.
+
+`FUN_8013340C` is a bounded byte/string compare. Suggested name:
+
+```text
+BoundedStringCompare
+```
+
+Confirmed behavior:
+
+```text
+compare left and right byte-by-byte
+stop when maxLength bytes were checked -> return 0
+stop when bytes differ -> return leftByte - rightByte
+stop when matching null byte is reached -> return 0
+```
+
+This is equivalent to `strncmp(left, right, maxLength)`.
+
+`FUN_801A48A0` flushes a PowerPC data-cache range. Suggested name:
+
+```text
+FlushDataCacheRange
+```
+
+Confirmed behavior:
+
+```text
+if size == 0:
+  return address
+
+lineCount = (size + (address & 0x1F) + 0x1F) >> 5
+for each 0x20-byte cache line:
+  dataCacheBlockFlush(address)
+  address += 0x20
+syscall/sync
+return address after the flushed range
+```
+
+The PC host does not need a real cache flush, but the helper is useful to keep the
+original code flow recognizable. `CzanModel_BuildRuntimeData` calls it after relocating
+or preparing model block data.
+
+`FUN_8012A17C` is another saved-register/runtime return helper. It has no meaningful
+game logic body and should not be named as model/menu behavior.
+
+`FUN_80053B90` switches `gManager_802E70B8` bank 5 when an owner mode byte changes.
+Suggested name:
+
+```text
+CzanModelManager_SwitchBank5ForMode
+```
+
+Confirmed owner fields:
+
+```text
+owner +0x002D -> current mode/index byte
+owner +0x002E -> previous mode/index byte
+owner +0xB0B8 -> cached value copied from +0xB378 during switch
+owner +0xB0D4 + mode*4 -> per-mode bank-5 link/resource pointer
+owner +0xB340 + mode*4 -> per-mode gManager_802E70A8 handle/id
+owner +0xB34C -> alternate handle/id when mode == 3
+owner +0xB36C -> boolean flag passed to FUN_80025248 after reload
+owner +0xB370 -> pending/transition flag
+owner +0xB374 -> requested mode/index byte
+owner +0xB378 -> cached value copied to +0xB0B8
+owner +0xB37C -> transition/lock flag
+```
+
+Confirmed flow:
+
+```text
+if +0xB370 is set and +0xB37C is clear:
+  clear +0xB370
+
+if requestedMode != currentMode and +0xB370 == 0:
+  if current mode has a bank-5 link/resource pointer:
+    CzanModelManager_UnloadBank(gManager_802E70B8, 5)
+  CzanModelManager_UnloadBank(gManager_802E70B8, 5)
+  disable/clear old mode handle with FUN_80025248 when handle != -1
+  owner +0xB0B8 = owner +0xB378
+  previousMode = currentMode
+  currentMode = requestedMode
+  if requested mode has a bank-5 link/resource pointer:
+    CzanModelManager_LoadResource(gManager_802E70B8, 5, ...)
+    FUN_80053124(owner)
+  enable/update new mode handle with FUN_80025248 when handle != -1
+```
+
+This is a dynamic model bank switcher. It is useful for finding which resources feed
+bank 5, but it still does not render geometry directly.
+
+`FUN_80053124` initializes the live model objects after bank 5 is loaded for the active
+mode. Suggested name:
+
+```text
+CzanModelManager_InitBank5LiveObjectsForMode
+```
+
+Important Ghidra note: this may decompile as `void(void)` because
+`RuntimeContext_SpillSavedRegisters` recovers the owner pointer.
+
+Confirmed owner fields:
+
+```text
+owner +0x002D -> current mode/index byte
+owner +0x8A04 -> group/category byte passed to FUN_8017911C
+owner +0xB0E0 + mode -> count of 0x0C-byte entries for that mode
+owner +0xB0E4 + mode*0xC0 + entry*0x0C -> per-mode entry table
+
+entry +0x00 -> transform/position id, must not be -1
+entry +0x04 -> live model object handle, created when -1
+entry +0x08 -> signed model/resource id byte, must not be -1
+entry +0x0A -> signed bank/model slot byte, passed to FUN_8017911C
+```
+
+Confirmed flow:
+
+```text
+if owner +0xB370 == 0:
+  for each entry in current mode:
+    if entry[0] != -1 and entry[4] == -1 and entry[8] != -1 and entry[0x0A] != -1:
+      handle = FUN_8017911C(1.0, gManager_802E70B8, entry[0x0A], 5, owner +0x8A04)
+      entry[4] = handle
+      if handle != -1:
+        slotIndex = FUN_80054F88(owner)
+        if ownerSlot[slotIndex] has transform data:
+          FUN_8005941C(ownerSlot +0xAC, stackTransform, entry[0])
+        FUN_801791F0(gManager_802E70B8, handle, stackTransform)
+```
+
+This proves bank 5 is used to spawn live model objects, and the live object transform
+is applied immediately after creation. The next important calls are:
+
+```text
+FUN_8017911C -> CzanModelLiveObject_Init / live-object creation init body
+FUN_801791F0 -> CzanModelManager_SetLiveObjectMatrix
+FUN_8005941C -> CtsStageObj_CopyObjectTransform
+FUN_80054F88 -> CzanModelOwner_SelectModeSlot
+```
+
+`FUN_8017911C` appears in one call site as the live-object creation/registration path
+that returns a handle, but the pasted decompile is a tiny init body. Suggested cautious
+name:
+
+```text
+CzanModelLiveObject_Init
+```
+
+Confirmed pasted body:
+
+```text
+object +0x120 = -1
+FUN_80179330(...)
+```
+
+The surrounding allocator/registration wrapper still needs mapping before this is fully
+understood.
+
+`FUN_801791F0` applies matrix data to a live CzanModelManager object. Suggested name:
+
+```text
+CzanModelManager_SetLiveObjectMatrix
+```
+
+Confirmed behavior:
+
+```text
+if liveObjectHandle < 0:
+  return
+object = *(manager +0x1A4)[liveObjectHandle]
+if object == 0:
+  log "CzanEffMng::set_mtx(): NULL!!!!"
+else:
+  FUN_8017DA24(object +4, matrix)
+```
+
+`FUN_8017DA24` applies the model-manager global scale to a live object's matrix.
+Suggested name:
+
+```text
+CzanModelLiveObject_ApplyGlobalScaleToMatrix
+```
+
+Confirmed behavior:
+
+```text
+FUN_80180C0C(liveObjectTransform +0xDC)
+scale = *(FUN_80178270() +0x2A4)
+
+multiply these 3x3 matrix floats by scale:
+  +0xDC +0xE0 +0xE4
+  +0xEC +0xF0 +0xF4
+  +0xFC +0x100 +0x104
+```
+
+This is part of transform preparation after `CzanModelManager_SetLiveObjectMatrix`.
+It helps make spawned model objects use the manager's global scale, but it does not
+create or draw the model by itself.
+
+`FUN_8005941C` copies a base or object-specific transform from a CtsStageObj/slot.
+Suggested name:
+
+```text
+CtsStageObj_CopyObjectTransform
+```
+
+Confirmed behavior:
+
+```text
+if objectIndex != -1:
+  objectTransform = CzanModel_GetObjectTransform(*(slot +0), objectIndex)
+if objectTransform == 0:
+  copy slot +0x1C to outMatrix through FUN_801459EC
+  return 0
+else:
+compose/copy slot +0x1C with objectTransform through FUN_80145A0C
+return 1
+```
+
+`FUN_801568D4` is now named:
+
+```text
+CzanModel_GetObjectTransform
+```
+
+It returns `*(model +0x20) + objectIndex * 0x30`, so `model +0x20` is the runtime
+object transform array.
+
+`FUN_80054F88` chooses which owner mode slot should supply transform data. Suggested
+name:
+
+```text
+CzanModelOwner_SelectModeSlot
+```
+
+Confirmed behavior:
+
+```text
+default return owner +0x2D current mode
+if owner +0xB0C4 == 2:
+  may return owner +0x2E previous mode during transition/blend
+  checks owner +0xE6E8, +0xB37C, and blend timer fields +0xB0BC/+0xB0C0
+```
+
+`FUN_801175B8` loads a group of CzanModels and builds lookup tables from named object
+markers. Suggested name:
+
+```text
+CzanModelPositionSet_LoadFromLinkList
+```
+
+Confirmed behavior:
+
+```text
+CzanLinkManager_Init(local managers)
+CzanModelPositionSet_Clear(positionSet)
+
+positionSet[0] = linkDataCount
+positionSet[1] = AllocObjectAligned(0, linkDataCount * 0x38, 0x20, 0)
+
+for each linkData in linkDataList:
+  CzanLinkManager_SetLink(linkData)
+  blockCount = link.blockCount
+  entry[0] = blockCount
+  entry[1] = allocate blockCount CzanModels
+
+  for each WII block:
+    model = entry[1] + index * 0x2D0
+    CzanModel_SetPrimaryBlock(model, blockData, blockSize)
+    CzanModel_SetEnabled(model, 1)
+
+  for six marker-name groups:
+    scan every loaded model object name
+    match strings from the table starting at PTR_s_s1_pos__80290C18
+    build count/index tables for objects named like s1_pos...
+```
+
+The 0x38-byte entry layout begins as:
+
+```text
+entry +0x00 -> loaded model count / WII block count
+entry +0x04 -> CzanModel array, count * 0x2D0
+entry +0x08.. -> marker counts / lookup pointers for six marker groups
+```
+
+This function is useful for the model path because it proves another loader can build
+`CzanModel` runtime data directly from WII blocks, but it still does not draw. It is a
+named-position/marker lookup builder.
+
+`FUN_8015759C` updates the runtime object transform arrays after the model block has
+been built. Suggested name:
+
+```text
+CzanModel_UpdateObjectTransforms
+```
+
+Confirmed behavior:
+
+```text
+if model primary block at model +0x04 exists:
+  objectTableHeader = *(model +0x04) +0x20
+  objectCount = objectTableHeader[0]
+  objectEntry = objectTableHeader[2]
+  for each object:
+    if objectEntry +0x94 < 0:
+      copy/initialize model +0x1C transform into model +0x20 transform
+    else:
+      compose parent transform from model +0x20[parentIndex] into this object's transform
+
+    if model +0x158 == 0:
+      CzanModel_UpdateObjectAnimation(deltaOrScale, model, objectIndex)
+    else:
+      if byte model +0x50 != 0:
+        copies/composes model +0x20 into model +0x24
+      composes model +0x20/+0x24 into model +0x28
+      if objectEntry +0x2C == 2 and no skip table says to skip:
+        calls CzanModel_UpdateType2WeightedVectors(model, objectEntry, model +0x34 entry)
+      CzanModel_UpdateObjectAnimation(deltaOrScale, model, objectIndex)
+
+  CzanModel_FinalizeTransformUpdate(deltaOrScale, model)
+  model +0x164 = 0
+```
+
+This is not the final draw function, but it is the model pose/object transform update.
+It uses the object table parent index at object entry `+0x94` and the runtime transform
+arrays at model `+0x1C`, `+0x20`, `+0x24`, and `+0x28`.
+
+`FUN_8014F7D0` is now named:
+
+```text
+CzanModel_UpdateType2WeightedVectors
+```
+
+It prepares the generated float3 vector buffers used by type-2 object draw paths.
+Confirmed behavior:
+
+```text
+objectEntry +0x9A -> submesh count
+objectEntry +0x9C -> 0x40-byte per-submesh records
+drawContext +0x04 -> per-submesh output buffer pointers, stride 0x10
+model +0x28 -> source/composed object transforms, stride 0x30
+
+for each submesh:
+  output = *(drawContext +0x04 + submesh*0x10 + 4)
+  source = objectEntry +0x9C + submesh*0x40
+
+  first pass:
+    clear one float3 per base weighted record
+    for each weight record:
+      transform source model +0x28 matrix/vector through FUN_801B0AD0
+      scale by weight byte/float at source +0x3C through FUN_801B1040
+      accumulate into output with FUN_801B0FE0
+
+  second pass:
+    clear one float3 per indexed/generated record
+    for each index pair from drawContext submesh +0x0C:
+      transform through FUN_801B0B30 using source +0x2C data
+      scale by source +0x3C
+      accumulate into output
+
+  FlushDataCacheRange(output, generatedCount * 0x0C)
+
+then FUN_801D2FF0 flushes/updates render state after the generated buffers are ready
+```
+
+So `model +0x34` is not a final vertex buffer by itself; it is draw/runtime metadata
+whose submesh entries point at generated type-2 vector buffers.
+
+`FUN_801576FC` finalizes a transform/update tick after all object transforms have
+been processed. Suggested name:
+
+```text
+CzanModel_FinalizeTransformUpdate
+```
+
+Confirmed behavior:
+
+```text
+if model +0x150 == 0:
+  if byte model +0x50 == 0 and primaryBlock +0x1C material/part table exists:
+    for each top-level part:
+      if part +0x30 frame-count != 0:
+        advances runtime part timer at model +0x2C entry +0x0C
+        wraps timer by last frame marker in part +0x34 table
+        updates current frame index at runtime part entry +0x10 when not locked
+      for each child part:
+        same timer/frame update using child runtime offsets +0x38/+0x3C/+0x40
+
+  byte model +0x50 = 0
+  if model +0x94 != 0.0 and deltaOrScale != 0.0:
+    deltaOrScale = model +0x94 * model +0x19C / FLOAT_802E9E38
+  CzanModel_UpdatePartUvAnimation(deltaOrScale, model)
+  if model +0x1B4 != 0:
+    FUN_801579A8(deltaOrScale, model)
+  model +0x150 = 1
+```
+
+New timing/update fields:
+
+```text
+model +0x50  -> dirty/update-needed byte
+model +0x94  -> optional delta override
+model +0x150 -> finalized-this-frame flag
+model +0x19C -> animation/frame-rate divisor
+model +0x1B4 -> optional extra update flag
+model +0x2C  -> runtime part table, top-level stride 0xDC
+```
+
+`FUN_8015627C` updates one model animation channel. Suggested name:
+
+```text
+CzanModel_UpdateAnimationChannel
+```
+
+Confirmed behavior:
+
+```text
+channel = model +0x230 + channelIndex * 0x24
+
+if holdFrame == 0:
+  if channel duration at +0x240 > 0:
+    channel timer +0x230 += channel speed +0x250 * model +0x19C / FLOAT_802E9E38
+    handles forward/backward playback
+    handles loop flag byte +0x238
+    sets end/reached flags at bytes +0x244 and +0x245
+  FUN_80157BCC(model)
+
+if model +0x9C == 0 or channel target/index +0x234 < 0:
+  if channelIndex == 0:
+    CzanModel_UpdateObjectTransforms(delta, model)
+else:
+  if channel blend/transition flag +0x248 != 0 and holdFrame == 0:
+    advances blend timer at +0x24C
+    while blend timer < 1.0:
+      CzanModel_BlendAnimationChannelFrame(delta, model, &channel timer, channelIndex)
+      if channelIndex == 0:
+        CzanModel_UpdateObjectTransforms(delta, model)
+      return
+    clears blend flag +0x248 and blend timer +0x24C
+
+  if blend timer +0x24C == 0.0:
+    CzanModel_ApplyAnimationChannelFrame(channel timer, model, channelIndex)
+    if channelIndex == 0:
+      CzanModel_UpdateObjectTransforms(delta, model)
+```
+
+Animation channel fields:
+
+```text
+model +0x230 + channel*0x24 -> channel timer/current frame
+channel +0x238 -> loop flag
+channel +0x240 -> duration/end frame
+channel +0x244 -> reached/end flag
+channel +0x245 -> active/ended flag
+channel +0x248 -> blend/transition active flag
+channel +0x24C -> blend/transition timer
+channel +0x250 -> playback speed
+```
+
+`FUN_8015601C` applies one animation channel frame to the model's object local
+transforms. Suggested name:
+
+```text
+CzanModel_ApplyAnimationChannelFrame
+```
+
+Confirmed behavior:
+
+```text
+if primary model block exists and byte model +0x50 == 0:
+  channel = model +0x230 + channelIndex * 0x24
+  duration = channel +0x240
+  if duration > 0:
+    frame = frame % duration, with non-looping channels clamped to duration
+    objectAnimRecords =
+      model +0x14 + (channel target/index +0x234) * objectCount * 0x74
+
+    for each object:
+      localTransform = model +0x1C + objectIndex * 0x30
+      objectAnimRecord stride = 0x74
+
+      if translation keyframes exist:
+        CzanModel_EvaluateTranslationKeys(...)
+        applies translation into localTransform through matrix helper at record +0x40
+
+      if rotation keyframes exist:
+        CzanModel_EvaluateRotationKeys(...)
+        applies rotation into localTransform through matrix helper at record +0x4C
+
+      if scale keyframes exist:
+        CzanModel_EvaluateScaleKeys(...)
+        builds scale matrix and multiplies it into localTransform
+
+      stores last frame at objectAnimRecord +0x30
+```
+
+New animation record facts:
+
+```text
+model +0x14 -> per-channel/per-object animation records
+object animation record stride -> 0x74
+record +0x40 -> translation matrix/helper
+record +0x4C -> rotation matrix/helper
+record +0x5C -> scale matrix/helper
+record +0x30 -> last applied frame
+object local transforms -> model +0x1C, stride 0x30
+```
+
+ZAB keyframe evaluator names:
+
+```text
+FUN_8015D9C4 -> CzanModel_EvaluateTranslationKeys
+FUN_8015DACC -> CzanModel_EvaluateRotationKeys
+FUN_8015DBD8 -> CzanModel_EvaluateScaleKeys
+```
+
+Confirmed key layouts:
+
+```text
+translation key stride 0x10: frame/time, x, y, z
+scale key stride       0x10: frame/time, x, y, z
+rotation key stride    0x14: frame/time, qx, qy, qz, qw or equivalent 4-float rotation
+```
+
+All three evaluator functions start scanning at the cached key index, choose the key at
+or before the current frame, interpolate to the next key when possible, hold the final
+key when not looping, interpolate final-to-first over the channel duration when looping,
+and return the chosen key index so the animation record can cache it.
+
+`FUN_801564BC` applies one animation channel frame while blending into existing
+object animation records. Suggested name:
+
+```text
+CzanModel_BlendAnimationChannelFrame
+```
+
+Confirmed behavior:
+
+```text
+if byte model +0x50 == 0 and channel duration > 0:
+  frame = channel[0] modulo channel[4]
+  if channel loop/relative flag is set, uses floor(channel[0] / channel[4])
+  objectAnimRecords = model +0x14 + channelIndex * objectCount * 0x74
+
+  for each object:
+    resets cached keyframe cursors in the object animation record
+    reads object local transform from model +0x1C
+    blendWeight = channel[7]
+    if object entry byte +0x27 is set:
+      blendWeight = 1.0
+
+    if rotation keyframes exist:
+      evaluates rotation into temp matrix
+      if record rotation was unused, copies temp matrix into record +0x4C
+      else blends temp matrix into record +0x4C
+      applies record +0x4C to local transform
+
+    if scale keyframes exist:
+      evaluates scale into temp vector/matrix
+      if record scale was unused, copies into record +0x5C
+      else blends into record +0x5C
+      multiplies scale into local transform
+
+    if translation keyframes exist:
+      evaluates translation into temp vector
+      if record translation was unused, copies into record +0x40
+      else blends into record +0x40
+      applies record +0x40 to local transform
+
+    stores last frame at object animation record +0x30
+
+  if channelIndex == 0:
+    CzanModel_UpdateObjectTransforms(delta, model)
+```
+
+This is the transition/blend pair for `CzanModel_ApplyAnimationChannelFrame`.
+
+`FUN_80156B70` updates render-part UV/scroll animation. Suggested name:
+
+```text
+CzanModel_UpdatePartUvAnimation
+```
+
+Confirmed behavior:
+
+```text
+partTable = primaryBlock +0x1C
+partVersion = partTable[1]
+partEntry = partTable[2]
+partCount = partTable[0]
+
+for each top-level part:
+  if part +0x20 != 0 or part +0x24 != 0:
+    marks part +0x1F renderable/animated
+    updates runtime visible-part record at model +0x44:
+      +0x0C scrolls one value backward/wrapped
+      +0x1C scrolls one value forward/wrapped
+
+  if first child part exists and child +0x1F != 0:
+    updates next runtime visible-part record similarly
+
+for each runtime visible-part record in model +0x44, stride 0x50:
+  source part pointer is stored at runtimePart +0x30
+  if source part +0x3C keyframe table exists and part version >= threshold:
+    advances runtimePart +0x34
+    wraps by the keyframe table's final time
+    computes/interpolates two UV animation values into runtimePart +0x0C/+0x1C
+```
+
+New part/runtime facts:
+
+```text
+model +0x44 -> visible/renderable part runtime records, stride 0x50
+model +0x48 -> visible/renderable part count
+part +0x1F -> animated/renderable part flag
+part +0x20/+0x24 -> UV scroll speeds
+part +0x3A -> UV keyframe count
+part +0x3C -> UV keyframe table
+runtime part +0x30 -> source part pointer
+runtime part +0x34 -> UV keyframe timer
+runtime part +0x38/+0x3C -> current delta values
+runtime part +0x40 -> base/offset used by interpolation
+```
+
+`FUN_801574B0` updates animation for one model object. Suggested name:
+
+```text
+CzanModel_UpdateObjectAnimation
+```
+
+Confirmed behavior:
+
+```text
+if model +0x1BC != 0:
+  objectEntry = (*(model +0x04) +0x20)[2] + objectIndex * 0xA0
+  if objectEntry byte +0x98 != 0:
+    *(model +0x1C0 + objectIndex * 0x24 +0x10) = deltaOrScale
+    CzanModel_SolveObjectAnimationTransform(stackTransform,
+                                            model +0x1CC + objectIndex * 0xB4,
+                                            model +0x1C0 + objectIndex * 0x24,
+                                            objectEntry +0x9C)
+    FUN_801459EC(model +0x1C + objectIndex * 0x30, stackTransform)
+    if objectEntry parent index at +0x94 < 0:
+      copy local transform into model +0x20 world transform
+    else:
+      compose parent world transform with local transform into this object's world transform
+```
+
+New model animation fields:
+
+```text
+model +0x1BC -> object animation enabled/state pointer or flag
+model +0x1C0 -> per-object animation state, stride 0x24
+model +0x1CC -> per-object animation data/context, stride 0xB4
+object entry +0x98 -> has animation flag
+object entry +0x9C -> object animation data pointer
+```
+
+`FUN_8018B4BC` solves the secondary per-object animation transform consumed by
+`CzanModel_UpdateObjectAnimation`. Suggested name:
+
+```text
+CzanModel_SolveObjectAnimationTransform
+```
+
+Confirmed call shape:
+
+```text
+outMatrix         -> stack matrix copied into model +0x1C + objectIndex * 0x30
+objectWorkspace   -> model +0x1CC + objectIndex * 0xB4
+objectAnimState   -> model +0x1C0 + objectIndex * 0x24
+objectAnimConfig  -> objectEntry +0x9C
+```
+
+Confirmed behavior:
+
+```text
+composes objectAnimState matrices/pointers into a current matrix
+extracts and normalizes translation vectors
+uses objectAnimConfig flags and counters to mirror/correct the solved direction
+keeps previous/current matrix state in objectWorkspace
+blends/corrects the object transform when objectWorkspace is in its transition state
+writes the solved matrix back to outMatrix
+copies the current composed matrix back into objectWorkspace +0x20
+clears objectWorkspace +0x50 after the first frame/setup path
+```
+
+This is downstream from raw ZAB key evaluation. The ZAB keyframes populate runtime
+object animation state first; this helper turns that state into the final local object
+matrix used by the model transform arrays.
+
+`FUN_8014C6CC` is the large primary model-block relocation/runtime-build function.
+Suggested name:
+
+```text
+CzanModel_BuildRuntimeData
+```
+
+Confirmed high-level behavior:
+
+```text
+if primary block pointer stored at model +0x04 is missing:
+  return 0
+
+primaryBlock = *(model +0x04)
+
+if primaryBlock +0x2C != 0:
+  sets byte model +0x6D = 1
+
+if primaryBlock +0x18 exists:
+  relocates the texture/frame table when primaryBlock +0x24 == 0
+  reads two shorts from the table header
+  uses header[0] unless it is zero, then uses header[1] * 2
+  allocates two helper arrays at model +0x5C and model +0x60
+  array byte size = frameCountLikeValue * 4
+
+if primaryBlock +0x1C exists:
+  relocates material/part data when primaryBlock +0x24 == 0
+  stores the material/part table at model +0x4C
+  chooses part-entry stride 0x38 or 0x50 based on table version
+  table[0] is top-level part/material count
+  table[1] is the version/format float used for the 0x38 vs 0x50 stride test
+  table[2] points to the first part/material entry
+  child/subpart count is the short at part +0x2A
+  child/subpart pointer is part +0x2C
+  UV/keyframe pointer fields are relocated from part +0x34, +0x3C, +0x44, +0x4C
+  counts visible/renderable parts and allocates model +0x44 as count * 0x50
+  allocates/caches per-part data at model +0x2C
+
+relocates object table at primaryBlock +0x20:
+  object count -> model +0x98
+  object entries are 0xA0 bytes
+  allocates model +0x1C/+0x20/+0x24/+0x28 as objectCount * 0x30
+  allocates model +0x14 as objectCount * model +0x9C * 0x74 when model +0x9C != 0
+  allocates model +0x18 as objectCount * 0x10 when objectCount != 0
+  scans object names for tags including trans, ZDRAW, COLLINE, and other known prefixes
+  stores per-object flags in the object entries
+
+builds additional runtime tables:
+  display-list/index helper tables
+  object/material remap tables
+  bounding boxes per object/shape
+  model +0x34 gets per-object shape/display-list helper records when needed
+  model +0xB0/+0xB4 get bounding-box cache counts/pointers
+
+calls FUN_801A48A0(primaryBlock, model +0x08)
+sets primaryBlock +0x24 = 1
+returns 1
+```
+
+Concrete runtime arrays allocated by this function:
+
+```text
+model +0x14 -> object animation records
+              objectCount * model[0x9C] * 0x74, cleared
+model +0x18 -> per-object skip/aux records
+              objectCount * 0x10, cleared
+model +0x1C -> object local matrices
+              objectCount * 0x30
+model +0x20 -> object world/composed matrices
+              objectCount * 0x30
+model +0x24 -> alternate/skinning transform array
+              objectCount * 0x30
+model +0x28 -> second alternate/skinning transform array
+              objectCount * 0x30
+model +0x2C -> per-part animation/render cache
+              partCount * 0xDC, cleared
+model +0x34 -> type-2 per-object helper records
+              objectCount * 0x1C, only when needed
+model +0x44 -> visible/animated part runtime records
+              visiblePartCount * 0x50, cleared
+model +0x48 -> visible/animated part count
+model +0x5C -> texture/frame helper array
+model +0x60 -> texture/frame helper array
+model +0x98 -> object count
+model +0xB8 -> part/material entry stride, 0x38 or 0x50
+model +0x158 -> type-2 helper-present flag
+```
+
+Material/part build facts from the full paste:
+
+```text
+part +0x18 -> relocated pointer
+part +0x1C/+0x1D -> first part index candidates for model +0x130
+part +0x1F -> visible/animated runtime part flag
+part +0x20/+0x24 -> UV scroll speeds, may be synthesized from keyframes
+part +0x28 -> copied into runtimePart +0x4C
+part +0x2A -> child/subpart count
+part +0x2C -> child/subpart pointer
+part +0x30/+0x34 -> UV key count/table used to update model +0x138
+part +0x3A/+0x3C -> visible-part UV keyframe count/table
+part +0x40/+0x44/+0x48/+0x4C -> newer-format extra UV/material tables
+```
+
+Object build facts from the full paste:
+
+```text
+object table header +0x00 -> object count
+object table header +0x04 -> version/format float
+object table header +0x08 -> object entries pointer
+object entry stride -> 0xA0
+object +0x27 -> name starts with "trans"
+object +0x28 -> name matches the three-byte DAT_8029446A prefix
+object +0x29 -> name starts with "ZDRAW"
+object +0x2A -> object prefix/type id from the known prefix table
+object +0x2B -> suffix/id parsed after the matched prefix
+object +0x2C -> object type; type 2 triggers type-2 helper/runtime path
+object +0x30/+0x34/+0x38 and +0x60 -> initial local matrix/translation inputs
+object +0x94 -> parent index, forced to -1 for type-2 objects during init
+object +0x98 -> object-animation flag used by CzanModel_UpdateObjectAnimation
+object +0x9A -> submesh count
+object +0x9C -> submesh/object animation config pointer, relocated
+```
+
+Type-2 helper facts:
+
+```text
+model +0x34 record stride -> 0x1C
+record +0x00 -> submesh count copied from object +0x9A
+record +0x04 -> allocated per-submesh records, submeshCount * 0x10
+each submesh helper allocates remap/output buffers used by the type-2 vector path
+model +0x158 is set when any object has type +0x2C == 2
+```
+
+This is the first real “make the ZMB usable at runtime” function. It still does not
+directly draw, but it reveals the model block layout: material/part table at `+0x1C`,
+object table at `+0x20`, relocation flag at `+0x24`, and object entries sized `0xA0`.
+
+Important Ghidra note: if this decompiles as `void CzanModel_BuildRuntimeData(void)`,
+the signature is wrong because of the `FUN_8012A130`/`FUN_8012A17C` saved-register
+helper pattern. The logical signature remains:
+
+```c
+int CzanModel_BuildRuntimeData(int *model, int enabled);
+```
+
+The high 32 bits of the helper return are the `model` pointer, and the low 32 bits are
+the normalized/boolean build mode forwarded by callers such as `CzanModel_SetEnabled`.
+
+`FUN_8014E8E8` searches the object table inside the primary model block. Suggested
+name:
+
+```text
+CzanModel_FindObjectIndexByName
+```
+
+Confirmed behavior:
+
+```text
+objectTableHeader = *(model +0x04) +0x20
+objectCount = objectTableHeader[0]
+objectEntry = objectTableHeader[2]
+for index in 0..objectCount-1:
+  if FUN_801332F0(objectEntry, objectName) == 0:
+    return index
+  objectEntry += 0xA0
+return -1
+```
+
+This tells us the primary model block has an object table pointer/header at `+0x20`,
+and each object entry is `0xA0` bytes. That is one of the first hard layout facts we
+need for real ZMB model loading.
+
+CtsStageObj_ResetModelBlocks
+  if entry[4] != 0:
+    MemoryPool_Free(0, entry[4])
+  if entry[0] != 0:
+    calls the loaded model object's destructor through its vtable
+  if entry[1] != -1:
+    releases the texture-manager slot through FUN_80146B8C(global texture manager)
+  entry[0] = 0
+  entry[1] = -1
+  entry[2] = -1
+  entry[3] = 0
+  entry[4] = 0
+  entry[5] = FLOAT_802E84D8
+  entry[6] = FLOAT_802E84D8
+  thunk_FUN_801B0120(entry + 7)
+  clears 0x18 bytes at entry +0x13
+  entry[0x19] = 0
+  entry[0x1A] = 0
+
+CtsStageObj_LoadContinuationBlock
+  if continuationIndex < entry[3]:
+    FUN_8014C68C(*entry, continuationBlock, continuationIndex)
+    *(entry[4] + continuationIndex * 4) = *(*entry + 0x240)
+
+CtsStageObj_StartAnimation
+  entry[6] = (int)startFrame
+  *(*entry + 0x250) = startFrame * entry[5]
+  FUN_8015C548(*entry)
+
+CtsStageObj_ApplyModelTransform
+  if entry[0] != 0:
+    CzanModel_DrawVisibleObjects(entry[0], arg1, entry +0x1C, arg2)
+
+CtsStageObj_DrawModelWithFlags
+  if entry[0] != 0:
+    drawMode = 1 if flags bit 0 is set
+    drawMode = 2 if bit 0 is clear and bit 1 is set
+    drawMode = 0 otherwise
+    FUN_8014ED4C(entry[0], arg1, entry +0x1C, arg2, drawMode)
+
+ZmbZabModelEntry_UpdatePresentation
+  if entry +0x254 != 0:
+    if entry +0x70 has bit 0x10000:
+      FUN_80059380(entry, stackMatrix)
+      FUN_800259C0(gManager_802E70A8, arg1, stackMatrix)
+    CtsStageObj_DrawModelWithFlags(entry, arg1, arg2, arg3)
+```
+
+`FUN_800594B8` is the direct wrapper into the CzanModel visible-object draw traversal.
+Suggested name:
+
+```text
+CtsStageObj_ApplyModelTransform
+```
+
+Confirmed behavior:
+
+```text
+if stageObj[0] == 0:
+  return
+CzanModel_DrawVisibleObjects(stageObj[0], arg1, stageObj +0x1C, arg2)
+```
+
+The `stageObj +0x1C` argument is the base 3x4 transform initialized by
+`Matrix34_SetIdentity`.
+
+`FUN_8014F420` is now confirmed as the CzanModel draw traversal rather than a plain
+transform setter. Suggested name:
+
+```text
+CzanModel_DrawVisibleObjects
+```
+
+Confirmed behavior:
+
+```text
+return unless model +0x04 exists and model +0x7C is nonzero
+copy/compose the caller base matrix
+store arg2 at model +0x128 and caller matrix at model +0x15C
+optionally build an alternate transform through FUN_8014E96C
+walk the primary model object's 0xA0-byte table
+skip hidden/runtime-disabled objects
+for each visible object:
+  compose matrices
+  for each submesh:
+    if object type +0x2C == 2:
+      CzanModel_DrawType2PartTree(...)
+    else:
+      CzanModel_DrawStandardPartTree(...)
+increment model +0x1A4 modulo model +0x1A0
+mark model +0x164 = 1
+```
+
+`FUN_80151E90` recursively walks the type-2 object part/material tree. Suggested name:
+
+```text
+CzanModel_DrawType2PartTree
+```
+
+Confirmed behavior:
+
+```text
+part = partTableBase + model[0x2E] * *partIndexSource
+if childIndex != 0:
+  part = parentPart[0x2C] + model[0x2E] * (childIndex - 1)
+
+if part byte +0x13 != 0:
+  if part byte +0x13 == 1:
+    CzanModel_UpdateType2PartTexcoords(model, partIndexSource, drawContext, submeshIndex,
+                                       drawContext[3] + submeshIndex * 0x10)
+  else:
+    FUN_8015BEFC(model, partIndexSource, part, drawContext, submeshIndex,
+                 drawContext[3] + submeshIndex * 0x10)
+
+for each child in part child table:
+  if child byte +0x13 == 0:
+    recurse only from the root call
+  else if child byte +0x13 == 1:
+    FUN_8015BD68(...)
+  else:
+    CzanModel_UpdateType2SpecialPartTexcoords(...)
+```
+
+Important fields:
+
+```text
+model +0xB8 / model[0x2E] -> part/material entry stride
+part +0x13 -> render/container kind
+part +0x2A -> child count
+part +0x2C -> child part table pointer
+drawContext +0x0C -> submesh/render metadata table, stride 0x10
+```
+
+`FUN_80155484` recursively walks the standard/non-type-2 part/material tree. Suggested
+name:
+
+```text
+CzanModel_DrawStandardPartTree
+```
+
+Confirmed behavior:
+
+```text
+part = partTableBase + model[0x2E] * *partIndexSource
+if childPass != 0:
+  partForChildren = part[0x2C]
+
+if part byte +0x13 != 0:
+  if part byte +0x13 == 1:
+    CzanModel_UpdateStandardPartTexcoords(model, partIndexSource, objectMatrix,
+                                          drawContext[3] + submeshIndex * 0x10)
+  else:
+    CzanModel_UpdateStandardSpecialPartTexcoords(model, partIndexSource, part, objectMatrix,
+                                                 drawContext[3] + submeshIndex * 0x10)
+
+child = partForChildren[0x2C]
+if child != 0:
+  if child byte +0x13 == 0 and childPass == 0:
+    recurse once into childPass 1
+  else if child byte +0x13 == 1:
+    FUN_801595BC(...)
+  else:
+    FUN_80159730(...)
+```
+
+The currently recovered leaf functions update per-vertex texcoord/projection buffers:
+
+```text
+type-2 path:     CzanModel_UpdateType2PartTexcoords / FUN_8015BD68
+                 CzanModel_UpdateType2SpecialPartTexcoords / FUN_8015BEFC
+standard path:   CzanModel_UpdateStandardPartTexcoords / FUN_801595BC
+                 CzanModel_UpdateStandardSpecialPartTexcoords / FUN_80159730
+```
+
+`FUN_801595BC` is the standard path texcoord update for part byte `+0x13 == 1`.
+Suggested name:
+
+```text
+CzanModel_UpdateStandardPartTexcoords
+```
+
+Confirmed behavior:
+
+```text
+baseMatrix = model +0xC8, unless model +0x12C is nonzero
+vertexSlice = vertexCount / model +0x1A0
+start = model +0x1A4 * vertexSlice
+end = next slice, or vertexCount on the final slice
+
+for each vertex in the active slice:
+  read index pair from submesh +0x0C
+  select position table entry from saved caller state +0x24
+  select normal/vector table entry from saved caller state +0x2C
+  transform/project through matrix helpers
+  write two floats into *(submesh +0x04)
+
+FlushDataCacheRange(*(submesh +0x04), vertexCount * 8)
+```
+
+`FUN_80159730` is the standard path texcoord update for part byte `+0x13 != 1`.
+Suggested name:
+
+```text
+CzanModel_UpdateStandardSpecialPartTexcoords
+```
+
+Confirmed behavior:
+
+```text
+base vector = model +0xC8/model +0x12C
+if part byte +0x13 != 4 and model +0x128 != 0:
+  override base vector from *(model +0x128)
+
+matrix = objectMatrix, unless model +0x160 != 0 then matrix = model +0x16C
+
+if part byte +0x13 == 3:
+  direct transformed-vector projection
+else:
+  if part byte +0x13 == 4:
+    zero the projection vector
+  transform position and normal/vector records
+  normalize/project vector
+
+write two floats per vertex to *(submesh +0x04)
+FlushDataCacheRange(*(submesh +0x04), vertexCount * 8)
+```
+
+`FUN_8015BD68` is the type-2 path texcoord update for part byte `+0x13 == 1`.
+Suggested name:
+
+```text
+CzanModel_UpdateType2PartTexcoords
+```
+
+Confirmed behavior:
+
+```text
+baseMatrix = model +0xC8, unless model +0x12C is nonzero
+perSubmeshVectorTable = *(drawContext +0x04) + submeshIndex * 0x10 +4
+use the same model +0x1A0/+0x1A4 active vertex slice scheme
+
+for each vertex in the active slice:
+  read position index from submesh +0x0C
+  subtract baseMatrix translation from source position
+  normalize the vector
+  project through perSubmeshVectorTable
+  write two floats into *(submesh +0x04)
+
+FlushDataCacheRange(*(submesh +0x04), vertexCount * 8)
+```
+
+`FUN_8015BEFC` is the remaining type-2 special texcoord/projection leaf. Suggested
+name:
+
+```text
+CzanModel_UpdateType2SpecialPartTexcoords
+```
+
+Confirmed behavior:
+
+```text
+base vector = model +0xC8/model +0x12C
+if part byte +0x13 != 4 and model +0x128 != 0:
+  override base vector from *(model +0x128)
+
+perSubmeshVectorTable = *(drawContext +0x04) + submeshIndex * 0x10 +4
+use model +0x1A0/+0x1A4 active vertex slice scheme
+
+if model +0x15C == 0 or model +0x160 != 0:
+  kind 4 / kind 2:
+    transform indexed source vector against base vector, normalize/project
+  other kinds:
+    transform per-submesh vector directly
+else if kind 3:
+  direct transformed-vector projection through composed matrix
+else:
+  transform with external matrix model +0x15C, normalize/project
+
+write two floats into *(submesh +0x04)
+FlushDataCacheRange(*(submesh +0x04), vertexCount * 8)
+```
+
+So the four texcoord leaves are now accounted for.
+
+`FUN_80157FE4` is the shared material/render-state setup helper used by the primitive
+submit leaves. Suggested name:
+
+```text
+CzanModel_SetupPartRenderState
+```
+
+Confirmed behavior:
+
+```text
+drawArgs[0] -> part/material entry pointer
+drawArgs[2] -> texture/runtime slot selector; negative uses the default model texture
+drawArgs[3] -> display/config flag path through FUN_80143858 or FUN_801438A4
+drawArgs[4] -> enables extra render state through FUN_801D7200
+drawArgs[5]/[6] -> material/color mask inputs
+
+binds the resolved texture through GXLoadTexObj_wrapper
+applies part/material state through CzanModel_ApplyMaterialBlendMode / FUN_80177184
+configures TEV, blend, alpha, texgen, and raster state through FUN_801Dxxxx wrappers
+returns success when a usable texture/render state exists, otherwise zero
+```
+
+This helper is important because the primitive submitters do not just stream vertices;
+they first ask this routine to choose the texture/material state. The PC renderer should
+eventually turn this into a real `RenderState` object instead of treating it as a simple
+boolean.
+
+`FUN_80177150` applies material cull mode. Suggested name:
+
+```text
+CzanModel_ApplyMaterialCullMode
+```
+
+Confirmed behavior:
+
+```text
+if partMaterial != 0 and byte partMaterial +0x11 is nonzero:
+  FUN_801D40E0(0)
+else if forceCullBack != 0:
+  FUN_801D40E0(1)
+else:
+  FUN_801D40E0(2)
+```
+
+This is a tiny material-state switch. The exact enum names for `FUN_801D40E0` are still
+unconfirmed, but this is very likely the cull/face mode part of GX state.
+
+`FUN_80177184` applies the material blend/alpha compare mode. Suggested name:
+
+```text
+CzanModel_ApplyMaterialBlendMode
+```
+
+Confirmed behavior:
+
+```text
+materialMode = partMaterial byte +0x12 & 0x7F
+highBit      = partMaterial byte +0x12 >> 7
+
+forceBlendEnabled forces highBit to 1
+
+materialMode 3 -> RenderSetBlendMode(1, 4, 5, 5)
+materialMode 2 -> RenderSetBlendMode(1, 0, 5, 5)
+materialMode 1 -> RenderSetBlendMode(1, 4, 1, 5), then FUN_801D7200(1, 3, 0)
+default        -> RenderSetBlendMode(1, 4, 5, 5)
+
+if materialMode == 0 or forceAlphaCompare != 0:
+  RenderSetAlphaUpdate(1)
+  RenderSetAlphaCompare(7, 0, 1, 7, 0)
+else:
+  RenderSetAlphaUpdate(0)
+  if highBit == 0:
+    RenderSetAlphaCompare(4, 0xA0, 0, 3, 0xFF)
+  else:
+    RenderSetAlphaCompare(4, 0, 0, 3, 0xFF)
+```
+
+So material byte `+0x12` is a packed blend/alpha mode byte: low seven bits are the
+mode, and the high bit changes the alpha compare reference from `0xA0` to `0`.
+
+`FUN_801772E8` configures the vertex attribute layout for a material/submesh. Suggested
+name:
+
+```text
+CzanModel_SetupMaterialVertexAttributes
+```
+
+Confirmed behavior:
+
+```text
+submesh +0x06 short -> position source mode
+submesh +0x24       -> position array base when +0x06 != 1
+submesh +0x34       -> color array base
+submesh +0x30       -> generated texcoord array base
+submesh +0x2C       -> normal/vector array base
+part byte +0x10     -> enables normal/vector attr 10
+
+attr 9  -> position, stride 0x0C when array-backed
+attr 10 -> normal/vector, stride 0x0C when array-backed
+attr 11 -> color, stride 4 when array-backed
+attr 13 -> generated texcoord, stride 8 when array-backed
+```
+
+This gives the PC renderer a clearer vertex declaration for ZMB drawing. We now know
+which submesh offsets back each GX attribute.
+
+The low-level GX wrapper functions used by the primitive submitters are now named:
+
+```text
+FUN_801D3DF0 -> RenderBeginPrimitiveBatch
+FUN_801D3B70 -> RenderFlushPendingState
+FUN_801D5D80 -> RenderFlushTexGenState
+FUN_801D6690 -> RenderFlushNoOpState
+FUN_801D5CF0 -> RenderCopyTexGenState
+FUN_801D29A0 -> RenderFlushVertexDescriptorState
+FUN_801D2F30 -> RenderFlushVertexAttributeFormatState
+FUN_801D2A50 -> RenderRecomputeVertexStride
+FUN_801D77B0 -> RenderFlushProjectionState
+FUN_801D7A90 -> RenderFlushViewportState
+FUN_801D7D10 -> RenderFlushMatrixIndexState
+FUN_801D2B80 -> RenderClearVertexDescriptors
+FUN_801D2FB0 -> RenderSetVertexArray
+FUN_801D2BC0 -> RenderSetVertexAttrDescriptor
+FUN_801D2730 -> RenderSetVertexAttrFormat
+FUN_801D7110 -> RenderSetBlendMode
+FUN_801D7240 -> RenderSetAlphaUpdate
+FUN_801D6B70 -> RenderSetAlphaCompare
+```
+
+`RenderBeginPrimitiveBatch` is the `GXBegin` wrapper. It flushes pending render state,
+then writes the primitive command and vertex count to the GX FIFO:
+
+```text
+DAT_CC008000 = primitiveType | vertexFormat
+RAM_CC008000 = vertexCount
+```
+
+In the Czan model submitters, the common primitive type is `0x98`.
+
+`RenderFlushPendingState` consumes the render context dirty bits at context `+0x5FC`.
+The bits we care about immediately are:
+
+```text
+0x01 -> texture-generator dependency state, calls RenderFlushTexGenState
+0x02 -> no-op flush slot, calls RenderFlushNoOpState
+0x08 -> vertex descriptor state, calls RenderFlushVertexDescriptorState
+0x10 -> vertex attribute format/array state, calls RenderFlushVertexAttributeFormatState
+0x18 -> recomputed vertex stride/count, calls RenderRecomputeVertexStride
+0x04000000 -> matrix/index words, calls RenderFlushMatrixIndexState(0) and (5)
+0x08000000 -> projection state, calls RenderFlushProjectionState
+0x10000000 -> viewport state, calls RenderFlushViewportState
+```
+
+It also flushes BP/register ranges for TEV/color/texture state and clears dirty bits.
+
+`RenderFlushVertexDescriptorState` writes the two descriptor words at context `+0x14`
+and `+0x18` to GX registers `0x50` and `0x60`, then writes a derived descriptor summary
+to register `0x1008`.
+
+`RenderFlushVertexAttributeFormatState` walks the dirty format byte at context `+0x5FB`.
+For each dirty vertex format slot, it writes the packed attribute format words from
+context `+0x1C`, `+0x3C`, and `+0x5C` to GX registers `0x70`, `0x80`, and `0x90`.
+
+`RenderRecomputeVertexStride` recalculates the active vertex stride/count at context
+`+0x06` from the descriptor words and the small component-size lookup tables.
+
+`RenderFlushTexGenState` validates texture-coordinate generator/source dependencies.
+It reads the active texgen configuration from context `+0x254`, source pairs from
+context `+0x170`, and calls `FUN_801D5CF0` for missing texgen/source state.
+
+`RenderCopyTexGenState` copies cached texture-generator state from one slot to another.
+It takes two 10-bit values from source slot `+0x564`, stores them into destination slot
+`+0x108` and `+0x128`, folds in enable/type bits from source slot `+0x584`, then writes
+both destination words through FIFO command `0x61`.
+
+`RenderFlushProjectionState` writes seven projection-related words from context
+`+0x528..+0x540` through FIFO command `0x10` starting at register/index `0x61020`.
+
+`RenderFlushViewportState` writes the viewport transform through FIFO command `0x10`
+at register/index `0x5101A`, deriving scale/offset values from context
+`+0x544..+0x560`.
+
+`RenderFlushMatrixIndexState` writes either context `+0x80` to register pair
+`0x30/0x1018` or context `+0x84` to register pair `0x40/0x1019`. The pending-state
+flush uses selector `0` and selector `5`.
+
+`RenderClearVertexDescriptors` resets the vertex descriptor context to defaults
+(`context +0x14 = 0x200`, `+0x18 = 0`) and marks dirty bit `0x08`.
+
+`RenderSetVertexArray` is the `GXSetArray` wrapper. Attribute `0x19` is normalized to
+attribute `10`; then it writes paired GX registers:
+
+```text
+0xA0 | (attribute - 9) -> arrayBase & 0x3FFFFFFF
+0xB0 | (attribute - 9) -> stride
+```
+
+Known model attributes:
+
+```text
+9  -> position array
+10 -> normal/vector array
+11 -> color array
+13 -> generated texcoord array
+```
+
+`RenderSetVertexAttrDescriptor` is the `GXSetVtxAttrFmt`-style wrapper for one vertex
+format. It packs attr type/component type/component count into context words at
+`+0x1C`, `+0x3C`, and `+0x5C`, then marks dirty bit `0x10`.
+
+`RenderSetVertexAttrFormat` is the `GXSetVtxDesc`-style wrapper. It stores per-attribute
+format bits and marks dirty bit `0x08`.
+
+Observed Czan model values:
+
+```text
+format 0 -> disabled
+format 1 -> direct/indexed mode without a separate array base
+format 3 -> array-backed mode; caller also calls RenderSetVertexArray
+```
+
+`RenderSetBlendMode`, `RenderSetAlphaUpdate`, and `RenderSetAlphaCompare` cover the
+blend/alpha half of material state. The alpha compare packed register is:
+
+```text
+0xF3000000 |
+((op & 3) << 22) |
+((compare1 & 7) << 19) |
+((compare0 & 7) << 16) |
+((reference1 & 0xFF) << 8) |
+(reference0 & 0xFF)
+```
+
+`FUN_801586C0` is a real GX/display-list submit leaf. Suggested name:
+
+```text
+CzanModel_SubmitPartPrimitive
+```
+
+Confirmed behavior:
+
+```text
+validate/setup part with FUN_80157FE4
+copy material/render state from model fields
+configure vertex attrs:
+  attr 9  -> position table
+  attr 10 -> normal/vector table
+  attr 11 -> color table or generated color
+  attr 13 -> generated texcoord buffer at *(submesh +0x04)
+if model +0x164 == 0 and model +0x168 != 0:
+  regenerate texcoords for active model +0x1A4 slice
+for each primitive batch:
+  RenderBeginPrimitiveBatch(0x98, 0, vertexCount)
+  write indices/colors/texcoords to 0xCC008000
+```
+
+This is one of the main functions needed for the PC renderer because it identifies the
+actual arrays and stream order used by the GameCube/Wii GX path.
+
+`FUN_801528B4` is a full material/part draw traversal with render-state setup.
+Suggested name:
+
+```text
+CzanModel_DrawMaterialPartTree
+```
+
+Confirmed behavior:
+
+```text
+select current part from partTableBase + model[0x2E] * *partIndexSource
+or select child part when childIndex != 0
+apply part/material setup through CzanModel_ApplyMaterialCullMode / FUN_80177150
+and CzanModel_SetupMaterialVertexAttributes / FUN_801772E8
+handle special model modes model +0x280:
+  5 -> FUN_80159A04
+  6 -> FUN_8015A2B8
+bind texture set slots through BindTextureFromTextureSet / GXLoadTexObj_wrapper
+configure TEV/color/alpha state through many FUN_801Dxxxx wrappers
+emit primitive batches to the GX write-gather pipe
+if model +0x168 is enabled:
+  kind 1 -> CzanModel_SubmitPartPrimitive
+  other kinds -> CzanModel_SubmitSpecialPartPrimitive
+recurse into child parts
+optionally draw synthetic/extra part at model +0x28C
+```
+
+This function is more important for rendering than the previous part-tree wrappers:
+it contains texture binding, TEV setup, vertex attribute setup, and primitive emission.
+
+`FUN_80158DB8` is the non-kind-1 primitive submit leaf. Suggested name:
+
+```text
+CzanModel_SubmitSpecialPartPrimitive
+```
+
+Confirmed behavior:
+
+```text
+validate/setup part with FUN_80157FE4
+configure vertex attrs:
+  attr 9  -> position table
+  attr 10 -> normal/vector table
+  attr 11 -> color table or generated color
+  attr 13 -> generated texcoord buffer at *(submesh +0x04)
+if model +0x164 == 0 and model +0x168 != 0:
+  regenerate texcoords for active model +0x1A4 slice
+for each primitive batch:
+  RenderBeginPrimitiveBatch(0x98, 0, vertexCount)
+  write indices/colors/texcoords to 0xCC008000
+```
+
+It is nearly parallel to `CzanModel_SubmitPartPrimitive`, but handles part kinds other
+than `+0x13 == 1`, including the kind-3 direct projection path.
+
+`FUN_8015ABC8` is the type-2 object-path primitive submit leaf for part kind 1.
+Suggested name:
+
+```text
+CzanModel_SubmitType2PartPrimitive
+```
+
+Confirmed behavior:
+
+```text
+validate/setup part with CzanModel_SetupPartRenderState / FUN_80157FE4
+use per-submesh vector table from drawContext[1] + submeshIndex * 0x10 + 4
+configure the same GX vertex attrs as CzanModel_SubmitPartPrimitive
+if model +0x164 == 0 and model +0x168 != 0:
+  regenerate texcoords for the active model +0x1A4 slice
+for each primitive batch:
+  RenderBeginPrimitiveBatch(0x98, 0, vertexCount)
+  write position index, type-2 vector data/index, color index, and texcoord index
+  to 0xCC008000
+```
+
+`FUN_8015B2D8` is the type-2 object-path primitive submit leaf for non-kind-1 parts.
+Suggested name:
+
+```text
+CzanModel_SubmitType2SpecialPartPrimitive
+```
+
+Confirmed behavior:
+
+```text
+validate/setup part with CzanModel_SetupPartRenderState / FUN_80157FE4
+use per-submesh vector table from drawContext[1] + submeshIndex * 0x10 + 4
+configure the same GX vertex attrs as the other submit leaves
+contains the type-2 special generated-texcoord formulas for kinds 2, 3, 4, and the
+external-matrix path
+emits primitive 0x98 batches to the GX write-gather pipe
+```
+
+So the primitive submit layer now has four known leaves:
+
+```text
+standard kind 1      -> CzanModel_SubmitPartPrimitive          / FUN_801586C0
+standard other kinds -> CzanModel_SubmitSpecialPartPrimitive   / FUN_80158DB8
+type-2 kind 1        -> CzanModel_SubmitType2PartPrimitive     / FUN_8015ABC8
+type-2 other kinds   -> CzanModel_SubmitType2SpecialPartPrimitive / FUN_8015B2D8
+```
+
+`FUN_80153F44` is the base/fallback material tree renderer. Suggested name:
+
+```text
+CzanModel_DrawBaseMaterialPartTree
+```
+
+Confirmed behavior:
+
+```text
+accepts partTableBase == 0 for default material state
+applies material state through CzanModel_ApplyMaterialCullMode,
+CzanModel_SetupMaterialVertexAttributes, and CzanModel_ApplyMaterialBlendMode
+configures texture/color/alpha/TEV state through FUN_801Dxxxx wrappers
+binds texture set entries and emits primitive batches when texture state is available
+recurses into child parts:
+  child byte +0x17 clear -> CzanModel_DrawBaseMaterialPartTree
+  child byte +0x17 set   -> CzanModel_DrawMaterialPartTree
+if model +0x168 is enabled:
+  kind 1 -> CzanModel_SubmitPartPrimitive
+  other  -> CzanModel_SubmitSpecialPartPrimitive
+```
+
+So the material render layer now has two tree walkers:
+
+```text
+CzanModel_DrawBaseMaterialPartTree / FUN_80153F44
+CzanModel_DrawMaterialPartTree     / FUN_801528B4
+```
+
+`FUN_800594DC` is the flag-aware companion wrapper. Suggested name:
+
+```text
+CtsStageObj_DrawModelWithFlags
+```
+
+Confirmed behavior:
+
+```text
+if stageObj[0] == 0:
+  return
+
+drawMode = 0
+if flags bit 0 is set:
+  drawMode = 1
+else if flags bit 1 is set:
+  drawMode = 2
+
+FUN_8014ED4C(stageObj[0], arg1, stageObj +0x1C, arg2, drawMode)
+```
+
+`FUN_8004E220` is a higher-level derived ZMB/ZAB entry presentation/update method.
+Suggested name:
+
+```text
+ZmbZabModelEntry_UpdatePresentation
+```
+
+Confirmed behavior:
+
+```text
+if entry +0x254 == 0:
+  return
+
+if entry +0x70 has bit 0x10000:
+  FUN_80059380(entry, stackMatrix)
+  FUN_800259C0(gManager_802E70A8, arg1, stackMatrix)
+
+CtsStageObj_DrawModelWithFlags(entry, arg1, arg2, arg3)
+```
+
+This tells us bit `0x10000` in the packed parser flags at entry `+0x70` enables a
+movie-manager update using a matrix from `FUN_80059380`. The actual model-side work
+continues through `CtsStageObj_DrawModelWithFlags` into `FUN_8014ED4C`.
+
 ## Functions
 
 ```text
@@ -248,6 +3304,48 @@ unlock(DAT_802EE174 + poolIndex * 0x34)
 Some calls pass extra zero arguments after the useful parameters. The callee decompiles
 for `CSelModeEntry_AddUiObject` and `CSelModeEntry_AddChildUiObject` show only the first
 two parameters are used; the extra registers appear to be caller convention/noise.
+
+The lower allocator lock wrappers are now named:
+
+```text
+FUN_801A9430 -> Runtime_EnterCriticalSection
+FUN_801AC0A0 -> Runtime_GetCurrentThreadContext
+FUN_801AA6E0 -> MemoryMutex_Lock
+FUN_801AA7C0 -> MemoryMutex_Unlock
+FUN_801DC520 -> MemoryPool_AllocateAligned
+```
+
+`Runtime_EnterCriticalSection` reads the PowerPC MSR and returns a token consumed by
+the matching restore helper `FUN_801A9470`. The decompile shows the low word as the
+original MSR and the high word as a masked/shifted copy of selected MSR state.
+
+`Runtime_GetCurrentThreadContext` returns `DAT_800000E4`, which is the current
+thread/context pointer used by the allocator lock code. `MemoryMutex_Lock` reads and
+writes fields around this context's `+0x2D0..+0x2F8`.
+
+`MemoryMutex_Lock` is a recursive/thread-aware allocator lock. It records the owner at
+mutex `+0x08`, increments the recursion count at `+0x0C`, and links the mutex into the
+current thread/context list through fields `+0x10/+0x14`. When another context owns the
+mutex, it records the pending mutex at current context `+0x2F0` and waits/yields through
+`FUN_801AC390` and `FUN_801AD0F0`.
+
+`MemoryMutex_Unlock` decrements the recursion count and, when it reaches zero, unlinks
+the mutex from the owner list, clears owner `+0x08`, may select a waiter through
+`FUN_801AC1A0`, and wakes/continues waiters through `FUN_801AD1E0`.
+
+`MemoryPool_AllocateAligned` normalizes zero-size allocations to one byte, rounds the
+size up to four bytes, optionally locks allocator `+0x20` when allocator flags `+0x38`
+have bit `4`, then dispatches to:
+
+```text
+alignment < 0  -> FUN_801DC200(allocator, roundedSize, -alignment)
+alignment >= 0 -> FUN_801DC120(allocator, roundedSize, alignment)
+```
+
+`FUN_8012A130`, `FUN_8012A164`, and `FUN_8012A1B0` are not gameplay/runtime APIs.
+`FUN_8012A130` and `FUN_8012A164` are compiler helper stubs Ghidra emits for spilling
+nonvolatile registers to the implicit `r11` context area. `FUN_8012A1B0` is the paired
+empty return/restore marker for that helper family.
 
 Entry creation map:
 
@@ -1709,3 +4807,113 @@ FUN_800F3D9C(gPlayerDataManager + 0x14A4)
 
 The returned value from `CSelMode_Update` is the next CSelect state from the choice table,
 except for the special selected index `4` path.
+
+## Host `select_cmn.bin` Probe
+
+The host must load `select/select_cmn.bin` in addition to the region-specific
+`select/select_bin_sp.bin`. The latter contains the mode-select UI sprite groups, but
+the real common background/model package lives in `select_cmn.bin`.
+
+`tools/dump_select_cmn_models.py` confirms the top-level layout:
+
+```text
+select_cmn root: WII blocks=3
+[0] WII, size 0x1F3D60  -> common model package
+[1] WII, size 0x14D220  -> large ZAB animation package
+[2] WII, size 0x56060   -> TEB + texture data
+```
+
+Top block 0 is a WII resource with 17 blocks:
+
+```text
+[00] ZMB model      size 0xABA18
+[01] texture/other  size 0x20FE0
+[02] ZAB animation  size 0x123934
+[03] ZMB model      size 0x644
+[04] texture/other  size 0x320
+[05] ZMB model      size 0x220
+[06..15] ZAB animation blocks
+[16] nested WII resource
+```
+
+Confirmed ZMB header fields from the dump:
+
+```text
+block 0: +18=0x30, +1C=0x140, +20=0x8C0, +24=0
+         object table count=0x152, entries=0x8D0
+block 3: +18=0x30, +1C=0x60, +20=0xB0, +24=0
+         object table count=2, entries=0xC0
+block 5: +18=0, +1C=0, +20=0x30, +24=0
+         object table count=3, entries=0x40
+```
+
+`FUN_800982A8` is the runtime loader for this same common package. Suggested name:
+
+```text
+CSelectCommon_LoadResource
+```
+
+Confirmed block map from the function:
+
+```text
+CzanLinkManager_SetLink(stackLink, linkData)
+
+blocks 0/1:
+  CzanLinkManager_GetBlockInfo(stackLink, 0, &modelBlock, &modelSize)
+  CzanLinkManager_GetBlockInfo(stackLink, 1, &textureBlock, &textureSize)
+  load CtsStageObj at selectCommon +0x48
+
+block 2:
+  attach continuation block 0 to the +0x48 CtsStageObj
+  start/play it with frame/rate constants
+
+blocks 3/4:
+  CzanLinkManager_GetBlockInfo(stackLink, 3, &modelBlock, &modelSize)
+  CzanLinkManager_GetBlockInfo(stackLink, 4, &textureBlock, &textureSize)
+  load CtsStageObj at selectCommon +0xB8
+
+block 5:
+  CzanModelOwner_CreateModelFromPrimaryBlock(selectCommon +0x128, block5, size5)
+  CzanModelOwner_SetContinuationCount(selectCommon +0x128, 10)
+  CzanModelOwner_BuildRuntimeDataAt80(selectCommon +0x128)
+
+blocks 6..0xF:
+  CzanModelOwner_LoadContinuationBlock(selectCommon +0x128, block, index 0..9)
+  CzanModelOwner_SetAnimationStartFrame(selectCommon +0x128, 1.0)
+
+block 0x10:
+  create the shared CSelModeEntry UI object group and two mirrored entries
+```
+
+So the current model status is no longer ambiguous:
+
+```text
+.zmb primary data:
+  block 5 goes through CzanModel_SetPrimaryBlock and CzanModel_BuildRuntimeData.
+
+.zab / continuation data:
+  blocks 6..0xF go through CzanModelOwner_LoadContinuationBlock ->
+  CzanModel_LoadContinuationBlock after the model has continuation count 10.
+  CzanModel_LoadContinuationBlock then calls FUN_8014E464(model, continuationIndex).
+```
+
+`FUN_80160504` is the link-manager helper used by this loader. Suggested name:
+
+```text
+CzanLinkManager_GetBlockInfo(linkManager, blockIndex, outBlock, outSize)
+```
+
+Confirmed behavior:
+
+```text
+if blockIndex < *(int *)(*linkManager + 8):
+  *outSize = *(linkManager[1] + blockIndex * 8 + 4)
+  *outBlock = (*outSize < 1) ? 0 : *(linkManager[1] + blockIndex * 8)
+  return 1
+return 0
+```
+
+The OpenGL host now stores `select_cmn.bin` on `HostCSelectModule` and logs the common
+model package at CSelect startup. This still does not render the ZMB models; it proves
+the host is finally following the correct resource path before we implement the actual
+ZMB model runtime/build and draw path.

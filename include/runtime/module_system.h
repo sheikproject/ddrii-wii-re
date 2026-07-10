@@ -23,6 +23,7 @@ void ModuleController_CreatePendingModule(int *moduleController);
 int ModuleController_Update(ModuleControllerKnownFields *moduleController);
 void BootResourceBundle_StartLoading(int *resourceBundle);
 void BootResourceBundle_ApplyLoadedResources(int *resourceBundle);
+int *BootResourceBundle_Release(int *resourceBundle, short releaseMode);
 
 int CSelect_Init(void *cSelect);
 

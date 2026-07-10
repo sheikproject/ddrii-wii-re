@@ -7,8 +7,14 @@ typedef struct HostCSelectModule {
     int redrawNeeded;
     void *selectLinkData;
     unsigned int selectLinkSize;
+    void *selectCommonLinkData;
+    unsigned int selectCommonLinkSize;
 } HostCSelectModule;
 
 int CSelect_TickHost(void *cSelect);
+void HostCSelect_SetCommonSelectResource(
+    HostCSelectModule *module,
+    void *selectCommonLinkData,
+    unsigned int selectCommonLinkSize);
 
 #endif

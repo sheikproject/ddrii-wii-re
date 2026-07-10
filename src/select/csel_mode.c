@@ -1,6 +1,7 @@
 #include "select/csel_mode.h"
 
 #include "render/render_engine.h"
+#include "model/czan_model.h"
 #include "resource/czan_link.h"
 
 #include <stdio.h>
@@ -340,6 +341,43 @@ void CSelMode_SetInitialSelectedMode(void *cselMode) {
 
 void CSelMode_SetHostLinkResourceSize(unsigned int resourceSize) {
     gCSelModeHostLinkResourceSize = resourceSize;
+}
+
+void CSelectCommon_LoadResource(int *selectCommon, void *linkData) {
+    /* 0x800982A8 is the select_cmn resource loader for the common background
+       scene. It uses CzanLinkManager_GetBlockInfo for block pointer+size pairs.
+
+       Confirmed block map:
+       - blocks 0/1: primary model/texture pair for the CtsStageObj at +0x48.
+       - block 2: continuation block attached to that +0x48 stage object.
+       - blocks 3/4: primary model/texture pair for the CtsStageObj at +0xB8.
+       - block 5: primary CzanModel block for the owner at +0x128.
+       - blocks 6..0xF: ten continuation/ZAB blocks loaded into owner +0x128.
+       - block 0x10: shared CSelModeEntry UI object group used by three entries. */
+    int i;
+    int blockSize;
+    void *block;
+    int *modelOwner;
+
+    if (selectCommon == 0 || linkData == 0) {
+        return;
+    }
+
+    modelOwner = (int *)((unsigned char *)selectCommon + 0x128);
+    if (CzanLinkManager_GetBlockInfo((int *)linkData, 5, &block, &blockSize)) {
+        CzanModelOwner_CreateModelFromPrimaryBlock(modelOwner, block, blockSize);
+        CzanModelOwner_SetContinuationCount(modelOwner, 10);
+        CzanModelOwner_BuildRuntimeDataAt80(modelOwner);
+    }
+
+    for (i = 0; i < 10; i++) {
+        if (CzanLinkManager_GetBlockInfo((int *)linkData, 6 + i, &block, &blockSize)) {
+            (void)blockSize;
+            CzanModelOwner_LoadContinuationBlock(modelOwner, block, i);
+        }
+    }
+
+    CzanModelOwner_SetAnimationStartFrame(modelOwner, 1.0);
 }
 
 int CSelModeEntry_Init(void *entry) {

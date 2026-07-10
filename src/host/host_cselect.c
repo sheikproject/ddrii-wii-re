@@ -1,11 +1,15 @@
 #include "host/host_cselect.h"
 
 #include "render/render_engine.h"
+#include "resource/czan_link.h"
 #include "select/csel_mode.h"
 
 #include <conio.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+#define HOST_SELECT_MAX_OBJECT_NAMES 512
 
 enum HostInput {
     HOST_INPUT_NONE,
@@ -50,6 +54,298 @@ static int Host_ReadInput(void) {
             return HOST_INPUT_BACK;
         default:
             return HOST_INPUT_NONE;
+    }
+}
+
+static unsigned int Host_ReadBe32(const unsigned char *p) {
+    return ((unsigned int)p[0] << 24) |
+           ((unsigned int)p[1] << 16) |
+           ((unsigned int)p[2] << 8) |
+           (unsigned int)p[3];
+}
+
+static int Host_IsLikelyNameChar(unsigned char c) {
+    return (c >= '0' && c <= '9') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') ||
+           c == '_' ||
+           c == '-' ||
+           c == '@';
+}
+
+static void Host_CopyName(char *outName, unsigned int outNameSize, const unsigned char *data, unsigned int maxSize) {
+    unsigned int i;
+
+    if (outNameSize == 0) {
+        return;
+    }
+
+    for (i = 0; i + 1 < outNameSize && i < maxSize; i++) {
+        if (data[i] == 0 || !Host_IsLikelyNameChar(data[i])) {
+            break;
+        }
+        outName[i] = (char)data[i];
+    }
+    outName[i] = '\0';
+}
+
+static int Host_FindName(char names[][32], unsigned int nameCount, const char *name) {
+    unsigned int i;
+
+    if (name == 0 || name[0] == '\0') {
+        return -1;
+    }
+
+    for (i = 0; i < nameCount; i++) {
+        if (strcmp(names[i], name) == 0) {
+            return (int)i;
+        }
+    }
+
+    return -1;
+}
+
+static unsigned int Host_CollectZmbObjectNames(const CzanLinkBlock *block, char names[][32], unsigned int maxNames) {
+    unsigned int objectTableOffset;
+    unsigned int objectCount;
+    unsigned int objectEntryOffset;
+    unsigned int i;
+    unsigned int collected;
+
+    if (block == 0 || block->data == 0 || block->size < 0x30 || memcmp(block->data, "ZMB ", 4) != 0) {
+        return 0;
+    }
+
+    objectTableOffset = Host_ReadBe32(block->data + 0x20);
+    if (objectTableOffset > block->size || block->size - objectTableOffset < 0x0c) {
+        return 0;
+    }
+
+    objectCount = Host_ReadBe32(block->data + objectTableOffset);
+    objectEntryOffset = Host_ReadBe32(block->data + objectTableOffset + 8);
+    if (objectEntryOffset > block->size) {
+        return 0;
+    }
+
+    collected = 0;
+    for (i = 0; i < objectCount && collected < maxNames; i++) {
+        unsigned int entryOffset = objectEntryOffset + i * 0xa0;
+        if (entryOffset >= block->size) {
+            break;
+        }
+
+        Host_CopyName(names[collected], 32, block->data + entryOffset, block->size - entryOffset);
+        if (names[collected][0] != '\0') {
+            collected++;
+        }
+    }
+
+    return collected;
+}
+
+static void Host_LogZmbObjectNames(const CzanLinkBlock *block, unsigned int blockIndex, char names[][32], unsigned int *outNameCount) {
+    unsigned int count;
+    unsigned int i;
+
+    count = Host_CollectZmbObjectNames(block, names, HOST_SELECT_MAX_OBJECT_NAMES);
+    if (outNameCount != 0) {
+        *outNameCount = count;
+    }
+
+    printf("select_cmn: block %u ZMB object names=%u\n", blockIndex, count);
+    for (i = 0; i < count && i < 16; i++) {
+        printf("select_cmn:   zmb object[%u]=%s\n", i, names[i]);
+    }
+    if (count > 16) {
+        printf("select_cmn:   ... %u more objects\n", count - 16);
+    }
+}
+
+static void Host_LogZabChannelMatches(
+    const CzanLinkBlock *block,
+    unsigned int blockIndex,
+    unsigned int objectBlockIndex,
+    char objectNames[][32],
+    unsigned int objectNameCount,
+    int verbose) {
+    unsigned int channelCount;
+    unsigned int durationTicks;
+    unsigned int i;
+    unsigned int matchCount;
+
+    if (block == 0 || block->data == 0 || block->size < 0x30 || memcmp(block->data, "ZAB ", 4) != 0) {
+        return;
+    }
+
+    channelCount = Host_ReadBe32(block->data + 0x0c);
+    durationTicks = Host_ReadBe32(block->data + 0x10);
+    matchCount = 0;
+
+    printf("select_cmn: block %u ZAB channels=%u durationTicks=%u\n", blockIndex, channelCount, durationTicks);
+    for (i = 0; i < channelCount; i++) {
+        unsigned int channelOffset = 0x30 + i * 0x40;
+        unsigned int keyGroupCount;
+        unsigned int keyGroupOffset;
+        unsigned int groupIndex;
+        unsigned int translationGroups;
+        unsigned int rotationGroups;
+        unsigned int scaleGroups;
+        char channelName[32];
+        int matchIndex;
+
+        if (channelOffset >= block->size) {
+            break;
+        }
+
+        Host_CopyName(channelName, sizeof(channelName), block->data + channelOffset, block->size - channelOffset);
+        keyGroupCount = channelOffset + 0x38 <= block->size ? Host_ReadBe32(block->data + channelOffset + 0x34) : 0;
+        keyGroupOffset = channelOffset + 0x40 <= block->size ? Host_ReadBe32(block->data + channelOffset + 0x3c) : 0;
+        matchIndex = Host_FindName(objectNames, objectNameCount, channelName);
+        if (matchIndex >= 0) {
+            matchCount++;
+        }
+
+        if (verbose || i < 24 || matchIndex >= 0) {
+            printf("select_cmn:   zab channel[%u]=%s keys=%u keyTable=0x%X match=%d\n",
+                   i,
+                   channelName[0] != '\0' ? channelName : "<unnamed>",
+                   keyGroupCount,
+                   keyGroupOffset,
+                   matchIndex);
+        }
+
+        translationGroups = 0;
+        rotationGroups = 0;
+        scaleGroups = 0;
+        for (groupIndex = 0; groupIndex < keyGroupCount; groupIndex++) {
+            unsigned int groupOffset = keyGroupOffset + groupIndex * 0x10;
+            unsigned int keyType;
+            unsigned int keyCount;
+            unsigned int keyOffset;
+            unsigned int firstTick;
+
+            if (groupOffset + 0x10 > block->size) {
+                break;
+            }
+
+            keyType = Host_ReadBe32(block->data + groupOffset);
+            keyCount = Host_ReadBe32(block->data + groupOffset + 8);
+            keyOffset = Host_ReadBe32(block->data + groupOffset + 0x0c);
+            firstTick = keyOffset + 4 <= block->size ? Host_ReadBe32(block->data + keyOffset) : 0;
+
+            if (keyType == 0) {
+                translationGroups++;
+            }
+            else if (keyType == 1) {
+                rotationGroups++;
+            }
+            else if (keyType == 2) {
+                scaleGroups++;
+            }
+
+            if (verbose && groupIndex < 6) {
+                printf("select_cmn:     keyGroup[%u] type=%u count=%u keyOffset=0x%X firstTick=%u\n",
+                       groupIndex,
+                       keyType,
+                       keyCount,
+                       keyOffset,
+                       firstTick);
+            }
+        }
+        if (verbose || i < 24 || matchIndex >= 0) {
+            printf("select_cmn:     keyGroups summary T/R/S=%u/%u/%u\n",
+                   translationGroups,
+                   rotationGroups,
+                   scaleGroups);
+        }
+    }
+
+    printf("select_cmn: block %u ZAB matched %u/%u channels against block %u ZMB objects\n",
+           blockIndex,
+           matchCount,
+           channelCount,
+           objectBlockIndex);
+}
+
+static void Host_LogSelectCommonBlock(const CzanLinkBlock *block, unsigned int index) {
+    char magic[5];
+
+    if (block->data == 0 || block->size < 4) {
+        printf("select_cmn: block %u empty/invalid\n", index);
+        return;
+    }
+
+    memcpy(magic, block->data, 4);
+    magic[4] = '\0';
+    printf("select_cmn: block %u size=0x%X magic=%.4s\n", index, block->size, magic);
+
+    if (memcmp(block->data, "ZMB ", 4) == 0 && block->size >= 0x28) {
+        printf("select_cmn:   ZMB +18 textureFrames=0x%X +1C materials=0x%X +20 objects=0x%X +24 relocated=%u\n",
+               Host_ReadBe32(block->data + 0x18),
+               Host_ReadBe32(block->data + 0x1C),
+               Host_ReadBe32(block->data + 0x20),
+               Host_ReadBe32(block->data + 0x24));
+    }
+}
+
+void HostCSelect_SetCommonSelectResource(
+    HostCSelectModule *module,
+    void *selectCommonLinkData,
+    unsigned int selectCommonLinkSize) {
+    CzanLinkBlock topBlock;
+    CzanLinkBlock nestedBlock;
+    CzanLinkBlock zmbBlock0;
+    CzanLinkBlock zabBlock2;
+    unsigned int topCount;
+    unsigned int nestedCount;
+    unsigned int i;
+    CzanLinkBlock zmbBlock5;
+    char block5ObjectNames[HOST_SELECT_MAX_OBJECT_NAMES][32];
+    unsigned int block5ObjectNameCount;
+
+    module->selectCommonLinkData = selectCommonLinkData;
+    module->selectCommonLinkSize = selectCommonLinkSize;
+
+    if (!CzanLinkResource_IsValid(selectCommonLinkData, selectCommonLinkSize)) {
+        puts("select_cmn: not a valid WII resource");
+        return;
+    }
+
+    topCount = CzanLinkResource_GetBlockCount(selectCommonLinkData, selectCommonLinkSize);
+    printf("select_cmn: WII blockCount=%u\n", topCount);
+
+    if (!CzanLinkResource_GetBlock(selectCommonLinkData, selectCommonLinkSize, 0, &topBlock)) {
+        puts("select_cmn: missing top block 0");
+        return;
+    }
+
+    nestedCount = CzanLinkResource_GetBlockCount(topBlock.data, topBlock.size);
+    printf("select_cmn: top block 0 common model package blocks=%u\n", nestedCount);
+    for (i = 0; i < nestedCount; i++) {
+        if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, i, &nestedBlock)) {
+            Host_LogSelectCommonBlock(&nestedBlock, i);
+        }
+    }
+
+    block5ObjectNameCount = 0;
+    memset(block5ObjectNames, 0, sizeof(block5ObjectNames));
+    if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 5, &zmbBlock5)) {
+        Host_LogZmbObjectNames(&zmbBlock5, 5, block5ObjectNames, &block5ObjectNameCount);
+    }
+
+    for (i = 6; i <= 15 && i < nestedCount; i++) {
+        if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, i, &nestedBlock)) {
+            Host_LogZabChannelMatches(&nestedBlock, i, 5, block5ObjectNames, block5ObjectNameCount, 1);
+        }
+    }
+
+    memset(block5ObjectNames, 0, sizeof(block5ObjectNames));
+    if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 0, &zmbBlock0) &&
+        CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 2, &zabBlock2)) {
+        unsigned int block0ObjectNameCount;
+
+        Host_LogZmbObjectNames(&zmbBlock0, 0, block5ObjectNames, &block0ObjectNameCount);
+        Host_LogZabChannelMatches(&zabBlock2, 2, 0, block5ObjectNames, block0ObjectNameCount, 0);
     }
 }
 

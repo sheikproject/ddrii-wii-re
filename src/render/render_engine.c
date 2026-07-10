@@ -20,6 +20,254 @@ void ApplyRenderConfig(int screenManager, const unsigned int *renderConfigColor)
     Platform_ApplyRenderConfig(renderConfigColor != 0 ? *renderConfigColor : 0);
 }
 
+void RenderFlushPendingState(void) {
+    /* 0x801D3B70 flushes the render context dirty flags at context +0x5FC before a
+       primitive batch is emitted.
+
+       Confirmed dirty bits:
+       - 0x00000001 -> RenderFlushTexGenState / FUN_801D5D80
+       - 0x00000002 -> RenderFlushNoOpState / FUN_801D6690
+       - 0x00000004 -> write context +0x254 through GX command 0x61
+       - 0x00000008 -> RenderFlushVertexDescriptorState / FUN_801D29A0
+       - 0x00000010 -> RenderFlushVertexAttributeFormatState / FUN_801D2F30
+       - 0x00000018 -> RenderRecomputeVertexStride / FUN_801D2A50
+       - 0x00000F00 -> writes BP/registers 0x100A..0x100D from context +0xA8..+0xB4
+       - 0x0100F000 -> writes 0x1009 and 0x100E.. from context +0x254/+0xB8..
+       - 0x02FF0000 -> writes 0x103F/0x1040.. and paired +0x1050.. values
+       - 0x04000000 -> RenderFlushMatrixIndexState(0/5) / FUN_801D7D10
+       - 0x08000000 -> RenderFlushProjectionState / FUN_801D77B0
+       - 0x10000000 -> RenderFlushViewportState / FUN_801D7A90
+
+       It clears context +0x5FC to zero after flushing. */
+}
+
+void RenderFlushTexGenState(void) {
+    /* 0x801D5D80 is reached from RenderFlushPendingState dirty bit 0x01.
+
+       It validates texture-coordinate generator dependencies before the next draw:
+       - reads context +0x254 for the active texgen count/configuration
+       - checks source pairs packed in context +0x170 for the first four generators
+       - checks additional per-generator state around context +0x150/+0x5A4
+       - calls FUN_801D5CF0 when a required texgen/source bit is missing from the
+         active mask at context +0x5E4/+0x5E8
+
+       This is part of the model material path, but it belongs to the generic GX
+       state cache rather than the Czan model parser itself. */
+}
+
+void RenderCopyTexGenState(int sourceSlot, int destinationSlot) {
+    /* 0x801D5CF0 copies cached texture-generator BP/XF state from sourceSlot to
+       destinationSlot and writes the destination pair immediately.
+
+       Confirmed fields:
+       - source context +0x564 supplies two 10-bit values
+       - destination context +0x108 receives the low value
+       - destination context +0x128 receives the high value
+       - source context +0x584 controls the extra enable/type bit at bit 16 of both
+         destination words through countLeadingZeros((value & 3) - 1)
+       - both destination words are written through FIFO command 0x61
+
+       RenderFlushTexGenState calls this when its active masks show that a texgen
+       destination still needs state copied from a source slot. */
+    (void)sourceSlot;
+    (void)destinationSlot;
+}
+
+void RenderFlushNoOpState(void) {
+    /* 0x801D6690 is currently an empty flush slot reached from dirty bit 0x02.
+       Keeping the export matters because RenderFlushPendingState still dispatches
+       it in the original engine. */
+}
+
+void RenderFlushVertexDescriptorState(void) {
+    /* 0x801D29A0 flushes the vertex descriptor words:
+       - command 0x08/register 0x50 receives context +0x14
+       - command 0x08/register 0x60 receives context +0x18
+       - command 0x10/register 0x1008 receives a derived summary of enabled normal
+         and color/texture descriptor state, including the special attribute state
+         tracked at context +0x524/+0x525
+       - context +2 is marked active/clean afterward. */
+}
+
+void RenderFlushVertexAttributeFormatState(void) {
+    /* 0x801D2F30 flushes per-vertex-format attribute words selected by the dirty
+       byte at context +0x5FB. For each dirty format index it writes:
+       - register 0x70 | format from context +0x1C + format * 4
+       - register 0x80 | format from context +0x3C + format * 4
+       - register 0x90 | format from context +0x5C + format * 4
+       then clears context +0x5FB. */
+}
+
+void RenderRecomputeVertexStride(void) {
+    /* 0x801D2A50 recomputes the current vertex stride/count at context +6 when
+       descriptor or format state changed. It sums descriptor bits from context
+       +0x14/+0x18 using the small lookup tables at DAT_802E6CD8/6CDC/6CE0 and
+       applies a normal/vector multiplier from the attr-10 format state. */
+}
+
+void RenderFlushProjectionState(void) {
+    /* 0x801D77B0 flushes seven projection-related words from context
+       +0x528..+0x540 through FIFO command 0x10, beginning at register/index 0x61020.
+
+       The exact matrix layout still needs confirmation, but this is the dirty-bit
+       0x08000000 path and is separate from the viewport flush at 0x801D7A90. */
+}
+
+void RenderFlushViewportState(void) {
+    /* 0x801D7A90 flushes the viewport transform through FIFO command 0x10/register
+       0x5101A. It derives scale/offset values from context +0x544..+0x560:
+       - +0x54C and +0x550 are scaled by FLOAT_802EA8A0
+       - +0x554/+0x558/+0x55C participate in the depth transform
+       - +0x544/+0x548 contribute to viewport origin offsets
+
+       This is the dirty-bit 0x10000000 path. */
+}
+
+void RenderFlushMatrixIndexState(int selector) {
+    /* 0x801D7D10 flushes one of two cached matrix/index words. selector < 5 writes
+       context +0x80 to command/register pair 0x08/0x30 and 0x10/0x1018. selector >= 5
+       writes context +0x84 to 0x08/0x40 and 0x10/0x1019. The pending-state flush calls
+       it for selectors 0 and 5 when dirty bit 0x04000000 is set. */
+    (void)selector;
+}
+
+void RenderClearVertexDescriptors(void) {
+    /* 0x801D2B80 resets the GX vertex descriptor state in the render context:
+       context +0x14 = 0x200, context +0x18 = 0, bytes +0x524/+0x525 = 0, then
+       marks dirty bit 0x08. */
+}
+
+void RenderBeginPrimitiveBatch(unsigned char primitiveType, unsigned char vertexFormat, unsigned short vertexCount) {
+    /* 0x801D3DF0 is the GXBegin wrapper.
+
+       Confirmed behavior:
+       - flushes pending state through RenderFlushPendingState / FUN_801D3B70 when
+         the render context dirty flag at DAT_802EA7C8[0x17F] is set.
+       - if the render context has no active primitive, emits an internal 0x98
+         primitive and enough zero data to clear/fill the previous context batch,
+         then marks the context active.
+       - writes the actual begin command to the GX FIFO:
+           DAT_CC008000 = primitiveType | vertexFormat
+           RAM_CC008000 = vertexCount
+
+       In the model submitters the common call is
+       RenderBeginPrimitiveBatch(0x98, 0, vertexCount), which is GX primitive type
+       0x98 with vertex format 0. */
+    (void)primitiveType;
+    (void)vertexFormat;
+    (void)vertexCount;
+}
+
+void RenderSetVertexArray(int attribute, unsigned int arrayBase, unsigned int stride) {
+    unsigned int gxAttribute;
+
+    /* 0x801D2FB0 is the GXSetArray wrapper. Attribute 0x19 is normalized to 10,
+       then the function writes the array base and stride to paired GX registers:
+
+         register 0xA0 | (attribute - 9) -> arrayBase & 0x3FFFFFFF
+         register 0xB0 | (attribute - 9) -> stride
+
+       Known attributes from the Czan model path:
+         9  -> position array
+         10 -> normal/vector array
+         11 -> color array
+         13 -> generated texcoord array */
+    gxAttribute = (attribute == 0x19) ? 10u : (unsigned int)attribute;
+    (void)gxAttribute;
+    (void)arrayBase;
+    (void)stride;
+}
+
+void RenderSetVertexAttrDescriptor(
+    unsigned int vertexFormat,
+    int attribute,
+    unsigned int attrType,
+    unsigned int componentType,
+    unsigned int componentCount) {
+    /* 0x801D2BC0 is the GXSetVtxAttrFmt-style wrapper for one vertex format.
+
+       It packs attrType/componentType/componentCount into render-context words:
+         vertexFormat slot +0x1C for attrs 9..13
+         vertexFormat slot +0x3C for attrs 14..17
+         vertexFormat slot +0x5C for attrs 17..20
+
+       The Czan model code uses this mostly as:
+         attr 9  position      componentType 4, componentCount 0
+         attr 10 normal/vector componentType 4, componentCount 0
+         attr 11 color         componentType 5, componentCount 0
+         attr 13 texcoord      componentType 4, componentCount 0
+
+       It marks dirty bit 0x10 and marks the vertex format slot dirty in byte
+       renderContext +0x5FB. */
+    (void)vertexFormat;
+    (void)attribute;
+    (void)attrType;
+    (void)componentType;
+    (void)componentCount;
+}
+
+void RenderSetVertexAttrFormat(int attribute, unsigned int format) {
+    /* 0x801D2730 is the GXSetVtxDesc-style wrapper. It stores per-attribute format
+       bits in the render context and marks dirty bit 0x08.
+
+       Observed Czan model meanings:
+         format 1 -> direct/indexed attribute mode without a separate array base
+         format 3 -> array-backed attribute mode; caller also calls RenderSetVertexArray
+         format 0 -> disabled
+
+       Special attributes:
+         10 and 0x19 share a small exclusive state at context +0x520/+0x524/+0x525
+         and update bits 0x0B..0x0C in context word +0x14. */
+    (void)attribute;
+    (void)format;
+}
+
+void RenderSetBlendMode(unsigned int blendEnabled, unsigned int srcFactor, unsigned int dstFactor, unsigned int logicOp) {
+    /* 0x801D7110 writes the GX blend/control register through FIFO command 0x61.
+
+       Packed fields recovered from the original:
+       - bit 0 uses blendEnabled & 1
+       - srcFactor uses bits 8..10
+       - dstFactor uses bits 5..7
+       - logicOp uses bits 12..15
+       - blendEnabled values 2/3 also influence additional control bits through
+         countLeadingZeros(param - 2/3)
+
+       CzanModel_ApplyMaterialBlendMode calls this with tuples such as
+       (1,4,5,5), (1,0,5,5), and (1,4,1,5). */
+    (void)blendEnabled;
+    (void)srcFactor;
+    (void)dstFactor;
+    (void)logicOp;
+}
+
+void RenderSetAlphaUpdate(unsigned int enabled) {
+    /* 0x801D7240 updates bit 6 of context +0x22C, writes that register through FIFO
+       command 0x61, and clears the context active-primitive marker. */
+    (void)enabled;
+}
+
+void RenderSetAlphaCompare(unsigned int compare0, unsigned int reference0, unsigned int op, unsigned int compare1, unsigned int reference1) {
+    /* 0x801D6B70 writes a packed GX alpha compare register:
+
+       0xF3000000 |
+       ((op & 3) << 22) |
+       ((compare1 & 7) << 19) |
+       ((compare0 & 7) << 16) |
+       ((reference1 & 0xFF) << 8) |
+       (reference0 & 0xFF)
+
+       Czan material state uses this for compare modes:
+       - RenderSetAlphaCompare(7, 0,    1, 7, 0)
+       - RenderSetAlphaCompare(4, 0xA0, 0, 3, 0xFF)
+       - RenderSetAlphaCompare(4, 0,    0, 3, 0xFF) */
+    (void)compare0;
+    (void)reference0;
+    (void)op;
+    (void)compare1;
+    (void)reference1;
+}
+
 int GetTextureDimensions(void *textureHandle, int textureIndex, int *width, int *height) {
     return Platform_GetTextureDimensions(textureHandle, textureIndex, width, height);
 }

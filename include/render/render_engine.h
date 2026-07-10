@@ -25,6 +25,24 @@ typedef struct TextureManagerKnownFields {
 void RenderBeginFrame(void);
 void RenderEndFrame(void);
 void ApplyRenderConfig(int screenManager, const unsigned int *renderConfigColor);
+void RenderFlushPendingState(void);
+void RenderFlushTexGenState(void);
+void RenderFlushNoOpState(void);
+void RenderCopyTexGenState(int sourceSlot, int destinationSlot);
+void RenderFlushVertexDescriptorState(void);
+void RenderFlushVertexAttributeFormatState(void);
+void RenderRecomputeVertexStride(void);
+void RenderFlushProjectionState(void);
+void RenderFlushViewportState(void);
+void RenderFlushMatrixIndexState(int selector);
+void RenderClearVertexDescriptors(void);
+void RenderBeginPrimitiveBatch(unsigned char primitiveType, unsigned char vertexFormat, unsigned short vertexCount);
+void RenderSetVertexArray(int attribute, unsigned int arrayBase, unsigned int stride);
+void RenderSetVertexAttrDescriptor(unsigned int vertexFormat, int attribute, unsigned int attrType, unsigned int componentType, unsigned int componentCount);
+void RenderSetVertexAttrFormat(int attribute, unsigned int format);
+void RenderSetBlendMode(unsigned int blendEnabled, unsigned int srcFactor, unsigned int dstFactor, unsigned int logicOp);
+void RenderSetAlphaUpdate(unsigned int enabled);
+void RenderSetAlphaCompare(unsigned int compare0, unsigned int reference0, unsigned int op, unsigned int compare1, unsigned int reference1);
 int GetTextureDimensions(void *textureHandle, int textureIndex, int *width, int *height);
 void DrawTexturedQuad(
     RenderQuad *position,

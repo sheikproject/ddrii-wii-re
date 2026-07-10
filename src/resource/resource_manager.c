@@ -1,5 +1,7 @@
 #include "resource/resource_manager.h"
 
+#include "resource/czan_snd_read.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,6 +78,168 @@ ResourceHandle *LoadResourceByPath(void *resourceManager, const char *path, int 
     return &gLastLoadedResource;
 }
 
+int ResourceSlotManager_ClaimFreeSlot(int *slotPool) {
+    /* 0x80186F4C scans a slot pool for the first free 0x290-byte record.
+
+       Confirmed pool fields:
+       slotPool +0x56B8 -> slot record array base
+       slotPool +0x56BC -> slot record count
+       slot record +0x04 bit 0 -> in-use flag
+
+       When a free slot is found, the original sets bit 0 and returns the slot
+       index. If all slots are already in use, it returns -1. */
+    if (slotPool == 0) {
+        return -1;
+    }
+
+    return -1;
+}
+
+int *ResourceSlotManager_GetClaimedSlot(int *slotPool, int slotIndex) {
+    /* 0x801871A8 validates a slot index and returns the claimed 0x290-byte record.
+
+       Confirmed behavior:
+       - returns null when slotIndex < 0
+       - returns null when slotIndex >= slotPool +0x56BC count
+       - computes slot = *(slotPool +0x56B8) + slotIndex * 0x290
+       - returns null unless slot +0x04 bit 0 is set
+       - otherwise returns slot */
+    (void)slotIndex;
+    if (slotPool == 0) {
+        return 0;
+    }
+
+    return 0;
+}
+
+int ResourceSlotManager_AllocateSlot(int *slotManager, int setupData) {
+    /* 0x80024EA8 allocates or reserves one slot from gManager_802E70A8.
+
+       Confirmed original flow:
+       - return -1 when slotManager[0] is null
+       - slotIndex = ResourceSlotManager_ClaimFreeSlot(slotManager[0])
+       - return -1 when no slot is available
+       - slotObject = ResourceSlotManager_GetClaimedSlot(slotManager[0], slotIndex)
+       - if setupData != 0, call FUN_801843CC(slotObject, setupData)
+       - return slotIndex
+
+       Callers currently pass setupData=0 from the CzanModel owner resource-group
+       path, so this behaves as a plain slot/handle allocator there. */
+    (void)setupData;
+    if (slotManager == 0 || slotManager[0] == 0) {
+        return -1;
+    }
+
+    return -1;
+}
+
+int ResourceSlotHandle_IsActivePending(int *slotHandle) {
+    /* 0x80024FA4 checks the current slot record for a specific active/pending
+       flag state.
+
+       Confirmed original flow:
+       - if slotHandle[0] exists, get slotHandle[1] through
+         ResourceSlotManager_GetClaimedSlot
+       - return 1 when slot +0x230 bit 0 is set and bit 1 is clear
+       - otherwise return 0 */
+    if (slotHandle == 0 || slotHandle[0] == 0) {
+        return 0;
+    }
+
+    return 0;
+}
+
+void ResourceSlotHandle_Rebind(int *slotHandle, int resourceOrPayload, int setupData) {
+    /* 0x80025668 releases an existing slot handle, allocates a replacement slot,
+       optionally initializes it, then applies resource/payload data.
+
+       Confirmed original flow:
+       - if slotHandle[0] exists, release slotHandle[1] through FUN_80186FB8
+       - slotHandle[1] = -1
+       - allocate a new slot with ResourceSlotManager_ClaimFreeSlot(slotHandle[0])
+       - if setupData != 0, initialize the slot object through FUN_801843CC
+       - store the new slot index in slotHandle[1]
+       - fetch the slot object through ResourceSlotManager_GetClaimedSlot
+       - call CzanMovieObj_Reset(slotObject)
+       - call CzanMovieObj_LoadResource(slotObject, resourceOrPayload) */
+    (void)resourceOrPayload;
+    (void)setupData;
+    if (slotHandle == 0) {
+        return;
+    }
+
+    slotHandle[1] = -1;
+}
+
+void CzanMovieObj_AllocBuffer(int *movieObj, int bufferSize) {
+    /* 0x801843CC is named by assert strings in zanMovie.cpp as
+       CzanMovieObj::AllocBuffer().
+
+       Confirmed fields:
+       movieObj +0x220 -> allocated buffer pointer
+       movieObj +0x224 -> allocated buffer size
+       movieObj +0x230 -> flags; bit 0 means the movie object is active/allocated
+
+       Original behavior:
+       - asserts if flag bit 0 at +0x230 is already set
+       - frees an existing buffer at +0x220 when inactive
+       - if bufferSize != 0, allocates a 0x20-aligned buffer of bufferSize bytes
+         and stores pointer/size at +0x220/+0x224 */
+    (void)bufferSize;
+    if (movieObj == 0) {
+        return;
+    }
+}
+
+void CzanMovieObj_InitDefaults(int *movieObj) {
+    /* 0x80184108 initializes/defaults a CzanMovieObj slot after reset.
+
+       Confirmed behavior:
+       - clears flags/state at +0x228..+0x240
+       - clears small blocks at +0x244, +0x254, +0x25C, +0x264, +0x26C
+       - stores default scalar at +0x274 and default int 1 at +0x278
+       - initializes color/config bytes at +0x27C to 0xFF
+       - clears +0x280, +0x284, +0x288
+       - reads a local config block from FUN_80166D54
+       - clamps config floats into ranges and stores them at +0x14C..+0x180
+       - copies config words to +0x170, +0x188, +0x18C, +0x190 */
+    if (movieObj == 0) {
+        return;
+    }
+}
+
+void CzanMovieObj_Reset(int *movieObj) {
+    /* 0x80184678 resets a CzanMovieObj slot record.
+
+       Confirmed behavior:
+       - when active and flag bit 1 is set, releases subsystems guarded by
+         +0x230 bits 0x40000, 0x10000, and 0x20000
+       - clears runtime fields +0x234, +0x238, +0x23C, +0x240
+       - clears flag range +0x230 bits masked by 0xFFFFC3FF
+       - resets child objects at +0x114, +0x08, and +0xE4
+       - frees +0x228 when present
+       - unregisters/register-clears +0x114 through manager DAT_802E71B8 +0x268
+       - calls CzanMovieObj_InitDefaults(movieObj) for base reset/defaults */
+    if (movieObj == 0) {
+        return;
+    }
+}
+
+void CzanMovieObj_LoadResource(int *movieObj, int resourceOrPayload) {
+    /* 0x801844E8 performs the same reset as CzanMovieObj_Reset, then binds a new
+       resource/payload.
+
+       Confirmed post-reset behavior:
+       - registers movieObj +0x114 through DAT_802E71B8 +0x268
+       - calls CzanSndRead_Open(movieObj +0x08, resourceOrPayload)
+       - sets +0x230 bit 0
+       - calls FUN_8019CE38(movieObj +0x08) */
+    (void)resourceOrPayload;
+    if (movieObj == 0) {
+        return;
+    }
+}
+
 void LargeResourceManager_ReloadFromLink(int *largeResourceManager, int linkData) {
     /* 0x80025CA0 reloads the huge global manager allocated at DAT_802E70BC
        with size 0x3010B8. It initializes a CzanLinkManager-like stack object
@@ -89,4 +253,21 @@ void LargeResourceManager_ReloadFromLink(int *largeResourceManager, int linkData
        The listing confirms incoming r4 is passed through as linkData. */
     (void)largeResourceManager;
     (void)linkData;
+}
+
+void CharacterAssetManager_UnloadActiveAssets(int *characterAssetManager) {
+    /* 0x800CC630 tears down active character assets when
+       characterAssetManager +0x28164 == 1.
+
+       Confirmed original flow:
+       - clears the active flag at +0x28164
+       - releases/clears the manager-local object at +0x28168
+       - unloads CzanModelManager bank 4 from gManager_802E70B8
+       - clears special/character part state at characterAssetManager +0x34 */
+    if (characterAssetManager == 0) {
+        return;
+    }
+    if (*(int *)((unsigned char *)characterAssetManager + 0x28164) == 1) {
+        *(int *)((unsigned char *)characterAssetManager + 0x28164) = 0;
+    }
 }

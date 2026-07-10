@@ -23,6 +23,7 @@ int GameMain(void) {
         0,
     };
 
+    setvbuf(stdout, 0, _IONBF, 0);
     puts("DDRII host skeleton: GameMain");
 
     while (!Platform_ShouldQuit() && ModuleController_Update(&moduleController) == 0) {
@@ -71,6 +72,31 @@ void BootResourceBundle_StartLoading(int *resourceBundle) {
        After queuing/loading resources, it calls FUN_80023634(gManager_802E70A4) and
        marks resourceBundle[0] = 1. */
     (void)resourceBundle;
+}
+
+int *BootResourceBundle_Release(int *resourceBundle, short releaseMode) {
+    /* 0x80021D90 releases the boot/CGame resource bundle loaded by
+       BootResourceBundle_StartLoading and applied by BootResourceBundle_ApplyLoadedResources.
+
+       Confirmed behavior:
+       - if resourceBundle[1] == 1, tears down the global managers that consumed the
+         loaded bundle, then clears resourceBundle[1]
+       - if resourceBundle[0] == 1, releases any nonzero resource handles in
+         resourceBundle[2..9], calls FUN_80023794(gManager_802E70A4), and clears
+         resourceBundle[0]
+       - frees the resourceBundle object only when releaseMode is positive */
+    if (resourceBundle == 0) {
+        return 0;
+    }
+
+    if (resourceBundle[1] == 1) {
+        resourceBundle[1] = 0;
+    }
+    if (resourceBundle[0] == 1) {
+        resourceBundle[0] = 0;
+    }
+    (void)releaseMode;
+    return resourceBundle;
 }
 
 void ModuleController_ApplyPendingModule(int *moduleController) {
@@ -137,6 +163,7 @@ int ModuleController_Update(ModuleControllerKnownFields *moduleController) {
 int CSelect_Init(void *cSelect) {
     HostCSelectModule *module = (HostCSelectModule *)cSelect;
     ResourceHandle *selectBin;
+    ResourceHandle *selectCommon;
     unsigned char *modeSelectLinkData;
 
     /* Original initializes module ID 2, clears CSelect state, sets CSelect_VTable,
@@ -146,8 +173,18 @@ int CSelect_Init(void *cSelect) {
     module->redrawNeeded = 1;
     module->selectLinkData = 0;
     module->selectLinkSize = 0;
+    module->selectCommonLinkData = 0;
+    module->selectCommonLinkSize = 0;
     puts("CSelect: init");
     CSelMode_Init(0);
+
+    selectCommon = LoadResourceByPath(0, "select/select_cmn.bin", 0);
+    if (selectCommon != 0 && selectCommon->loaded) {
+        HostCSelect_SetCommonSelectResource(module, selectCommon->data, (unsigned int)selectCommon->size);
+    }
+    else {
+        puts("CSelect: failed to load select/select_cmn.bin");
+    }
 
     selectBin = LoadResourceByPath(0, "select/select_bin_sp.bin", 0);
     if (selectBin != 0 && selectBin->loaded && selectBin->size > 0xA0) {

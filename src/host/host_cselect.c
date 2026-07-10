@@ -9,8 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define HOST_SELECT_MAX_OBJECT_NAMES 512
-
 enum HostInput {
     HOST_INPUT_NONE,
     HOST_INPUT_LEFT,
@@ -161,7 +159,7 @@ static void Host_LogZmbObjectNames(const CzanLinkBlock *block, unsigned int bloc
     }
 }
 
-static void Host_LogZabChannelMatches(
+static unsigned int Host_LogZabChannelMatches(
     const CzanLinkBlock *block,
     unsigned int blockIndex,
     unsigned int objectBlockIndex,
@@ -174,7 +172,7 @@ static void Host_LogZabChannelMatches(
     unsigned int matchCount;
 
     if (block == 0 || block->data == 0 || block->size < 0x30 || memcmp(block->data, "ZAB ", 4) != 0) {
-        return;
+        return 0;
     }
 
     channelCount = Host_ReadBe32(block->data + 0x0c);
@@ -265,6 +263,55 @@ static void Host_LogZabChannelMatches(
            matchCount,
            channelCount,
            objectBlockIndex);
+    return matchCount;
+}
+
+static unsigned int Host_GetZabChannelCount(const CzanLinkBlock *block) {
+    if (block == 0 || block->data == 0 || block->size < 0x10 || memcmp(block->data, "ZAB ", 4) != 0) {
+        return 0;
+    }
+
+    return Host_ReadBe32(block->data + 0x0c);
+}
+
+static void Host_LoadSelectCommonModelBinding(
+    HostSelectCommonModelBinding *binding,
+    const CzanLinkBlock *zmbBlock,
+    const CzanLinkBlock *textureBlock,
+    const CzanLinkBlock *zabBlock,
+    unsigned int zmbBlockIndex,
+    unsigned int zabBlockIndex,
+    int verboseZab) {
+    if (binding == 0) {
+        return;
+    }
+
+    memset(binding, 0, sizeof(*binding));
+    if (zmbBlock != 0) {
+        binding->zmbData = zmbBlock->data;
+        binding->zmbSize = zmbBlock->size;
+        binding->objectNameCount =
+            Host_CollectZmbObjectNames(zmbBlock, binding->objectNames, HOST_SELECT_MAX_OBJECT_NAMES);
+        Host_LogZmbObjectNames(zmbBlock, zmbBlockIndex, binding->objectNames, &binding->objectNameCount);
+    }
+
+    if (textureBlock != 0) {
+        binding->textureData = textureBlock->data;
+        binding->textureSize = textureBlock->size;
+    }
+
+    if (zabBlock != 0) {
+        binding->zabData = zabBlock->data;
+        binding->zabSize = zabBlock->size;
+        binding->zabChannelCount = Host_GetZabChannelCount(zabBlock);
+        binding->matchedChannelCount = Host_LogZabChannelMatches(
+            zabBlock,
+            zabBlockIndex,
+            zmbBlockIndex,
+            binding->objectNames,
+            binding->objectNameCount,
+            verboseZab);
+    }
 }
 
 static void Host_LogSelectCommonBlock(const CzanLinkBlock *block, unsigned int index) {
@@ -294,14 +341,14 @@ void HostCSelect_SetCommonSelectResource(
     unsigned int selectCommonLinkSize) {
     CzanLinkBlock topBlock;
     CzanLinkBlock nestedBlock;
-    CzanLinkBlock zmbBlock0;
-    CzanLinkBlock zabBlock2;
+    CzanLinkBlock block0;
+    CzanLinkBlock block1;
+    CzanLinkBlock block2;
+    CzanLinkBlock block5;
+    CzanLinkBlock block6;
     unsigned int topCount;
     unsigned int nestedCount;
     unsigned int i;
-    CzanLinkBlock zmbBlock5;
-    char block5ObjectNames[HOST_SELECT_MAX_OBJECT_NAMES][32];
-    unsigned int block5ObjectNameCount;
 
     module->selectCommonLinkData = selectCommonLinkData;
     module->selectCommonLinkSize = selectCommonLinkSize;
@@ -327,25 +374,27 @@ void HostCSelect_SetCommonSelectResource(
         }
     }
 
-    block5ObjectNameCount = 0;
-    memset(block5ObjectNames, 0, sizeof(block5ObjectNames));
-    if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 5, &zmbBlock5)) {
-        Host_LogZmbObjectNames(&zmbBlock5, 5, block5ObjectNames, &block5ObjectNameCount);
+    if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 0, &block0) &&
+        CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 1, &block1) &&
+        CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 2, &block2)) {
+        Host_LoadSelectCommonModelBinding(&module->visibleModel, &block0, &block1, &block2, 0, 2, 0);
+        printf("select_cmn: loaded visible model zmb=0 tex=1 zab=2 objects=%u channels=%u matches=%u\n",
+               module->visibleModel.objectNameCount,
+               module->visibleModel.zabChannelCount,
+               module->visibleModel.matchedChannelCount);
     }
 
-    for (i = 6; i <= 15 && i < nestedCount; i++) {
-        if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, i, &nestedBlock)) {
-            Host_LogZabChannelMatches(&nestedBlock, i, 5, block5ObjectNames, block5ObjectNameCount, 1);
+    if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 5, &block5)) {
+        for (i = 6; i <= 15 && i < nestedCount; i++) {
+            if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, i, &block6)) {
+                Host_LoadSelectCommonModelBinding(&module->cameraModel, &block5, 0, &block6, 5, i, 1);
+                printf("select_cmn: loaded camera model zmb=5 zab=%u objects=%u channels=%u matches=%u\n",
+                       i,
+                       module->cameraModel.objectNameCount,
+                       module->cameraModel.zabChannelCount,
+                       module->cameraModel.matchedChannelCount);
+            }
         }
-    }
-
-    memset(block5ObjectNames, 0, sizeof(block5ObjectNames));
-    if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 0, &zmbBlock0) &&
-        CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 2, &zabBlock2)) {
-        unsigned int block0ObjectNameCount;
-
-        Host_LogZmbObjectNames(&zmbBlock0, 0, block5ObjectNames, &block0ObjectNameCount);
-        Host_LogZabChannelMatches(&zabBlock2, 2, 0, block5ObjectNames, block0ObjectNameCount, 0);
     }
 }
 

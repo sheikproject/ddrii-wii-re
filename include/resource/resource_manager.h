@@ -17,6 +17,17 @@ void ResourceSlotHandle_Rebind(int *slotHandle, int resourceOrPayload, int setup
 void MovieSlotHandle_ResetClaimedSlot(int *slotHandle);
 int MovieSlotHandle_IsReadyForDisplay(int *slotHandle, int slotIndex);
 void MovieSlotHandle_SetObjectEnabled(int *slotHandle, int slotIndex, int enabled);
+void MovieSlotHandle_LoadResource(int *slotHandle, int slotIndex, int resourceOrPath);
+void MovieSlotHandle_StartPlayback(int *slotHandle, int slotIndex, int enabled);
+int *MovieSlotHandle_GetClaimedObject(int *slotHandle, int slotIndex);
+void MovieSlotHandle_SetPlacementRect(
+    int *slotHandle,
+    int slotIndex,
+    double x,
+    double y,
+    double width,
+    double height);
+void MovieSlotHandle_SetPlaybackFlag278(int *slotHandle, int slotIndex, int value);
 int ActiveControllerMovieBindings_HasPendingSlots(int *movieBindings, int mode);
 void ActiveControllerMovieBindings_Reset(int *movieBindings);
 void ActiveControllerMovieBindings_SetMode(int *movieBindings, int mode);

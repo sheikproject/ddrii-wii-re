@@ -215,6 +215,79 @@ void MovieSlotHandle_SetObjectEnabled(int *slotHandle, int slotIndex, int enable
     (void)enabled;
 }
 
+void MovieSlotHandle_LoadResource(int *slotHandle, int slotIndex, int resourceOrPath) {
+    /* 0x80024F3C fetches a claimed CzanMovieObj slot, resets it, then binds a THP
+       resource/path through CzanMovieObj_LoadResource(slotObject, resourceOrPath).
+
+       This is the path-binding wrapper used by active-controller and select-common
+       movie background code after a movie slot has already been allocated. */
+    (void)slotHandle;
+    (void)slotIndex;
+    (void)resourceOrPath;
+}
+
+void MovieSlotHandle_StartPlayback(int *slotHandle, int slotIndex, int enabled) {
+    /* 0x8002500C starts/prepares playback on a claimed CzanMovieObj slot.
+
+       Original flow:
+       - fetch ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotIndex)
+       - call FUN_80185150(slotObject)
+       - clamp the input scalar to the movie fade/start range and store it at +0x150
+       - call FUN_80184FE8(slotObject, enabled, 0)
+
+       The common callers pass 1.0f as the scalar, gManager_802E70A8 as the handle,
+       and an enable flag chosen from the active-controller movie category. */
+    (void)slotHandle;
+    (void)slotIndex;
+    (void)enabled;
+}
+
+int *MovieSlotHandle_GetClaimedObject(int *slotHandle, int slotIndex) {
+    /* 0x80025368 is the thin getter for the current claimed CzanMovieObj slot.
+
+       Original behavior:
+       if slotHandle[0] exists:
+         return ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotIndex)
+       return null */
+    (void)slotIndex;
+    if (slotHandle == 0 || slotHandle[0] == 0) {
+        return 0;
+    }
+
+    return 0;
+}
+
+void MovieSlotHandle_SetPlacementRect(
+    int *slotHandle,
+    int slotIndex,
+    double x,
+    double y,
+    double width,
+    double height) {
+    /* 0x80025508 writes four float placement/timing values into the claimed movie
+       object. The original mirrors x/y into +0x264 and integer copies at +0x244/
+       +0x248, then mirrors width/height into +0x26C and integer copies at
+       +0x24C/+0x250.
+
+       ActiveControllerMovieBindings_StartCategoryMovie uses it for category byte 1
+       after starting the movie playback. */
+    (void)slotHandle;
+    (void)slotIndex;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+}
+
+void MovieSlotHandle_SetPlaybackFlag278(int *slotHandle, int slotIndex, int value) {
+    /* 0x8002561C writes one playback/control value to claimed movie object +0x278.
+       The active-controller stage movie path passes zero after applying placement
+       data, so keep the field-specific name until the flag meaning is confirmed. */
+    (void)slotHandle;
+    (void)slotIndex;
+    (void)value;
+}
+
 int ActiveControllerMovieBindings_HasPendingSlots(int *movieBindings, int mode) {
     /* 0x80055314 checks whether active controller movie/background slots are still
        pending.
@@ -289,8 +362,8 @@ void ActiveControllerMovieBindings_LoadCategoryMovie(int *movieBindings, unsigne
        - category type byte 3 -> "movie/stage/%s.thp"
        - category type byte 4 -> "movie/zz_pv/ddr%03d.thp"
 
-       After binding the path through FUN_80024F3C, several stage-movie paths mark
-       movie object fields +0x284 and +0x288 as enabled. */
+       After binding the path through MovieSlotHandle_LoadResource, several
+       stage-movie paths mark movie object fields +0x284 and +0x288 as enabled. */
     (void)movieBindings;
     (void)category;
 }
@@ -303,9 +376,10 @@ void ActiveControllerMovieBindings_StartCategoryMovie(int *movieBindings, unsign
        - returns when the slot id is -1 or global transition flag +0xB36C is set
        - non-special categories set a per-category started flag at owner +0xB334
        - category type 4 can suppress the enable flag when owner +0xA0 bit 0x400000 is clear
-       - calls FUN_8002500C(1.0f, gManager_802E70A8, slot, enableFlag)
+       - calls MovieSlotHandle_StartPlayback(1.0f, gManager_802E70A8, slot, enableFlag)
        - for owner +0xB324 category byte 1, also applies movie position/scale/timing
-         through FUN_80025508 and clears looping/flag state through FUN_8002561C */
+         through MovieSlotHandle_SetPlacementRect and clears the field at +0x278
+         through MovieSlotHandle_SetPlaybackFlag278 */
     (void)movieBindings;
     (void)category;
 }

@@ -5019,10 +5019,10 @@ Important state fields:
 Important follow-up callees:
 
 ```text
-FUN_80024F3C -> movie manager load/assign path
+MovieSlotHandle_LoadResource -> movie manager load/assign path
 FUN_800250B0 -> movie load/readiness poll
-FUN_8002500C -> start/fade movie playback
-FUN_80025368 -> get active movie object/state
+MovieSlotHandle_StartPlayback -> start/fade movie playback
+MovieSlotHandle_GetClaimedObject -> get active movie object/state
 FUN_80025104 -> release/stop movie binding
 FUN_80098FA0 -> one select-common reveal/update path
 FUN_800991C4 -> alternate select-common reveal/update path

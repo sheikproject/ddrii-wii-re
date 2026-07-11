@@ -403,10 +403,10 @@ void CSelectCommon_UpdateMovieBackground(int *selectCommon, int skipInitialUpdat
          state flags controlling the movie background and menu-entry reveal path.
 
        Important follow-up callees from the original:
-       - FUN_80024F3C: load/assign THP movie path.
+       - MovieSlotHandle_LoadResource: load/assign THP movie path.
        - FUN_800250B0: poll movie load/readiness.
-       - FUN_8002500C: start/fade movie playback.
-       - FUN_80025368: get active movie object/state.
+       - MovieSlotHandle_StartPlayback: start/fade movie playback.
+       - MovieSlotHandle_GetClaimedObject: get active movie object/state.
        - FUN_80025104: release/stop movie binding.
        - FUN_80098FA0 / FUN_800991C4: reveal/transition the two menu entry objects
          after the movie object has been attached. */

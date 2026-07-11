@@ -243,6 +243,31 @@ int ActiveGameplayControllerBase_GetEmbeddedSubobject(int *controller) {
     return (int)(uintptr_t)(controller + 0x1a);
 }
 
+int ActiveGameplayControllerSubobject_ResolveModeTransitionSlot(
+    int *subobject,
+    int forceImmediate,
+    int targetMode,
+    int transitionKind,
+    int tableIndex) {
+    /* 0x80129308 resolves the next presentation/mode transition slot from the
+       embedded controller subobject at controller +0x68.
+
+       Confirmed behavior:
+       - clamps transitionKind to 3
+       - returns 0 when targetMode is zero
+       - returns -1 when the table entry at subobject[0] + transitionKind*0x14 +
+         tableIndex*4 is zero and forceImmediate is zero
+       - otherwise advances subobject[1] through a 1,2 ring and returns it
+
+       This helper chooses a transition slot/index; it does not load ZMB/ZAB data. */
+    (void)subobject;
+    (void)forceImmediate;
+    (void)targetMode;
+    (void)transitionKind;
+    (void)tableIndex;
+    return 0;
+}
+
 void ActiveGameplayControllerBase_ResetEmbeddedSubobject(int *controller) {
     /* 0x80113C24 is PTR_PTR_802BEF00 vtable +0x14.
 
@@ -415,7 +440,7 @@ void ActiveGameplayControllerBase_ApplyModeTransitionEvent(
 
        Confirmed behavior:
        - asks the embedded controller subobject at controller +0x68 to resolve a
-         target mode through FUN_80129308(forceImmediate, targetMode, eventArg0, eventArg1)
+         target mode through ActiveGameplayControllerSubobject_ResolveModeTransitionSlot
        - ignores modes not enabled by controller +0x141C
        - ignores the transition when setup data at controller +0x4C +0x50 has bit
          0x1000 set

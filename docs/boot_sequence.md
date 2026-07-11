@@ -791,7 +791,8 @@ ActiveGameplayControllerBase_ApplyModeTransitionEvent
 Confirmed behavior:
 
 ```text
-mode = FUN_80129308(controller +0x68, forceImmediate, targetMode, eventArg0, eventArg1)
+mode = ActiveGameplayControllerSubobject_ResolveModeTransitionSlot(
+    controller +0x68, forceImmediate, targetMode, eventArg0, eventArg1)
 ignore mode < 0 or not enabled by controller +0x141C
 ignore when setup data at controller +0x4C +0x50 has bit 0x1000
 controller +0x70 = mode
@@ -996,8 +997,9 @@ ActiveControllerMovieBindings_StartCategoryMovie
 ```
 
 It selects the category slot, marks per-category started state, calls
-`FUN_8002500C(1.0f, gManager_802E70A8, slot, enableFlag)`, and for category byte `1`
-also applies position/scale/timing through `FUN_80025508`.
+`MovieSlotHandle_StartPlayback(1.0f, gManager_802E70A8, slot, enableFlag)`, and for
+category byte `1` also applies position/scale/timing through
+`MovieSlotHandle_SetPlacementRect`.
 
 `FUN_80025248` toggles the object enabled flag on a claimed movie slot. Suggested name:
 
@@ -1011,6 +1013,57 @@ Confirmed behavior:
 slot = ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotIndex)
 if slot exists:
   FUN_80190440(slot +0x114, enabled)
+```
+
+`FUN_80024F3C` binds a THP/movie resource path to a claimed movie slot. Suggested name:
+
+```text
+MovieSlotHandle_LoadResource
+```
+
+Confirmed behavior:
+
+```text
+slot = ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotIndex)
+if slot exists:
+  CzanMovieObj_Reset(slot)
+  CzanMovieObj_LoadResource(slot, resourceOrPath, 0)
+```
+
+`FUN_8002500C` starts/prepares playback on a claimed movie slot. Suggested name:
+
+```text
+MovieSlotHandle_StartPlayback
+```
+
+Confirmed behavior:
+
+```text
+slot = ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotIndex)
+if slot exists:
+  FUN_80185150(slot)
+  slot +0x150 = clamp(inputScalar)
+  FUN_80184FE8(slot, enabled, 0)
+```
+
+`FUN_80025368` is the thin getter for a claimed movie object. Suggested name:
+
+```text
+MovieSlotHandle_GetClaimedObject
+```
+
+`FUN_80025508` writes four float placement/timing values to a claimed movie object.
+Suggested name:
+
+```text
+MovieSlotHandle_SetPlacementRect
+```
+
+`FUN_8002561C` writes a control value to claimed movie object `+0x278`. Suggested
+temporary name:
+
+```text
+MovieSlotHandle_SetPlaybackFlag278
 ```
 
 `FUN_8005D0E8` changes the state at `CtsStageObjSlot +0x80`. Suggested name:

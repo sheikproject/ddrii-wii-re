@@ -12,6 +12,12 @@ int ActiveGameplayControllerBase_Init(int *controller);
 int ActiveGameplayControllerSpecial_Init(int *controller);
 void ActiveGameplayControllerBase_SetupContext(int *controller, int *context);
 int ActiveGameplayControllerBase_GetEmbeddedSubobject(int *controller);
+int ActiveGameplayControllerSubobject_ResolveModeTransitionSlot(
+    int *subobject,
+    int forceImmediate,
+    int targetMode,
+    int transitionKind,
+    int tableIndex);
 void ActiveGameplayControllerBase_ResetEmbeddedSubobject(int *controller);
 void ActiveGameplayControllerBase_ResetRuntimeState(int *controller);
 void ActiveGameplayControllerBase_UpdateTimelineMarker(int *controller);

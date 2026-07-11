@@ -380,6 +380,44 @@ void CSelectCommon_LoadResource(int *selectCommon, void *linkData) {
     CzanModelOwner_SetAnimationStartFrame(modelOwner, 1.0);
 }
 
+void CSelectCommon_UpdateMovieBackground(int *selectCommon, int skipInitialUpdate, int allowMovieStart, int forceInitialBind) {
+    /* 0x80098810 updates the select-common THP/movie-backed background layer.
+
+       The original is entered through a saved-register helper, so the decompiler
+       shows an unused first parameter. The real object is the selectCommon pointer
+       recovered from that helper.
+
+       Confirmed responsibilities:
+       - pauses/resets the CzanModelOwner at selectCommon +0x128 through
+         CzanModelOwner_SetAnimationStartFrame-like helpers before rebinding video.
+       - resets the two CtsStageObj layers at +0x48 and +0xB8 through their vtables.
+       - when allowMovieStart is nonzero and selectCommon +0x358 is 1, selects a
+         movie path from /sound/stream/mu_bgm_999/movie/b_* based on
+         selectCommon +0x34C.
+       - uses movie manager gManager_802E70A8 and handle selectCommon +0x344.
+       - once the movie is ready, binds the movie object/texture to the two
+         CSelModeEntry objects at +0x254 and +0x2A4 through the Czan UI manager
+         stored at selectCommon +0x250.
+       - selectCommon +0x350/+0x354 track requested/active movie binding.
+       - selectCommon +0x358/+0x35C/+0x360/+0x364/+0x368 are the loader/start/bind
+         state flags controlling the movie background and menu-entry reveal path.
+
+       Important follow-up callees from the original:
+       - FUN_80024F3C: load/assign THP movie path.
+       - FUN_800250B0: poll movie load/readiness.
+       - FUN_8002500C: start/fade movie playback.
+       - FUN_80025368: get active movie object/state.
+       - FUN_80025104: release/stop movie binding.
+       - FUN_80098FA0 / FUN_800991C4: reveal/transition the two menu entry objects
+         after the movie object has been attached. */
+    (void)skipInitialUpdate;
+    (void)allowMovieStart;
+    (void)forceInitialBind;
+    if (selectCommon == 0) {
+        return;
+    }
+}
+
 int CSelModeEntry_Init(void *entry) {
     CSelModeEntryKnownFields *modeEntry = (CSelModeEntryKnownFields *)entry;
 
@@ -773,6 +811,23 @@ void CzanUiObjectInstance_StartAnimation(double startFrame, int objectInstance, 
 
     instance->initialAnimIndex = animationIndex;
     instance->currentAnimValue = 0;
+}
+
+double CzanUiManager_GetObjectAnimationDuration(double fallbackDuration, int uiManager, int objectGroupHandle, int childObjectIndex, int animationIndex) {
+    /* 0x80175F58 returns the duration/tick count for one Czan UI object's animation.
+
+       Original flow:
+       - object = *(uiManager +4 + objectGroupHandle * 0x28 +0x20)[childObjectIndex]
+       - if animationIndex == -1, use object +0x16C
+       - return animation entry duration at *(object +0x198 +0x1C) + animationIndex * 0x10 +8
+
+       The fallbackDuration argument is the decompiler-visible FPR argument used by
+       callers when the UI object/group is unavailable. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)childObjectIndex;
+    (void)animationIndex;
+    return fallbackDuration;
 }
 
 void CzanUiObjectInstance_PreplayInitialAnimation(int objectInstance) {

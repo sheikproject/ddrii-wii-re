@@ -9,6 +9,7 @@ cl /nologo /Iinclude ^
   src\game\cgame.c ^
   src\runtime\module_system.c ^
   src\runtime\memory.c ^
+  src\runtime\runtime_context.c ^
   src\runtime\math.c ^
   src\runtime\string_util.c ^
   src\runtime\cache.c ^

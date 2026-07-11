@@ -56,6 +56,10 @@ void CtsStageObjDescriptor_SetFrameProgress(double frameProgress, int *descripto
 void CtsStageObjDescriptor_SetCurrentTime(double currentTime, int descriptor);
 int CtsStageObjDescriptor_GetEntryHandle(int *descriptor, int entryIndex);
 double CtsStageObjDescriptor_GetCurrentDuration(int *descriptor);
+int CtsStageObjDescriptor_GetCurrentEntryActiveFlag(int *descriptor);
+int CtsStageObjSlot_IsBusy(float *slot);
+void CtsStageObjSlot_SetState(int *slot, int state);
+void CtsStageObjSlot_ResetDescriptorFrames(double frameProgress, int *slot);
 void CtsStageObjDescriptor_ActivateEntry(double blendDuration, int *descriptor, int entryIndex, int entryHandle);
 int CtsStageObj_CopyObjectTransform(void *stageObjOrSlot, void *outMatrix, int objectIndex);
 void CtsStageObj_ApplyModelTransform(int *stageObj, int arg1, int arg2);

@@ -6,6 +6,22 @@ typedef struct CzanModelKnownFields {
     unsigned char fields[0x2cc];
 } CzanModelKnownFields;
 
+typedef struct CzanModelSubmittedPrimitiveBuffer {
+    float (*vertices)[3];
+    float (*texcoords)[2];
+    unsigned int *colors;
+    unsigned int vertexCapacity;
+    unsigned int vertexCount;
+    unsigned int *primitiveStart;
+    unsigned int *primitiveVertexCount;
+    unsigned int *primitiveTextureIndex;
+    unsigned int primitiveCapacity;
+    unsigned int primitiveCount;
+    unsigned int submittedObjectCount;
+    float boundsMin[3];
+    float boundsMax[3];
+} CzanModelSubmittedPrimitiveBuffer;
+
 int *CzanModel_Init(int *model);
 int *CzanModel_Destroy(int *model, short releaseMode);
 int CzanModel_SetPrimaryBlock(int *model, int primaryModelBlock, int primaryModelBlockSize);
@@ -14,6 +30,26 @@ void CzanModel_SetContinuationCount(int *model, int continuationCount);
 int CzanModel_LoadContinuationBlock(int *model, void *continuationBlock, int continuationIndex);
 void CzanModel_ParseContinuationAnimationBlock(int *model, int continuationIndex);
 void CzanModel_SetFallbackRenderSlot(int *model, int textureSet, int renderMode, unsigned char enabledFlag, unsigned char alpha);
+void CzanModel_ReadZmbObjectLocalMatrix(const void *objectEntry, float *outMatrix34);
+void CzanModel_BuildZmbObjectWorldMatrices(
+    const void *zmbData,
+    unsigned int zmbSize,
+    unsigned int objectEntryOffset,
+    unsigned int objectCount,
+    float (*outWorldMatrices34)[12],
+    unsigned int maxWorldMatrices);
+void CzanModel_TransformPoint(const float *matrix34, const float *point3, float *outPoint3);
+void CzanModel_SubmitVisibleZmbPrimitiveStreams(
+    const void *zmbData,
+    unsigned int zmbSize,
+    CzanModelSubmittedPrimitiveBuffer *outBuffer);
+void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
+    const void *zmbData,
+    unsigned int zmbSize,
+    const void *zabData,
+    unsigned int zabSize,
+    float animationTick,
+    CzanModelSubmittedPrimitiveBuffer *outBuffer);
 int CzanModel_BuildRuntimeData(int *model, int enabled);
 int CzanModel_BuildRuntimeDataAndUpdateTransforms(int *model);
 void CzanModelOwner_CreateModelFromPrimaryBlock(int *owner, void *primaryBlock, int primaryBlockSize);
@@ -21,6 +57,10 @@ void CzanModelOwner_BuildRuntimeDataAt80(int *owner);
 void CzanModelOwner_SetContinuationCount(int *owner, int continuationCount);
 void CzanModelOwner_LoadContinuationBlock(int *owner, void *continuationBlock, int continuationIndex);
 void CzanModelOwner_SetAnimationStartFrame(int *owner, double startFrame);
+int *CzanModelOwner_GetHostModel(int *owner);
+void *CzanModel_GetHostPrimaryBlock(int *model);
+unsigned int CzanModel_GetHostPrimaryBlockSize(int *model);
+void *CzanModel_GetHostContinuationBlock(int *model, int continuationIndex);
 int CzanModelCollection_LoadFromLinkBlocks(int *collection, void *linkData, int modelCount, unsigned int collectionIndex);
 int CzanModelManager_LoadResource(int *manager, unsigned int bankIndex, void *linkData);
 int CzanModelManager_UnloadBank(int *manager, unsigned int bankIndex);
@@ -39,6 +79,8 @@ void CzanModelManager_SetupBank3AndStageObjects(
     void *bank3LinkData,
     void *stageObjectLinkData);
 void CzanModelManager_SwitchBank5ForMode(int *owner);
+void CzanModelManager_RequestBank5ModeTransition(double duration, int *owner, unsigned int modeIndex, int transitionAnimIndex);
+void CzanModelManager_StopBank5ModeEffects(double stopTime, int *owner);
 void CzanModelManager_InitBank5LiveObjectsForMode(int *owner);
 void CzanModelOwner_LoadStageResourceGroup(int *owner, void *linkData);
 void CzanModelOwner_SetupResourceGroupEntries(int *owner, unsigned char groupCategory, void *bank5LinkData, void *entryListLinkData);
@@ -46,6 +88,7 @@ int CzanModelOwner_EnsureResourceGroupHandle(int *owner, unsigned int groupIndex
 void CzanModelLiveObject_Init(int *object);
 void CzanModelManager_SetLiveObjectMatrix(int *manager, int liveObjectHandle, const void *matrix);
 void CzanModelLiveObject_ApplyGlobalScaleToMatrix(int *liveObjectTransform);
+void CzanEffectManager_SetStopTime(int *manager, int effectHandle, int stopTime);
 unsigned char CzanModelOwner_SelectModeSlot(int *owner);
 void CzanModelPositionSet_Clear(int *positionSet);
 void CzanModelPositionSet_LoadFromLinkList(int *positionSet, void **linkDataList, int linkDataCount);
@@ -62,6 +105,7 @@ void CzanModel_SolveObjectAnimationTransform(void *outMatrix, void *objectWorksp
 void CzanModel_UpdateObjectAnimation(double deltaOrScale, int *model, int objectIndex);
 void CzanModel_UpdateType2WeightedVectors(int *model, int *objectEntry, int *drawContext);
 void CzanModel_UpdateObjectTransforms(double deltaOrScale, int *model);
+void CzanModel_BuildSpecialObjectMatrix(int *model, float *outMatrix, const float *baseMatrix, const float *objectMatrix);
 void CzanModel_DrawVisibleObjects(int *model, int arg1, const void *baseMatrix, int arg2);
 void CzanModel_DrawType2PartTree(
     int *model,

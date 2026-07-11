@@ -61,7 +61,43 @@ unsigned int CreateTextureFromTplResource(
 int TextureSlot_InitFromTpl(TextureSlotKnownFields *textureSlot);
 int BindTextureFromTextureSet(void *textureHandle, void *outTextureObject, int textureIndex);
 void DrawFilledRect(int x, int y, int z, int width, int height, const unsigned int *color, int flags);
+void DrawLine2D(int x0, int y0, int x1, int y1, const unsigned int *color);
+void DrawTriangle2D(
+    int x0,
+    int y0,
+    int x1,
+    int y1,
+    int x2,
+    int y2,
+    const unsigned int *color);
+void DrawTexturedTriangle2D(
+    int x0,
+    int y0,
+    float u0,
+    float v0,
+    int x1,
+    int y1,
+    float u1,
+    float v1,
+    int x2,
+    int y2,
+    float u2,
+    float v2,
+    void *textureHandle,
+    int textureIndex,
+    const unsigned int *color);
+void DrawTexturedTriangleStrip2D(
+    const int (*points)[2],
+    const float (*texcoords)[2],
+    const unsigned int *colors,
+    unsigned int vertexCount,
+    void *textureHandle,
+    int textureIndex);
 void UiRootManager_LoadResource(int *uiRootManager, void *linkData);
+void UiEffectController_ResetOrStartFade(double duration, int *effectController);
+void UiEffectController_StartMultiTargetFade(double duration, int *effectController, int primaryTarget, int secondaryTargetA, int secondaryTargetB);
+void UiEffectController_StartSingleTargetFade(double duration, int *effectController, int primaryTarget, int secondaryTarget);
+int UiEffectController_GetState(int *effectController);
 int UiRootManager_CreateReferenceObjectGroup(
     int *uiRootManager,
     int referenceObjectGroupHandle,

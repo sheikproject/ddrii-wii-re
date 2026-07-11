@@ -146,11 +146,20 @@ int ActiveGameplayControllerBase_Init(int *controller) {
        Confirmed fields:
        controller +0x2BEC -> vtable PTR_PTR_802BEF00
        controller +0x0068 -> subobject initialized by FUN_8012927C
-       controller +0x1428..+0x2A80 -> six 0x478-byte-ish entry/controllers initialized
-                                  through FUN_80110D30
-       controller +0x2800..+0x281C -> eight 4-word/vector defaults repeated
+       controller +0x1428..+0x2A80 -> repeated 0x478-byte entry/controllers initialized
+                                      through FUN_80110D30
+       controller +0x1300..+0x13FC -> eight repeated 0x20-byte default vectors copied
+                                      from DAT_8027D118..DAT_8027D134
+       controller +0x0080..+0x0110, then repeated at +0x4A0 strides -> 0x94-byte
+                                      default records copied from DAT_8027D07C table
+       controller +0x2800..+0x2824 -> transient ids/state cleared or set to -1
        controller +0x2A80..+0x2A9C -> timing/default floats and ids
-       controller +0x2AA0..+0x2AAC -> cleared 0x2C-byte trailing state, then +0x2ACC=1
+       controller +0x2AA0..+0x2ACB -> cleared trailing state
+       controller +0x2ACC -> initialized to 1
+
+       This constructor is mostly ownership/default-state setup. It does not load the
+       menu background, model files, THP movies, or ZMB/ZAB data directly. Those enter
+       later through SetupContext and the vtable update/render methods.
     */
     if (controller == 0) {
         return 0;
@@ -177,7 +186,24 @@ void ActiveGameplayControllerBase_SetupContext(int *controller, int *context) {
        the active gameplay controller is created at cgame +0x42C. It copies the
        CGame-owned resource/subsystem context into the controller, clears transient
        setup state, initializes the repeated per-player/visual slots, and applies
-       setup-block flags from context[8]. It is still not the draw function. */
+       setup-block flags from context[8].
+
+       Confirmed side effects from the original:
+       - calls FUN_801160A8(controller, context[8]) before copying fields
+       - clears controller +0x0C size 0x40
+       - calls FUN_800FCD10()
+       - clears controller +0x2AA0 size 0x2C
+       - calls FUN_801292EC(controller +0x68)
+       - initializes eight repeated visual/color/state slots from DAT_802E9410 and
+         randomized entries at controller +0x1440
+       - mirrors selected default records into the repeated controller slots
+       - derives controller[0x1D] and [0x1E] from context[5] +0x74/+0x80
+       - uses setup/player data at context[8] to decide [0x1F], [0x507], [0x508],
+         and [0xAB3]
+       - calls FUN_800626B8(controller[0x18], setupBlock +0x70 < 3)
+       - clears controller +0x2AD4 and +0x2B60, each size 0x8C
+
+       It is still not the draw function. */
     if (controller == 0 || context == 0) {
         return;
     }
@@ -203,6 +229,277 @@ void ActiveGameplayControllerBase_SetupContext(int *controller, int *context) {
     controller[0x504] = -1;
     controller[0x507] = -1;
     controller[0x508] = -1;
+}
+
+int ActiveGameplayControllerBase_GetEmbeddedSubobject(int *controller) {
+    /* 0x80112D94 is PTR_PTR_802BEF00 vtable +0x10.
+
+       It returns the embedded controller subobject initialized at controller +0x68 by
+       ActiveGameplayControllerBase_Init and reset by ActiveGameplayControllerBase_SetupContext.
+       This is an accessor, not a teardown/reset method. */
+    if (controller == 0) {
+        return 0;
+    }
+    return (int)(uintptr_t)(controller + 0x1a);
+}
+
+void ActiveGameplayControllerBase_ResetEmbeddedSubobject(int *controller) {
+    /* 0x80113C24 is PTR_PTR_802BEF00 vtable +0x14.
+
+       It resets/destroys the embedded controller +0x68 subobject, then switches the
+       movie/background binding object at controller +0x5C to mode 1. */
+    (void)controller;
+}
+
+int ActiveGameplayControllerBase_AreMovieBindingsReady(int *controller) {
+    /* 0x80113C60 checks the active controller movie/background binding readiness.
+
+       Original behavior:
+       return ActiveControllerMovieBindings_HasPendingSlots(*(controller +0x5C), 1) == 0
+
+       The helper returns nonzero while a slot is still active/pending or not far
+       enough through its movie/audio streams, so this wrapper returns true when the
+       bindings are ready. */
+    (void)controller;
+    return 1;
+}
+
+int ActiveGameplayControllerBase_AreMode3MovieBindingsReady(int *controller) {
+    /* 0x801140E8 checks mode-3 movie/background binding readiness.
+
+       Original behavior:
+       return ActiveControllerMovieBindings_HasPendingSlots(*(controller +0x5C), 3) == 0 */
+    (void)controller;
+    return 1;
+}
+
+void ActiveGameplayControllerBase_ResetRuntimeState(int *controller) {
+    /* 0x80113CA4 is PTR_PTR_802BEF00 vtable +0x18.
+
+       This refreshes active gameplay/controller runtime state after setup:
+       - clears controller +0x0C size 0x40
+       - resets/rewires the subsystem at controller +0x04 using controller +0x4C
+       - resets stage/resource subsystem controller +0x60
+       - when controller +0x64 exists, samples timing/input/resource data and applies
+         it through controller +0x60 stage model slots
+       - calls ActiveGameplayControllerBase_UpdateTimelineMarker(controller)
+       - sets controller +0x3C from setup block flags at controller +0x4C +0x50 bit 0x200
+       - resets the vector at controller +0x40
+       - clears all model slots counted by *(controller +0x4C +0x218)
+       - may select/apply a model slot through controller +0x54
+       - refreshes subsystem controller +0x08
+       - switches controller +0x5C movie/background bindings to mode 2
+
+       This is lifecycle/resource-state work. It is closer to runtime boot wiring than
+       rendering, but still not the main draw method. */
+    (void)controller;
+}
+
+void ActiveGameplayControllerBase_UpdateTimelineMarker(int *controller) {
+    /* 0x80114A90 updates the active controller timeline/frame marker after runtime
+       state has been refreshed.
+
+       Confirmed behavior:
+       - when setup flags permit, asks the controller data at +0x64 for category-5
+         marker data through FUN_8011AB4C/FUN_8011AD00
+       - stores the selected marker id at controller +0x2AB4
+       - falls back to the current base timeline value at *(controller[0] +0x0C)
+       - in forced/disabled cases uses a large sentinel value 100000 and may force
+         the stage slot object at controller +0x54 into state 6 through
+         CtsStageObjSlot_SetState
+       - writes baseTime + markerId * 1000 either to *(controller[0] +0x10) when
+         an alternate timeline is active, or to *(controller[0] +0x0C) otherwise
+       - refreshes *(controller[0] +0x08) from the controller data helper when
+         controller +0x64 is present
+
+       This is timing/state selection, not rendering. */
+    (void)controller;
+}
+
+void ActiveGameplayControllerBase_ApplyRuntimeEventChannels(int *controller, int frameContext) {
+    /* 0x8011399C consumes event/channel records from the controller data pointer at
+       controller +0x64 and mirrors them into active runtime state.
+
+       Confirmed channel categories:
+       - 7: applies ActiveGameplayControllerBase_ApplyRuntimeVisibilityMask and
+            ActiveGameplayControllerBase_TriggerRuntimeCue, then refreshes +0x2ABC
+       - 6: applies ActiveGameplayControllerBase_ApplyRuntimeVisualState and
+            refreshes controller +0x2AB8
+       - 2: updates controller +0x74 and the subsystem at controller +0x60
+       - 3: updates controller +0x78 and the subsystem at controller +0x60
+       - 8: updates stage slot flag controller +0x7C and, unless preset mode 4 is
+            active, mirrors it into *(controller +0x54 +0x5C)
+       - 9/10: applies ActiveGameplayControllerBase_ApplyModeTransitionEvent
+
+       If the currently selected event group changes and controller +0x5C exists,
+       the original also calls CzanModelManager_StopBank5ModeEffects(0.0f, ...). */
+    (void)controller;
+    (void)frameContext;
+}
+
+void ActiveGameplayControllerBase_ApplyRuntimeVisualState(int *controller, int laneIndex, unsigned int enabledMask) {
+    /* 0x80113098 applies category-6 visual/runtime state to one of the controller's
+       eight 0x94-byte source records and the eight 0x478-byte presentation records.
+
+       Confirmed behavior:
+       - ignores laneIndex >= 8
+       - requires controller +0x1418 to have the lane bit set
+       - skips when source record +0xCC is nonzero and controller +0x50 bit 2 is set
+       - converts enabledMask to a boolean and uses source +0x80 as a blend duration
+       - blends/copies two global controller values at +0x1880/+0x1890 and their
+         transition timers at +0x1884..+0x189C
+       - loops eight 0x478-byte presentation records at controller +0x1428, updating
+         value/color transition records from the selected source record
+       - when a source mask bit is clear, it chooses a randomized palette/color from
+         controller +0x1440 and source-local color tables
+       - when a source mask bit is set, it uses explicit source colors/timing fields
+       - if source +0xCC differs from controller +0x2A80, calls one of the stage-slot
+         helpers at controller +0x54, then stores the new +0x2A80 state
+
+       This is the missing category-6 runtime visual/presentation updater, not a
+       geometry loader. */
+    (void)controller;
+    (void)laneIndex;
+    (void)enabledMask;
+}
+
+void ActiveGameplayControllerBase_ApplyRuntimeVisibilityMask(int *controller, int laneIndex, unsigned int visibilityMask) {
+    /* 0x80112D9C applies a category-7 runtime visibility/enable mask to one of the
+       controller's eight 0x20-byte lane tables at controller +0x1300.
+
+       Confirmed behavior:
+       - ignores laneIndex >= 8 and controller states where controller +0x50 low bits
+         are nonzero
+       - walks signed ids in the selected lane until sentinel 0x104
+       - converts negative ids back into the same 0..0x17 range
+       - enables the id when visibilityMask is nonzero and the normalized id is in
+         0..0x17, otherwise disables it
+       - negative ids route through FUN_80052ED8; nonnegative ids route through
+         FUN_80052E1C unless the model/setup flag path says the id should be kept
+       - records the processed lane in a four-entry ring at controller +0x1404,
+         indexed by controller +0x1400
+
+       The helper affects controller-managed presentation state, not geometry decode. */
+    (void)controller;
+    (void)laneIndex;
+    (void)visibilityMask;
+}
+
+void ActiveGameplayControllerBase_TriggerRuntimeCue(int *controller, int cueId) {
+    /* 0x80112F4C handles category-7 cue ids in the 100..199 range.
+
+       Confirmed behavior:
+       - maps cueId to a manager cue id with cueId +0x7FF9D
+       - for cue ids 100..105, compares controller buffers +0x2AD4 and +0x2B60
+         as five 0x1C-byte records and copies +0x2AD4 into +0x2B60
+       - suppresses the cue unless the compared records changed and setup flags at
+         controller +0x4C allow it
+       - dispatches valid cues through FUN_800246E8(gManager_802E70A4, mappedCueId)
+
+       This looks like a runtime cue/sound/manager trigger driven by controller event
+       data rather than a model or movie loader. */
+    (void)controller;
+    (void)cueId;
+}
+
+void ActiveGameplayControllerBase_ApplyModeTransitionEvent(
+    double transitionSeconds,
+    int *controller,
+    int targetMode,
+    int transitionKind,
+    int forceImmediate,
+    int eventArg0,
+    int eventArg1) {
+    /* 0x80113838 applies the category-9/10 runtime event payload that can switch the
+       active bank-5 mode.
+
+       Confirmed behavior:
+       - asks the embedded controller subobject at controller +0x68 to resolve a
+         target mode through FUN_80129308(forceImmediate, targetMode, eventArg0, eventArg1)
+       - ignores modes not enabled by controller +0x141C
+       - ignores the transition when setup data at controller +0x4C +0x50 has bit
+         0x1000 set
+       - writes controller +0x70 to the resolved mode
+       - unless preset mode 4 is active, compares against the current movie/model
+         binding mode from controller +0x5C and calls
+         CzanModelManager_RequestBank5ModeTransition
+       - clamps controller +0x1424 to 0..3
+       - when a transition is already active and transitionSeconds > 0, stores a
+         blend reference from the previous 0x478-byte mode record into the new one
+
+       This is one of the important menu/runtime transition functions. */
+    (void)transitionSeconds;
+    (void)controller;
+    (void)targetMode;
+    (void)transitionKind;
+    (void)forceImmediate;
+    (void)eventArg0;
+    (void)eventArg1;
+}
+
+void ActiveGameplayControllerBase_StopStageModelSlot(int *controller) {
+    /* 0x801140A8 is PTR_PTR_802BEF00 vtable +0x1C.
+
+       It resets/fades the stage model slot object at controller +0x54 to zero time,
+       then switches controller +0x5C movie/background bindings to mode 3. */
+    (void)controller;
+}
+
+int ActiveGameplayControllerBase_IsStageModelSlotBusy(int *controller) {
+    /* 0x80114044 returns whether the controller is currently in a transition or its
+       stage model slot object at controller +0x54 is still busy.
+
+       Original behavior:
+       return controller +0x0C != 0 || CtsStageObjSlot_IsBusy(*(controller +0x54)) != 0 */
+    (void)controller;
+    return 0;
+}
+
+void ActiveGameplayControllerBase_StartTimedTransition(int *controller, unsigned int transitionTicks) {
+    /* 0x8011412C is PTR_PTR_802BEF00 vtable +0x20.
+
+       It converts transitionTicks through gLargeResourceManager timing, marks
+       controller +0x0C active, stores the resulting duration at +0x28, updates the
+       controller +0x5C handle with mode 4, resets subsystem +0x60, clears the two
+       0x8C-byte runtime buffers, and optionally kicks UI/fade state through
+       controller +0x08. */
+    (void)controller;
+    (void)transitionTicks;
+}
+
+void ActiveGameplayControllerBase_ResetTransitionMovieBindings(int *controller) {
+    /* 0x80114268 is PTR_PTR_802BEF00 vtable +0x24.
+
+       It clears controller +0x0C size 0x40, then resets the active controller movie
+       bindings object stored at controller +0x5C through FUN_80055268. */
+    (void)controller;
+}
+
+void ActiveGameplayControllerBase_ApplyVisualPreset(int *controller, int presetA, int presetB, int presetGroup) {
+    /* 0x80115B80 applies one controller visual/stage preset selected by two preset
+       indices and a group.
+
+       It stores a selected pointer-table entry at controller +0x2A94, resets the
+       preset transition state at +0x2A98/+0x2A9C, writes default vector/color records
+       from DAT_802BEA80 into controller +0x2A70/+0x2A60/+0x267C ranges, optionally
+       writes a selected id into subsystem controller +0x60 at +0x74/+0x80, clears the
+       stage model slot flag at *(controller +0x54 +0x5C), sets controller +0x1424 = 4,
+       and optionally resets/starts the UI/effect controller at controller +0x08. */
+    (void)controller;
+    (void)presetA;
+    (void)presetB;
+    (void)presetGroup;
+}
+
+void ActiveGameplayControllerBase_CommitVisualPreset(int *controller) {
+    /* 0x80115CE8 commits the controller visual/stage preset currently stored in
+       controller +0x70/+0x74/+0x78/+0x7C.
+
+       It copies the chosen ids into subsystem controller +0x60, clamps controller
+       +0x1424 from +0x70, copies +0x7C into the stage model slot at controller +0x54,
+       requests a bank-5 mode transition through controller +0x5C, then optionally
+       resets/starts the UI/effect controller at controller +0x08. */
+    (void)controller;
 }
 
 int ActiveGameplayController_Create(unsigned int characterOrSetupId) {

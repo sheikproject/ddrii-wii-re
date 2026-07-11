@@ -1,7 +1,423 @@
 #include "model/czan_model.h"
 
+#include "runtime/math.h"
+
+#include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+
+#define CZAN_MODEL_HOST_STATE_CAP 32
+#define CZAN_MODEL_HOST_CONTINUATION_CAP 16
+
+typedef struct CzanModelHostState {
+    int *model;
+    void *primaryBlock;
+    unsigned int primaryBlockSize;
+    void *continuations[CZAN_MODEL_HOST_CONTINUATION_CAP];
+    int continuationCount;
+} CzanModelHostState;
+
+typedef struct CzanModelOwnerHostState {
+    int *owner;
+    int *model;
+} CzanModelOwnerHostState;
+
+static CzanModelHostState gCzanModelHostStates[CZAN_MODEL_HOST_STATE_CAP];
+static CzanModelOwnerHostState gCzanModelOwnerHostStates[CZAN_MODEL_HOST_STATE_CAP];
+
+static CzanModelHostState *CzanModel_GetHostState(int *model, int create) {
+    unsigned int i;
+    CzanModelHostState *freeSlot = 0;
+
+    if (model == 0) {
+        return 0;
+    }
+    for (i = 0; i < CZAN_MODEL_HOST_STATE_CAP; i++) {
+        if (gCzanModelHostStates[i].model == model) {
+            return &gCzanModelHostStates[i];
+        }
+        if (freeSlot == 0 && gCzanModelHostStates[i].model == 0) {
+            freeSlot = &gCzanModelHostStates[i];
+        }
+    }
+    if (!create || freeSlot == 0) {
+        return 0;
+    }
+    memset(freeSlot, 0, sizeof(*freeSlot));
+    freeSlot->model = model;
+    return freeSlot;
+}
+
+static CzanModelOwnerHostState *CzanModelOwner_GetHostState(int *owner, int create) {
+    unsigned int i;
+    CzanModelOwnerHostState *freeSlot = 0;
+
+    if (owner == 0) {
+        return 0;
+    }
+    for (i = 0; i < CZAN_MODEL_HOST_STATE_CAP; i++) {
+        if (gCzanModelOwnerHostStates[i].owner == owner) {
+            return &gCzanModelOwnerHostStates[i];
+        }
+        if (freeSlot == 0 && gCzanModelOwnerHostStates[i].owner == 0) {
+            freeSlot = &gCzanModelOwnerHostStates[i];
+        }
+    }
+    if (!create || freeSlot == 0) {
+        return 0;
+    }
+    memset(freeSlot, 0, sizeof(*freeSlot));
+    freeSlot->owner = owner;
+    return freeSlot;
+}
+
+int *CzanModelOwner_GetHostModel(int *owner) {
+    CzanModelOwnerHostState *state = CzanModelOwner_GetHostState(owner, 0);
+    return state != 0 ? state->model : 0;
+}
+
+void *CzanModel_GetHostPrimaryBlock(int *model) {
+    CzanModelHostState *state = CzanModel_GetHostState(model, 0);
+    return state != 0 ? state->primaryBlock : 0;
+}
+
+unsigned int CzanModel_GetHostPrimaryBlockSize(int *model) {
+    CzanModelHostState *state = CzanModel_GetHostState(model, 0);
+    return state != 0 ? state->primaryBlockSize : 0;
+}
+
+void *CzanModel_GetHostContinuationBlock(int *model, int continuationIndex) {
+    CzanModelHostState *state = CzanModel_GetHostState(model, 0);
+    if (state == 0 || continuationIndex < 0 || continuationIndex >= state->continuationCount ||
+        continuationIndex >= CZAN_MODEL_HOST_CONTINUATION_CAP) {
+        return 0;
+    }
+    return state->continuations[continuationIndex];
+}
+
+static unsigned int CzanModel_ReadBe32(const unsigned char *p) {
+    return ((unsigned int)p[0] << 24) |
+           ((unsigned int)p[1] << 16) |
+           ((unsigned int)p[2] << 8) |
+           (unsigned int)p[3];
+}
+
+static unsigned int CzanModel_ReadBe16(const unsigned char *p) {
+    return ((unsigned int)p[0] << 8) | (unsigned int)p[1];
+}
+
+static float CzanModel_ReadBeFloat(const unsigned char *p) {
+    union {
+        unsigned int u;
+        float f;
+    } value;
+
+    value.u = CzanModel_ReadBe32(p);
+    return value.f;
+}
+
+static int CzanModel_IsLikelyNameChar(unsigned char c) {
+    return (c >= '0' && c <= '9') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') ||
+           c == '_' ||
+           c == '-' ||
+           c == '@';
+}
+
+static void CzanModel_CopyName(char *outName, unsigned int outNameSize, const unsigned char *data, unsigned int maxSize) {
+    unsigned int i;
+
+    if (outNameSize == 0) {
+        return;
+    }
+
+    for (i = 0; i + 1 < outNameSize && i < maxSize; i++) {
+        if (data[i] == 0 || !CzanModel_IsLikelyNameChar(data[i])) {
+            break;
+        }
+        outName[i] = (char)data[i];
+    }
+    outName[i] = '\0';
+}
+
+static int CzanModel_FindZmbObjectIndexByName(
+    const unsigned char *zmb,
+    unsigned int zmbSize,
+    unsigned int objectEntryOffset,
+    unsigned int objectCount,
+    const char *name) {
+    unsigned int i;
+
+    if (zmb == 0 || name == 0 || name[0] == '\0') {
+        return -1;
+    }
+
+    for (i = 0; i < objectCount; i++) {
+        unsigned int entryOffset = objectEntryOffset + i * 0xa0;
+        char objectName[32];
+
+        if (entryOffset >= zmbSize) {
+            break;
+        }
+
+        CzanModel_CopyName(objectName, sizeof(objectName), zmb + entryOffset, zmbSize - entryOffset);
+        if (strcmp(objectName, name) == 0) {
+            return (int)i;
+        }
+    }
+
+    return -1;
+}
+
+static float CzanModel_ClampFloat(float value, float minValue, float maxValue) {
+    if (value < minValue) {
+        return minValue;
+    }
+    if (value > maxValue) {
+        return maxValue;
+    }
+    return value;
+}
+
+static void CzanModel_NormalizeQuat(float *x, float *y, float *z, float *w) {
+    float lengthSquared = (*x * *x) + (*y * *y) + (*z * *z) + (*w * *w);
+    float invLength;
+
+    if (lengthSquared <= 0.000001f) {
+        *x = 0.0f;
+        *y = 0.0f;
+        *z = 0.0f;
+        *w = 1.0f;
+        return;
+    }
+
+    invLength = 1.0f / sqrtf(lengthSquared);
+    *x *= invLength;
+    *y *= invLength;
+    *z *= invLength;
+    *w *= invLength;
+}
+
+static void CzanModel_QuatToMatrix34(float x, float y, float z, float w, float *matrix34) {
+    float xx;
+    float yy;
+    float zz;
+    float xy;
+    float xz;
+    float yz;
+    float wx;
+    float wy;
+    float wz;
+
+    CzanModel_NormalizeQuat(&x, &y, &z, &w);
+
+    xx = x * x;
+    yy = y * y;
+    zz = z * z;
+    xy = x * y;
+    xz = x * z;
+    yz = y * z;
+    wx = w * x;
+    wy = w * y;
+    wz = w * z;
+
+    Matrix34_SetIdentity(matrix34);
+    matrix34[0] = 1.0f - 2.0f * (yy + zz);
+    matrix34[1] = 2.0f * (xy - wz);
+    matrix34[2] = 2.0f * (xz + wy);
+    matrix34[4] = 2.0f * (xy + wz);
+    matrix34[5] = 1.0f - 2.0f * (xx + zz);
+    matrix34[6] = 2.0f * (yz - wx);
+    matrix34[8] = 2.0f * (xz - wy);
+    matrix34[9] = 2.0f * (yz + wx);
+    matrix34[10] = 1.0f - 2.0f * (xx + yy);
+}
+
+static int CzanModel_FindKeySegment(
+    const unsigned char *zab,
+    unsigned int zabSize,
+    unsigned int keyOffset,
+    unsigned int keyCount,
+    unsigned int keyStride,
+    float animationTick,
+    unsigned int *outKey0,
+    unsigned int *outKey1,
+    float *outT) {
+    unsigned int i;
+
+    if (zab == 0 || keyCount == 0 || keyOffset >= zabSize ||
+        outKey0 == 0 || outKey1 == 0 || outT == 0) {
+        return 0;
+    }
+
+    if (keyOffset + keyStride > zabSize || keyCount == 1) {
+        *outKey0 = 0;
+        *outKey1 = 0;
+        *outT = 0.0f;
+        return keyOffset + keyStride <= zabSize;
+    }
+
+    for (i = 0; i + 1 < keyCount; i++) {
+        unsigned int currentOffset = keyOffset + i * keyStride;
+        unsigned int nextOffset = currentOffset + keyStride;
+        float currentTick;
+        float nextTick;
+
+        if (nextOffset + keyStride > zabSize) {
+            break;
+        }
+
+        currentTick = (float)CzanModel_ReadBe32(zab + currentOffset);
+        nextTick = (float)CzanModel_ReadBe32(zab + nextOffset);
+        if (animationTick <= nextTick) {
+            float span = nextTick - currentTick;
+            *outKey0 = i;
+            *outKey1 = i + 1;
+            *outT = span > 0.0f ? CzanModel_ClampFloat((animationTick - currentTick) / span, 0.0f, 1.0f) : 0.0f;
+            return 1;
+        }
+    }
+
+    *outKey0 = keyCount - 1;
+    *outKey1 = keyCount - 1;
+    *outT = 0.0f;
+    return keyOffset + (*outKey0 * keyStride) + keyStride <= zabSize;
+}
+
+static float CzanModel_LerpFloat(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+static void CzanModel_ApplyZabToLocalMatrices(
+    const unsigned char *zmb,
+    unsigned int zmbSize,
+    unsigned int objectEntryOffset,
+    unsigned int objectCount,
+    const unsigned char *zab,
+    unsigned int zabSize,
+    float animationTick,
+    float (*localMatrices)[12]) {
+    unsigned int channelCount;
+    unsigned int durationTicks;
+    unsigned int channelIndex;
+
+    if (zmb == 0 || zab == 0 || localMatrices == 0 ||
+        zabSize < 0x30 || memcmp(zab, "ZAB ", 4) != 0) {
+        return;
+    }
+
+    channelCount = CzanModel_ReadBe32(zab + 0x0c);
+    durationTicks = CzanModel_ReadBe32(zab + 0x10);
+    if (durationTicks != 0) {
+        while (animationTick >= (float)durationTicks) {
+            animationTick -= (float)durationTicks;
+        }
+        while (animationTick < 0.0f) {
+            animationTick += (float)durationTicks;
+        }
+    }
+
+    for (channelIndex = 0; channelIndex < channelCount; channelIndex++) {
+        unsigned int channelOffset = 0x30 + channelIndex * 0x40;
+        unsigned int keyGroupCount;
+        unsigned int keyGroupOffset;
+        unsigned int groupIndex;
+        int objectIndex;
+        char channelName[32];
+        float animatedTranslation[3] = {0.0f, 0.0f, 0.0f};
+        float animatedScale[3] = {1.0f, 1.0f, 1.0f};
+        float animatedRotation[12];
+        int hasTranslation = 0;
+        int hasScale = 0;
+        int hasRotation = 0;
+
+        if (channelOffset + 0x40 > zabSize) {
+            break;
+        }
+
+        CzanModel_CopyName(channelName, sizeof(channelName), zab + channelOffset, zabSize - channelOffset);
+        objectIndex = CzanModel_FindZmbObjectIndexByName(zmb, zmbSize, objectEntryOffset, objectCount, channelName);
+        if (objectIndex < 0) {
+            continue;
+        }
+
+        Matrix34_SetIdentity(animatedRotation);
+        keyGroupCount = CzanModel_ReadBe32(zab + channelOffset + 0x34);
+        keyGroupOffset = CzanModel_ReadBe32(zab + channelOffset + 0x3c);
+        for (groupIndex = 0; groupIndex < keyGroupCount; groupIndex++) {
+            unsigned int groupOffset = keyGroupOffset + groupIndex * 0x10;
+            unsigned int keyType;
+            unsigned int keyCount;
+            unsigned int keyOffset;
+            unsigned int key0;
+            unsigned int key1;
+            float t;
+
+            if (groupOffset + 0x10 > zabSize) {
+                break;
+            }
+
+            keyType = CzanModel_ReadBe32(zab + groupOffset);
+            keyCount = CzanModel_ReadBe32(zab + groupOffset + 8);
+            keyOffset = CzanModel_ReadBe32(zab + groupOffset + 0x0c);
+            if (keyType == 0 &&
+                CzanModel_FindKeySegment(zab, zabSize, keyOffset, keyCount, 0x10, animationTick, &key0, &key1, &t)) {
+                unsigned int offset0 = keyOffset + key0 * 0x10;
+                unsigned int offset1 = keyOffset + key1 * 0x10;
+                animatedTranslation[0] = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 4), CzanModel_ReadBeFloat(zab + offset1 + 4), t);
+                animatedTranslation[1] = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 8), CzanModel_ReadBeFloat(zab + offset1 + 8), t);
+                animatedTranslation[2] = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 0x0c), CzanModel_ReadBeFloat(zab + offset1 + 0x0c), t);
+                hasTranslation = 1;
+            }
+            else if (keyType == 1 &&
+                     CzanModel_FindKeySegment(zab, zabSize, keyOffset, keyCount, 0x14, animationTick, &key0, &key1, &t)) {
+                unsigned int offset0 = keyOffset + key0 * 0x14;
+                unsigned int offset1 = keyOffset + key1 * 0x14;
+                float x = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 4), CzanModel_ReadBeFloat(zab + offset1 + 4), t);
+                float y = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 8), CzanModel_ReadBeFloat(zab + offset1 + 8), t);
+                float z = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 0x0c), CzanModel_ReadBeFloat(zab + offset1 + 0x0c), t);
+                float w = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 0x10), CzanModel_ReadBeFloat(zab + offset1 + 0x10), t);
+                CzanModel_QuatToMatrix34(x, y, z, w, animatedRotation);
+                hasRotation = 1;
+            }
+            else if (keyType == 2 &&
+                     CzanModel_FindKeySegment(zab, zabSize, keyOffset, keyCount, 0x10, animationTick, &key0, &key1, &t)) {
+                unsigned int offset0 = keyOffset + key0 * 0x10;
+                unsigned int offset1 = keyOffset + key1 * 0x10;
+                animatedScale[0] = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 4), CzanModel_ReadBeFloat(zab + offset1 + 4), t);
+                animatedScale[1] = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 8), CzanModel_ReadBeFloat(zab + offset1 + 8), t);
+                animatedScale[2] = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 0x0c), CzanModel_ReadBeFloat(zab + offset1 + 0x0c), t);
+                hasScale = 1;
+            }
+        }
+
+        if (hasRotation || hasScale) {
+            float tx = localMatrices[objectIndex][3];
+            float ty = localMatrices[objectIndex][7];
+            float tz = localMatrices[objectIndex][11];
+            Matrix34_Copy(localMatrices[objectIndex], animatedRotation);
+            localMatrices[objectIndex][0] *= animatedScale[0];
+            localMatrices[objectIndex][4] *= animatedScale[0];
+            localMatrices[objectIndex][8] *= animatedScale[0];
+            localMatrices[objectIndex][1] *= animatedScale[1];
+            localMatrices[objectIndex][5] *= animatedScale[1];
+            localMatrices[objectIndex][9] *= animatedScale[1];
+            localMatrices[objectIndex][2] *= animatedScale[2];
+            localMatrices[objectIndex][6] *= animatedScale[2];
+            localMatrices[objectIndex][10] *= animatedScale[2];
+            localMatrices[objectIndex][3] = tx;
+            localMatrices[objectIndex][7] = ty;
+            localMatrices[objectIndex][11] = tz;
+        }
+        if (hasTranslation) {
+            localMatrices[objectIndex][3] = animatedTranslation[0];
+            localMatrices[objectIndex][7] = animatedTranslation[1];
+            localMatrices[objectIndex][11] = animatedTranslation[2];
+        }
+    }
+}
 
 int *CzanModel_Init(int *model) {
     /* 0x8014BE78 initializes the 0x2D0-byte model object allocated by
@@ -60,6 +476,13 @@ int CzanModel_SetPrimaryBlock(int *model, int primaryModelBlock, int primaryMode
 
     model[1] = primaryModelBlock;
     model[2] = primaryModelBlockSize;
+    {
+        CzanModelHostState *state = CzanModel_GetHostState(model, 1);
+        if (state != 0) {
+            state->primaryBlock = (void *)(uintptr_t)primaryModelBlock;
+            state->primaryBlockSize = (unsigned int)primaryModelBlockSize;
+        }
+    }
     return 1;
 }
 
@@ -83,6 +506,16 @@ void CzanModel_SetContinuationCount(int *model, int continuationCount) {
     }
 
     model[0x27] = continuationCount;
+    {
+        CzanModelHostState *state = CzanModel_GetHostState(model, 1);
+        if (state != 0) {
+            if (continuationCount > CZAN_MODEL_HOST_CONTINUATION_CAP) {
+                continuationCount = CZAN_MODEL_HOST_CONTINUATION_CAP;
+            }
+            state->continuationCount = continuationCount;
+            memset(state->continuations, 0, sizeof(state->continuations));
+        }
+    }
 }
 
 int CzanModel_LoadContinuationBlock(int *model, void *continuationBlock, int continuationIndex) {
@@ -93,6 +526,12 @@ int CzanModel_LoadContinuationBlock(int *model, void *continuationBlock, int con
         return 0;
     }
 
+    {
+        CzanModelHostState *state = CzanModel_GetHostState(model, 1);
+        if (state != 0 && continuationIndex >= 0 && continuationIndex < CZAN_MODEL_HOST_CONTINUATION_CAP) {
+            state->continuations[continuationIndex] = continuationBlock;
+        }
+    }
     model[3] = (int)(uintptr_t)continuationBlock;
     CzanModel_ParseContinuationAnimationBlock(model, continuationIndex);
     return 1;
@@ -155,6 +594,445 @@ void CzanModel_SetFallbackRenderSlot(int *model, int textureSet, int renderMode,
     bytes[0x28d] = 0xff;
     bytes[0x28e] = 0xff;
     bytes[0x28f] = 0xff;
+}
+
+void CzanModel_ReadZmbObjectLocalMatrix(const void *objectEntry, float *outMatrix34) {
+    const unsigned char *entry = (const unsigned char *)objectEntry;
+    float translation[3];
+    unsigned int i;
+
+    if (outMatrix34 == 0) {
+        return;
+    }
+
+    Matrix34_SetIdentity(outMatrix34);
+    if (entry == 0) {
+        return;
+    }
+
+    for (i = 0; i < 12; i++) {
+        outMatrix34[i] = CzanModel_ReadBeFloat(entry + 0x30 + i * 4);
+    }
+
+    translation[0] = CzanModel_ReadBeFloat(entry + 0x60);
+    translation[1] = CzanModel_ReadBeFloat(entry + 0x64);
+    translation[2] = CzanModel_ReadBeFloat(entry + 0x68);
+    Matrix34_SetTranslation(outMatrix34, translation);
+}
+
+void CzanModel_BuildZmbObjectWorldMatrices(
+    const void *zmbData,
+    unsigned int zmbSize,
+    unsigned int objectEntryOffset,
+    unsigned int objectCount,
+    float (*outWorldMatrices34)[12],
+    unsigned int maxWorldMatrices) {
+    const unsigned char *zmb = (const unsigned char *)zmbData;
+    float localMatrices[512][12];
+    unsigned int i;
+
+    if (zmb == 0 || outWorldMatrices34 == 0 || objectEntryOffset > zmbSize) {
+        return;
+    }
+
+    if (objectCount > maxWorldMatrices) {
+        objectCount = maxWorldMatrices;
+    }
+    if (objectCount > 512) {
+        objectCount = 512;
+    }
+
+    for (i = 0; i < objectCount; i++) {
+        unsigned int entryOffset = objectEntryOffset + i * 0xa0;
+        if (entryOffset + 0xa0 <= zmbSize) {
+            CzanModel_ReadZmbObjectLocalMatrix(zmb + entryOffset, localMatrices[i]);
+        }
+        else {
+            Matrix34_SetIdentity(localMatrices[i]);
+        }
+        Matrix34_Copy(outWorldMatrices34[i], localMatrices[i]);
+    }
+
+    for (i = 0; i < objectCount; i++) {
+        unsigned int entryOffset = objectEntryOffset + i * 0xa0;
+        unsigned int parentIndex;
+
+        if (entryOffset + 0x98 > zmbSize) {
+            continue;
+        }
+
+        parentIndex = CzanModel_ReadBe32(zmb + entryOffset + 0x94);
+        if (parentIndex < i && parentIndex < objectCount) {
+            Matrix34_Multiply(outWorldMatrices34[i], outWorldMatrices34[parentIndex], localMatrices[i]);
+        }
+    }
+}
+
+static void CzanModel_BuildAnimatedZmbObjectWorldMatrices(
+    const void *zmbData,
+    unsigned int zmbSize,
+    unsigned int objectEntryOffset,
+    unsigned int objectCount,
+    const void *zabData,
+    unsigned int zabSize,
+    float animationTick,
+    float (*outWorldMatrices34)[12],
+    unsigned int maxWorldMatrices) {
+    const unsigned char *zmb = (const unsigned char *)zmbData;
+    float localMatrices[512][12];
+    unsigned int i;
+
+    if (zmb == 0 || outWorldMatrices34 == 0 || objectEntryOffset > zmbSize) {
+        return;
+    }
+
+    if (objectCount > maxWorldMatrices) {
+        objectCount = maxWorldMatrices;
+    }
+    if (objectCount > 512) {
+        objectCount = 512;
+    }
+
+    for (i = 0; i < objectCount; i++) {
+        unsigned int entryOffset = objectEntryOffset + i * 0xa0;
+        if (entryOffset + 0xa0 <= zmbSize) {
+            CzanModel_ReadZmbObjectLocalMatrix(zmb + entryOffset, localMatrices[i]);
+        }
+        else {
+            Matrix34_SetIdentity(localMatrices[i]);
+        }
+    }
+
+    CzanModel_ApplyZabToLocalMatrices(
+        zmb,
+        zmbSize,
+        objectEntryOffset,
+        objectCount,
+        (const unsigned char *)zabData,
+        zabSize,
+        animationTick,
+        localMatrices);
+
+    for (i = 0; i < objectCount; i++) {
+        Matrix34_Copy(outWorldMatrices34[i], localMatrices[i]);
+    }
+
+    for (i = 0; i < objectCount; i++) {
+        unsigned int entryOffset = objectEntryOffset + i * 0xa0;
+        unsigned int parentIndex;
+
+        if (entryOffset + 0x98 > zmbSize) {
+            continue;
+        }
+
+        parentIndex = CzanModel_ReadBe32(zmb + entryOffset + 0x94);
+        if (parentIndex < i && parentIndex < objectCount) {
+            Matrix34_Multiply(outWorldMatrices34[i], outWorldMatrices34[parentIndex], localMatrices[i]);
+        }
+    }
+}
+
+void CzanModel_TransformPoint(const float *matrix34, const float *point3, float *outPoint3) {
+    if (matrix34 == 0 || point3 == 0 || outPoint3 == 0) {
+        return;
+    }
+
+    outPoint3[0] = matrix34[0] * point3[0] + matrix34[1] * point3[1] + matrix34[2] * point3[2] + matrix34[3];
+    outPoint3[1] = matrix34[4] * point3[0] + matrix34[5] * point3[1] + matrix34[6] * point3[2] + matrix34[7];
+    outPoint3[2] = matrix34[8] * point3[0] + matrix34[9] * point3[1] + matrix34[10] * point3[2] + matrix34[11];
+}
+
+static void CzanModel_ResetSubmittedPrimitiveBuffer(CzanModelSubmittedPrimitiveBuffer *buffer) {
+    if (buffer == 0) {
+        return;
+    }
+
+    buffer->vertexCount = 0;
+    buffer->primitiveCount = 0;
+    buffer->submittedObjectCount = 0;
+    buffer->boundsMin[0] = 0.0f;
+    buffer->boundsMin[1] = 0.0f;
+    buffer->boundsMin[2] = 0.0f;
+    buffer->boundsMax[0] = 0.0f;
+    buffer->boundsMax[1] = 0.0f;
+    buffer->boundsMax[2] = 0.0f;
+}
+
+static unsigned int CzanModel_GetMaterialTextureIndex(
+    const unsigned char *zmb,
+    unsigned int zmbSize,
+    unsigned int materialIndex) {
+    unsigned int materialTableOffset;
+    unsigned int materialCount;
+    unsigned int materialEntryOffset;
+    unsigned int materialOffset;
+    unsigned int textureRecordOffset;
+
+    if (zmb == 0 || zmbSize < 0x20) {
+        return 0;
+    }
+
+    materialTableOffset = CzanModel_ReadBe32(zmb + 0x1c);
+    if (materialTableOffset + 0x0c > zmbSize) {
+        return 0;
+    }
+
+    materialCount = CzanModel_ReadBe32(zmb + materialTableOffset);
+    materialEntryOffset = CzanModel_ReadBe32(zmb + materialTableOffset + 8);
+    if (materialIndex >= materialCount) {
+        return 0;
+    }
+
+    materialOffset = materialEntryOffset + materialIndex * 0x50;
+    if (materialOffset + 0x1c > zmbSize) {
+        return 0;
+    }
+
+    textureRecordOffset = CzanModel_ReadBe32(zmb + materialOffset + 0x18);
+    if (textureRecordOffset + 4 > zmbSize) {
+        return 0;
+    }
+
+    return CzanModel_ReadBe32(zmb + textureRecordOffset);
+}
+
+static void CzanModel_AddSubmittedVertex(
+    CzanModelSubmittedPrimitiveBuffer *buffer,
+    const float *point,
+    const float *texcoord,
+    unsigned int color) {
+    unsigned int axis;
+
+    if (buffer == 0 || point == 0 || buffer->vertices == 0 ||
+        buffer->vertexCount >= buffer->vertexCapacity) {
+        return;
+    }
+
+    if (buffer->vertexCount == 0) {
+        for (axis = 0; axis < 3; axis++) {
+            buffer->boundsMin[axis] = point[axis];
+            buffer->boundsMax[axis] = point[axis];
+        }
+    }
+    else {
+        for (axis = 0; axis < 3; axis++) {
+            if (point[axis] < buffer->boundsMin[axis]) {
+                buffer->boundsMin[axis] = point[axis];
+            }
+            if (point[axis] > buffer->boundsMax[axis]) {
+                buffer->boundsMax[axis] = point[axis];
+            }
+        }
+    }
+
+    buffer->vertices[buffer->vertexCount][0] = point[0];
+    buffer->vertices[buffer->vertexCount][1] = point[1];
+    buffer->vertices[buffer->vertexCount][2] = point[2];
+    if (buffer->texcoords != 0 && texcoord != 0) {
+        buffer->texcoords[buffer->vertexCount][0] = texcoord[0];
+        buffer->texcoords[buffer->vertexCount][1] = texcoord[1];
+    }
+    else if (buffer->texcoords != 0) {
+        buffer->texcoords[buffer->vertexCount][0] = 0.0f;
+        buffer->texcoords[buffer->vertexCount][1] = 0.0f;
+    }
+    if (buffer->colors != 0) {
+        buffer->colors[buffer->vertexCount] = color;
+    }
+    buffer->vertexCount++;
+}
+
+void CzanModel_SubmitVisibleZmbPrimitiveStreams(
+    const void *zmbData,
+    unsigned int zmbSize,
+    CzanModelSubmittedPrimitiveBuffer *outBuffer) {
+    CzanModel_SubmitAnimatedZmbPrimitiveStreams(zmbData, zmbSize, 0, 0, 0.0f, outBuffer);
+}
+
+void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
+    const void *zmbData,
+    unsigned int zmbSize,
+    const void *zabData,
+    unsigned int zabSize,
+    float animationTick,
+    CzanModelSubmittedPrimitiveBuffer *outBuffer) {
+    const unsigned char *zmb = (const unsigned char *)zmbData;
+    unsigned int objectTableOffset;
+    unsigned int objectCount;
+    unsigned int objectEntryOffset;
+    unsigned int objectIndex;
+    float worldMatrices[512][12];
+
+    CzanModel_ResetSubmittedPrimitiveBuffer(outBuffer);
+    if (zmb == 0 || outBuffer == 0 || zmbSize < 0x30 ||
+        memcmp(zmb, "ZMB ", 4) != 0) {
+        return;
+    }
+
+    objectTableOffset = CzanModel_ReadBe32(zmb + 0x20);
+    if (objectTableOffset > zmbSize || zmbSize - objectTableOffset < 0x0c) {
+        return;
+    }
+
+    objectCount = CzanModel_ReadBe32(zmb + objectTableOffset);
+    objectEntryOffset = CzanModel_ReadBe32(zmb + objectTableOffset + 8);
+    if (objectEntryOffset > zmbSize) {
+        return;
+    }
+    if (objectCount > 512) {
+        objectCount = 512;
+    }
+
+    CzanModel_BuildAnimatedZmbObjectWorldMatrices(
+        zmb,
+        zmbSize,
+        objectEntryOffset,
+        objectCount,
+        zabData,
+        zabSize,
+        animationTick,
+        worldMatrices,
+        512);
+
+    for (objectIndex = 0; objectIndex < objectCount; objectIndex++) {
+        unsigned int entryOffset = objectEntryOffset + objectIndex * 0xa0;
+        const unsigned char *entry;
+        unsigned int objectType;
+        unsigned int submeshCount;
+        unsigned int submeshTable;
+        unsigned int submeshIndex;
+        int submittedObject = 0;
+
+        if (entryOffset + 0xa0 > zmbSize ||
+            outBuffer->vertexCount >= outBuffer->vertexCapacity ||
+            outBuffer->primitiveCount >= outBuffer->primitiveCapacity) {
+            break;
+        }
+
+        entry = zmb + entryOffset;
+        objectType = CzanModel_ReadBe32(entry + 0x2c);
+        submeshCount = CzanModel_ReadBe16(entry + 0x9a);
+        submeshTable = CzanModel_ReadBe32(entry + 0x9c);
+
+        if (entry[0x28] != 0 || entry[0x2a] != 0 || submeshCount == 0 ||
+            submeshTable >= zmbSize || objectType == 2) {
+            continue;
+        }
+
+        for (submeshIndex = 0; submeshIndex < submeshCount; submeshIndex++) {
+            unsigned int submeshOffset = submeshTable + submeshIndex * 0x40;
+            const unsigned char *submesh;
+            unsigned int materialIndex;
+            unsigned int textureIndex;
+            unsigned int primitiveStride;
+            unsigned int primitiveCount;
+            unsigned int primitiveTable;
+            unsigned int positionArray;
+            unsigned int texcoordArray;
+            unsigned int colorArray;
+            unsigned int primitiveIndex;
+
+            if (submeshOffset + 0x40 > zmbSize) {
+                break;
+            }
+
+            submesh = zmb + submeshOffset;
+            materialIndex = CzanModel_ReadBe16(submesh + 2);
+            textureIndex = CzanModel_GetMaterialTextureIndex(zmb, zmbSize, materialIndex);
+            primitiveStride = CzanModel_ReadBe16(submesh + 4) != 0 ? 0x20 : 0x14;
+            primitiveCount = CzanModel_ReadBe16(submesh + 0x0a);
+            primitiveTable = CzanModel_ReadBe32(submesh + 0x20);
+            positionArray = CzanModel_ReadBe32(submesh + 0x24);
+            texcoordArray = CzanModel_ReadBe32(submesh + 0x30);
+            colorArray = CzanModel_ReadBe32(submesh + 0x34);
+            if (primitiveCount == 0 || primitiveTable >= zmbSize || positionArray >= zmbSize) {
+                continue;
+            }
+
+            for (primitiveIndex = 0; primitiveIndex < primitiveCount; primitiveIndex++) {
+                unsigned int primitiveOffset = primitiveTable + primitiveIndex * primitiveStride;
+                unsigned int vertexCount;
+                unsigned int positionIndexStream;
+                unsigned int colorIndexStream;
+                unsigned int texcoordIndexStream;
+                unsigned int vertexIndex;
+                unsigned int primitiveStart;
+
+                if (primitiveOffset + 0x10 > zmbSize ||
+                    outBuffer->primitiveCount >= outBuffer->primitiveCapacity) {
+                    break;
+                }
+
+                vertexCount = CzanModel_ReadBe16(zmb + primitiveOffset + 2);
+                positionIndexStream = CzanModel_ReadBe32(zmb + primitiveOffset + 4);
+                colorIndexStream = primitiveOffset + 0x10 <= zmbSize ? CzanModel_ReadBe32(zmb + primitiveOffset + 0x0c) : 0;
+                texcoordIndexStream = primitiveOffset + 0x14 <= zmbSize ? CzanModel_ReadBe32(zmb + primitiveOffset + 0x10) : 0;
+                if (positionIndexStream >= zmbSize) {
+                    continue;
+                }
+
+                primitiveStart = outBuffer->vertexCount;
+                for (vertexIndex = 0;
+                     vertexIndex < vertexCount && outBuffer->vertexCount < outBuffer->vertexCapacity;
+                     vertexIndex++) {
+                    unsigned int indexOffset = positionIndexStream + vertexIndex * 4;
+                    unsigned int positionIndex;
+                    unsigned int positionOffset;
+                    unsigned int texcoordOffset;
+                    float localPoint[3];
+                    float worldPoint[3];
+                    float texcoord[2] = {0.0f, 0.0f};
+                    unsigned int color = 0xFFFFFFFFu;
+
+                    if (indexOffset + 4 > zmbSize) {
+                        break;
+                    }
+
+                    positionIndex = CzanModel_ReadBe32(zmb + indexOffset) & 0xffffu;
+                    positionOffset = positionArray + positionIndex * 0x0c;
+                    if (positionOffset + 0x0c > zmbSize) {
+                        continue;
+                    }
+
+                    localPoint[0] = CzanModel_ReadBeFloat(zmb + positionOffset);
+                    localPoint[1] = CzanModel_ReadBeFloat(zmb + positionOffset + 4);
+                    localPoint[2] = CzanModel_ReadBeFloat(zmb + positionOffset + 8);
+                    if (texcoordArray < zmbSize && texcoordIndexStream + vertexIndex * 4 + 4 <= zmbSize) {
+                        unsigned int texcoordIndex = CzanModel_ReadBe32(zmb + texcoordIndexStream + vertexIndex * 4) & 0xffffu;
+                        texcoordOffset = texcoordArray + texcoordIndex * 8;
+                        if (texcoordOffset + 8 <= zmbSize) {
+                            texcoord[0] = CzanModel_ReadBeFloat(zmb + texcoordOffset);
+                            texcoord[1] = CzanModel_ReadBeFloat(zmb + texcoordOffset + 4);
+                        }
+                    }
+                    if (colorArray < zmbSize && colorIndexStream + vertexIndex * 4 + 4 <= zmbSize) {
+                        unsigned int colorIndex = CzanModel_ReadBe32(zmb + colorIndexStream + vertexIndex * 4) & 0xffffu;
+                        unsigned int colorOffset = colorArray + colorIndex * 4;
+                        if (colorOffset + 4 <= zmbSize) {
+                            color = CzanModel_ReadBe32(zmb + colorOffset);
+                        }
+                    }
+                    CzanModel_TransformPoint(worldMatrices[objectIndex], localPoint, worldPoint);
+                    CzanModel_AddSubmittedVertex(outBuffer, worldPoint, texcoord, color);
+                }
+
+                if (outBuffer->vertexCount > primitiveStart) {
+                    unsigned int primitiveOut = outBuffer->primitiveCount;
+                    outBuffer->primitiveStart[primitiveOut] = primitiveStart;
+                    outBuffer->primitiveVertexCount[primitiveOut] = outBuffer->vertexCount - primitiveStart;
+                    if (outBuffer->primitiveTextureIndex != 0) {
+                        outBuffer->primitiveTextureIndex[primitiveOut] = textureIndex;
+                    }
+                    outBuffer->primitiveCount++;
+                    submittedObject = 1;
+                }
+            }
+        }
+
+        if (submittedObject) {
+            outBuffer->submittedObjectCount++;
+        }
+    }
 }
 
 int CzanModel_BuildRuntimeData(int *model, int enabled) {
@@ -227,42 +1105,64 @@ void CzanModelOwner_CreateModelFromPrimaryBlock(int *owner, void *primaryBlock, 
        CzanModel, initializes it, stores it back at owner +0x80, then calls
        CzanModel_SetPrimaryBlock(model, primaryBlock, primaryBlockSize). */
     int *model;
+    CzanModelOwnerHostState *ownerState;
 
     if (owner == 0) {
         return;
     }
 
-    model = (int *)(uintptr_t)(unsigned int)owner[0x20];
+    ownerState = CzanModelOwner_GetHostState(owner, 1);
+    if (ownerState == 0) {
+        return;
+    }
+    model = ownerState->model;
     if (model != 0) {
         CzanModel_Destroy(model, 1);
+        free(model);
+        ownerState->model = 0;
         owner[0x20] = 0;
     }
 
-    /* Host builds do not own the original aligned allocator here; keep the export
-       as a named reconstruction point instead of fabricating a partial allocation. */
-    (void)primaryBlock;
-    (void)primaryBlockSize;
+    model = (int *)calloc(1, 0x2d0);
+    if (model == 0) {
+        return;
+    }
+
+    CzanModel_Init(model);
+    CzanModel_SetPrimaryBlock(model, (int)(uintptr_t)primaryBlock, primaryBlockSize);
+    {
+        CzanModelHostState *modelState = CzanModel_GetHostState(model, 1);
+        if (modelState != 0) {
+            modelState->primaryBlock = primaryBlock;
+            modelState->primaryBlockSize = (unsigned int)primaryBlockSize;
+        }
+    }
+    ownerState->model = model;
+    owner[0x20] = 1;
+    CzanModel_GetHostState(model, 1);
 }
 
 void CzanModelOwner_BuildRuntimeDataAt80(int *owner) {
     /* 0x8015EBAC builds runtime data for the CzanModel pointer stored at owner
        +0x80. This is a tiny owner-side wrapper around
        CzanModel_BuildRuntimeDataAndUpdateTransforms. */
-    if (owner == 0 || owner[0x20] == 0) {
+    int *model = CzanModelOwner_GetHostModel(owner);
+    if (model == 0) {
         return;
     }
 
-    CzanModel_BuildRuntimeDataAndUpdateTransforms((int *)(uintptr_t)(unsigned int)owner[0x20]);
+    CzanModel_BuildRuntimeDataAndUpdateTransforms(model);
 }
 
 void CzanModelOwner_SetContinuationCount(int *owner, int continuationCount) {
     /* 0x8015EB98 checks owner +0x80 and forwards to CzanModel_SetContinuationCount.
        In select_cmn the caller passes 10 before attaching blocks 6..0xF. */
-    if (owner == 0 || owner[0x20] == 0) {
+    int *model = CzanModelOwner_GetHostModel(owner);
+    if (model == 0) {
         return;
     }
 
-    CzanModel_SetContinuationCount((int *)(uintptr_t)(unsigned int)owner[0x20], continuationCount);
+    CzanModel_SetContinuationCount(model, continuationCount);
 }
 
 void CzanModelOwner_LoadContinuationBlock(int *owner, void *continuationBlock, int continuationIndex) {
@@ -270,11 +1170,12 @@ void CzanModelOwner_LoadContinuationBlock(int *owner, void *continuationBlock, i
        The select_cmn loader calls this for blocks 6..0xF with continuation indices
        0..9, which are the ZAB/animation-side blocks paired with the primary model
        block loaded by CzanModelOwner_CreateModelFromPrimaryBlock. */
-    if (owner == 0 || owner[0x20] == 0) {
+    int *model = CzanModelOwner_GetHostModel(owner);
+    if (model == 0) {
         return;
     }
 
-    CzanModel_LoadContinuationBlock((int *)(uintptr_t)(unsigned int)owner[0x20], continuationBlock, continuationIndex);
+    CzanModel_LoadContinuationBlock(model, continuationBlock, continuationIndex);
 }
 
 void CzanModelOwner_SetAnimationStartFrame(int *owner, double startFrame) {
@@ -282,11 +1183,10 @@ void CzanModelOwner_SetAnimationStartFrame(int *owner, double startFrame) {
        select_cmn calls this with 1.0 after attaching the ten continuation blocks. */
     int *model;
 
-    if (owner == 0 || owner[0x20] == 0) {
+    model = CzanModelOwner_GetHostModel(owner);
+    if (model == 0) {
         return;
     }
-
-    model = (int *)(uintptr_t)(unsigned int)owner[0x20];
     *(float *)(void *)((unsigned char *)model + 0x250) = (float)startFrame;
 }
 
@@ -426,7 +1326,7 @@ void CzanModelManager_SwitchBank5ForMode(int *owner) {
        owner +0xB0D4 + mode*4 -> per-mode link/resource pointer
        owner +0xB340 + mode*4 -> per-mode gManager_802E70A8 handle/id
        owner +0xB34C -> alternate handle/id when mode == 3
-       owner +0xB36C -> boolean flag passed to FUN_80025248 after reload
+       owner +0xB36C -> boolean flag passed to MovieSlotHandle_SetObjectEnabled after reload
        owner +0xB370 -> pending/transition flag
        owner +0xB374 -> requested mode/index byte
        owner +0xB378 -> cached value copied to +0xB0B8
@@ -436,13 +1336,46 @@ void CzanModelManager_SwitchBank5ForMode(int *owner) {
        - if +0xB370 is set but +0xB37C is clear, clear +0xB370
        - when requested mode differs from current mode and no transition is pending:
          unload CzanModelManager bank 5
-         disable/clear the old mode handle through FUN_80025248 when present
+         disable/clear the old mode handle through MovieSlotHandle_SetObjectEnabled when present
          copy current mode to previous mode, requested mode to current mode
          if the new mode has a link/resource pointer, load bank 5 and call FUN_80053124(owner)
-         enable/update the new mode handle through FUN_80025248 */
+         enable/update the new mode handle through MovieSlotHandle_SetObjectEnabled */
     if (owner == 0) {
         return;
     }
+}
+
+void CzanModelManager_StopBank5ModeEffects(double stopTime, int *owner) {
+    /* 0x800534F0 stops/clears bank-5 live effects for the owner's current mode.
+
+       Original flow:
+       - walks 0x104 twelve-byte live-effect records in the current mode block at
+         owner +0x10000 + currentMode*0xC30 -0x75F8
+       - when both the source id and live effect handle are valid, calls
+         CzanEffectManager_SetStopTime(stopTime, gManager_802E70B8, handle, 1),
+         clears the live handle to -1, and clears the small state byte to 0xFF
+       - walks the smaller per-mode effect list counted by owner +0xB0E0[currentMode],
+         base owner +0x10000 + currentMode*0xC0 -0x4F1C
+       - stops each valid live effect handle and clears it to -1
+
+       ActiveGameplayControllerBase_ApplyRuntimeEventChannels calls this when its
+       selected event group changes. */
+    (void)stopTime;
+    (void)owner;
+}
+
+void CzanModelManager_RequestBank5ModeTransition(double duration, int *owner, unsigned int modeIndex, int transitionAnimIndex) {
+    /* 0x8005386C requests a bank-5/model-owner mode transition.
+
+       It validates modeIndex against owner +0x2C, records requested mode/kind at
+       +0xB374/+0xB378, chooses transition state +0xB0C4, sets transition flags
+       +0xB370/+0xB37C/+0xE6E8, stops existing live/effect objects for the current
+       mode, resets +0xB0BC/+0xB0C0 timing, then calls
+       CzanModelManager_SwitchBank5ForMode(owner). */
+    (void)duration;
+    (void)owner;
+    (void)modeIndex;
+    (void)transitionAnimIndex;
 }
 
 void CzanModelManager_InitBank5LiveObjectsForMode(int *owner) {
@@ -474,6 +1407,19 @@ void CzanModelManager_InitBank5LiveObjectsForMode(int *owner) {
     if (owner == 0) {
         return;
     }
+}
+
+void CzanEffectManager_SetStopTime(int *manager, int effectHandle, int stopTime) {
+    /* 0x80179178 sets stop time for one Czan effect-manager live object.
+
+       Original flow:
+       - return when effectHandle < 0
+       - object = *(manager +0x1A4)[effectHandle]
+       - if object is null, log "CzanEffMng::set_stop_t() : NULL!"
+       - otherwise call FUN_8017F0B0(object, stopTime) */
+    (void)manager;
+    (void)effectHandle;
+    (void)stopTime;
 }
 
 void CzanModelOwner_LoadStageResourceGroup(int *owner, void *linkData) {
@@ -885,6 +1831,20 @@ void CzanModel_UpdateObjectTransforms(double deltaOrScale, int *model) {
     }
 }
 
+void CzanModel_BuildSpecialObjectMatrix(int *model, float *outMatrix, const float *baseMatrix, const float *objectMatrix) {
+    /* 0x8014E96C builds the alternate object matrix used by CzanModel_DrawVisibleObjects
+       when model +0x140 is active and an external/base matrix is supplied. The original
+       extracts basis vectors from baseMatrix, computes a facing/scale correction from
+       objectMatrix, composes temporary scale/rotation matrices, and multiplies the
+       adjusted result back through baseMatrix.
+
+       This belongs to the draw transform path, not the ZMB/ZAB parser. */
+    (void)model;
+    (void)outMatrix;
+    (void)baseMatrix;
+    (void)objectMatrix;
+}
+
 void CzanModel_DrawVisibleObjects(int *model, int arg1, const void *baseMatrix, int arg2) {
     /* 0x8014F420 is called by CtsStageObj_ApplyModelTransform / FUN_800594B8 as:
 
@@ -896,7 +1856,7 @@ void CzanModel_DrawVisibleObjects(int *model, int arg1, const void *baseMatrix, 
        - copies/composes the caller base matrix, stores arg2 at model +0x128, and
          stores the caller matrix pointer at model +0x15C
        - when model +0x140 is set and a caller matrix exists, builds an alternate
-         transform through FUN_8014E96C
+         transform through CzanModel_BuildSpecialObjectMatrix
        - walks the primary model object's 0xA0-byte table
        - only draws objects with submesh count +0x9A, visible bytes +0x28/+0x2A clear,
          and no runtime skip entry in model +0x18

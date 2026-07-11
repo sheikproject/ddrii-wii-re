@@ -64,6 +64,83 @@ void Platform_DrawFilledRect(int x, int y, int z, int width, int height, const u
            flags);
 }
 
+void Platform_DrawLine2D(int x0, int y0, int x1, int y1, const unsigned int *color) {
+    printf("render backend: DrawLine2D x0=%d y0=%d x1=%d y1=%d color=0x%08X\n",
+           x0,
+           y0,
+           x1,
+           y1,
+           color != 0 ? *color : 0);
+}
+
+void Platform_DrawTriangle2D(
+    int x0,
+    int y0,
+    int x1,
+    int y1,
+    int x2,
+    int y2,
+    const unsigned int *color) {
+    printf("render backend: DrawTriangle2D x0=%d y0=%d x1=%d y1=%d x2=%d y2=%d color=0x%08X\n",
+           x0,
+           y0,
+           x1,
+           y1,
+           x2,
+           y2,
+           color != 0 ? *color : 0);
+}
+
+void Platform_DrawTexturedTriangle2D(
+    int x0,
+    int y0,
+    float u0,
+    float v0,
+    int x1,
+    int y1,
+    float u1,
+    float v1,
+    int x2,
+    int y2,
+    float u2,
+    float v2,
+    void *textureHandle,
+    int textureIndex,
+    const unsigned int *color) {
+    (void)textureHandle;
+    printf("render backend: DrawTexturedTriangle2D x0=%d y0=%d uv0=%.3f,%.3f x1=%d y1=%d uv1=%.3f,%.3f x2=%d y2=%d uv2=%.3f,%.3f texture=%d color=0x%08X\n",
+           x0,
+           y0,
+           u0,
+           v0,
+           x1,
+           y1,
+           u1,
+           v1,
+           x2,
+           y2,
+           u2,
+           v2,
+           textureIndex,
+           color != 0 ? *color : 0);
+}
+
+void Platform_DrawTexturedTriangleStrip2D(
+    const int (*points)[2],
+    const float (*texcoords)[2],
+    const unsigned int *colors,
+    unsigned int vertexCount,
+    void *textureHandle,
+    int textureIndex) {
+    (void)points;
+    (void)texcoords;
+    (void)colors;
+    (void)textureHandle;
+    printf("render backend: DrawTexturedTriangleStrip2D vertices=%u texture=%d\n",
+           vertexCount,
+           textureIndex);
+}
+
 unsigned int Platform_CreateTextureFromTplResource(
     TextureManagerKnownFields *textureManager,
     void *resourceData,

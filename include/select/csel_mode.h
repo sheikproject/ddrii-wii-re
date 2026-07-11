@@ -48,6 +48,7 @@ void CSelMode_OnEnter(void *cselMode, void *linkData);
 void CSelMode_Update(void);
 void CSelMode_SetInitialSelectedMode(void *cselMode);
 void CSelectCommon_LoadResource(int *selectCommon, void *linkData);
+void CSelectCommon_UpdateMovieBackground(int *selectCommon, int skipInitialUpdate, int allowMovieStart, int forceInitialBind);
 int CSelModeEntry_Init(void *entry);
 int CSelModeEntry_Update(void *entry, short activeCountOrFlag);
 int CSelModeEntry_AddUiObject(void *entry, int linkBlock);

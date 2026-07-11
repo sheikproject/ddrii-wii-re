@@ -171,6 +171,145 @@ void ResourceSlotHandle_Rebind(int *slotHandle, int resourceOrPayload, int setup
     slotHandle[1] = -1;
 }
 
+void MovieSlotHandle_ResetClaimedSlot(int *slotHandle) {
+    /* 0x80025104 resets the claimed CzanMovieObj for a movie slot handle.
+
+       Original flow:
+       - if slotHandle[0] exists, fetch the claimed slot object through
+         ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotHandle[1])
+       - if the slot object exists, call CzanMovieObj_Reset(slotObject)
+
+       This is a movie-slot reset wrapper, not a file/resource loader. */
+    (void)slotHandle;
+}
+
+int MovieSlotHandle_IsReadyForDisplay(int *slotHandle, int slotIndex) {
+    /* 0x80025148 checks whether a claimed CzanMovieObj slot is ready enough for
+       display/playback.
+
+       Original flow:
+       - if the current slot is active/pending according to ResourceSlotHandle_IsActivePending,
+         return 0
+       - fetch the claimed movie slot by slotIndex
+       - query stream progress from the sound/video readers at slot +0x08 and +0xE4
+       - return 1 only when video progress is at least 60% and audio/progressive data
+         is at least 50%
+
+       This is a readiness/progress check, not a reset or load call. */
+    (void)slotHandle;
+    (void)slotIndex;
+    return 0;
+}
+
+void MovieSlotHandle_SetObjectEnabled(int *slotHandle, int slotIndex, int enabled) {
+    /* 0x80025248 fetches one claimed CzanMovieObj slot and forwards enabled to the
+       movie object's child/object record at +0x114.
+
+       Original flow:
+       - if slotHandle[0] exists, fetch ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotIndex)
+       - if the slot object exists, call FUN_80190440(slotObject +0x114, enabled)
+
+       This is the small on/off switch used by bank-5/movie binding mode changes. */
+    (void)slotHandle;
+    (void)slotIndex;
+    (void)enabled;
+}
+
+int ActiveControllerMovieBindings_HasPendingSlots(int *movieBindings, int mode) {
+    /* 0x80055314 checks whether active controller movie/background slots are still
+       pending.
+
+       mode 1:
+       - if global transition flag movieBindings +0xB36C is clear, checks special
+         slot +0xB34C and category slots +0xB340/+0xB344/+0xB348 for active/pending
+         movie slots through ResourceSlotHandle_IsActivePending.
+       - if no active/pending slot is found, validates that required slots are ready
+         through MovieSlotHandle_IsReadyForDisplay.
+
+       mode 3:
+       - checks category slots 1..2 and returns pending when any valid slot is not
+         ready for display.
+
+       Return value is nonzero while a binding is still pending/not ready. */
+    (void)movieBindings;
+    (void)mode;
+    return 0;
+}
+
+void ActiveControllerMovieBindings_Reset(int *movieBindings) {
+    /* 0x80055268 clears the active controller's movie/background binding records.
+
+       Confirmed fields:
+       movieBindings +0xB360 -> cleared to zero
+       movieBindings +0xB34C -> special slot index for category 3
+       movieBindings +0xB340/+0xB344/+0xB348 -> slot indices for categories 0..2
+       movieBindings +0xB334/+0xB338/+0xB33C -> per-category active flags cleared
+
+       Each valid slot index is released/reset through MovieSlotHandle_ResetClaimedSlot
+       against gManager_802E70A8. */
+    (void)movieBindings;
+}
+
+void ActiveControllerMovieBindings_SetMode(int *movieBindings, int mode) {
+    /* 0x80055090 changes the active controller movie/background binding mode.
+
+       Confirmed behavior:
+       - stores mode at movieBindings +0xB360
+       - mode 1 loads/rebinds categories 0..3 through
+         ActiveControllerMovieBindings_LoadCategoryMovie and clears transition flags
+         at +0xF068/+0xF06C
+       - mode 2 enables the special/category movie slots through
+         MovieSlotHandle_SetObjectEnabled, refreshes categories 1..2 through
+         ActiveControllerMovieBindings_StartCategoryMovie, and sets +0xF06C = 1
+       - mode 4 enables the special/current mode slot so it can be displayed during
+         the timed controller transition
+
+       This helper does not parse THP data itself; it controls which claimed movie
+       slots are active for the active gameplay controller. */
+    (void)movieBindings;
+    (void)mode;
+}
+
+void ActiveControllerMovieBindings_LoadCategoryMovie(int *movieBindings, unsigned int category) {
+    /* 0x80055590 chooses and binds the THP movie path for one active-controller
+       background category.
+
+       Confirmed path rules:
+       - category 3 uses the special slot +0xB34C and binds
+         "movie/stage/single01_w.thp"
+       - category type byte 0 -> "movie/stage/upt01.thp"
+       - category type byte 1 -> "movie/bgv/%s.thp" using the category string at
+         owner +0xB328/+0xB32C/+0xB330
+       - category type byte 2 -> randomized numbered stage movie path based on
+         owner +0xB368:
+           1: "movie/stage/upt_%s%02d.thp"
+           2: "movie/stage/pop_%s%02d.thp"
+           4: "movie/stage/mvo_%s%02d.thp"
+           5/default: "movie/stage/fvo_%s%02d.thp"
+       - category type byte 3 -> "movie/stage/%s.thp"
+       - category type byte 4 -> "movie/zz_pv/ddr%03d.thp"
+
+       After binding the path through FUN_80024F3C, several stage-movie paths mark
+       movie object fields +0x284 and +0x288 as enabled. */
+    (void)movieBindings;
+    (void)category;
+}
+
+void ActiveControllerMovieBindings_StartCategoryMovie(int *movieBindings, unsigned int category) {
+    /* 0x80055914 starts/enables one already-bound active-controller movie category.
+
+       Confirmed behavior:
+       - category 3 uses special slot +0xB34C; other categories use +0xB340 + category*4
+       - returns when the slot id is -1 or global transition flag +0xB36C is set
+       - non-special categories set a per-category started flag at owner +0xB334
+       - category type 4 can suppress the enable flag when owner +0xA0 bit 0x400000 is clear
+       - calls FUN_8002500C(1.0f, gManager_802E70A8, slot, enableFlag)
+       - for owner +0xB324 category byte 1, also applies movie position/scale/timing
+         through FUN_80025508 and clears looping/flag state through FUN_8002561C */
+    (void)movieBindings;
+    (void)category;
+}
+
 void CzanMovieObj_AllocBuffer(int *movieObj, int bufferSize) {
     /* 0x801843CC is named by assert strings in zanMovie.cpp as
        CzanMovieObj::AllocBuffer().

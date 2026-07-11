@@ -7,6 +7,8 @@
 #include "select/csel_mode.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <windows.h>
 
 void RuntimeEntry(void) {
@@ -22,9 +24,13 @@ int GameMain(void) {
         -1,
         0,
     };
+    const char *startModule = getenv("DDRII_HOST_START");
 
     setvbuf(stdout, 0, _IONBF, 0);
     puts("DDRII host skeleton: GameMain");
+    if (startModule != 0 && strcmp(startModule, "select") == 0) {
+        moduleController.pendingModuleId = MODULE_ID_CSELECT;
+    }
 
     while (!Platform_ShouldQuit() && ModuleController_Update(&moduleController) == 0) {
         Sleep(16);
@@ -168,6 +174,7 @@ int CSelect_Init(void *cSelect) {
 
     /* Original initializes module ID 2, clears CSelect state, sets CSelect_VTable,
        initializes internal buffers, and clears resource/sub-screen handles. */
+    memset(module, 0, sizeof(*module));
     module->frame = 0;
     module->selectedModeIndex = 0;
     module->redrawNeeded = 1;

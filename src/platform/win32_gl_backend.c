@@ -27,6 +27,7 @@ static int gShouldQuit;
 static int gConfirmPressed;
 static int gWindowWidth;
 static int gWindowHeight;
+static GLuint gBoundTextureId;
 static GlTextureSet gTextureSets[MAX_GL_TEXTURE_SETS];
 
 static unsigned int ReadBe32(const unsigned char *data, unsigned int offset) {
@@ -483,7 +484,10 @@ int Platform_BindTextureFromTextureSet(void *textureHandle, void *outTextureObje
         return 0;
     }
 
-    glBindTexture(GL_TEXTURE_2D, gTextureSets[slot].textures[textureIndex].id);
+    if (gBoundTextureId != gTextureSets[slot].textures[textureIndex].id) {
+        glBindTexture(GL_TEXTURE_2D, gTextureSets[slot].textures[textureIndex].id);
+        gBoundTextureId = gTextureSets[slot].textures[textureIndex].id;
+    }
     return 1;
 }
 
@@ -529,6 +533,121 @@ void Platform_DrawFilledRect(int x, int y, int z, int width, int height, const u
     glEnable(GL_TEXTURE_2D);
 }
 
+void Platform_DrawLine2D(int x0, int y0, int x1, int y1, const unsigned int *color) {
+    unsigned int c = color != 0 ? *color : 0;
+
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_CULL_FACE);
+    glColor4ub((GLubyte)((c >> 24) & 0xFF),
+               (GLubyte)((c >> 16) & 0xFF),
+               (GLubyte)((c >> 8) & 0xFF),
+               (GLubyte)(c & 0xFF));
+    glLineWidth(2.0f);
+    glBegin(GL_LINES);
+    glVertex2i(x0, y0);
+    glVertex2i(x1, y1);
+    glEnd();
+    glLineWidth(1.0f);
+    glEnable(GL_TEXTURE_2D);
+}
+
+void Platform_DrawTriangle2D(
+    int x0,
+    int y0,
+    int x1,
+    int y1,
+    int x2,
+    int y2,
+    const unsigned int *color) {
+    unsigned int c = color != 0 ? *color : 0;
+
+    glDisable(GL_TEXTURE_2D);
+    glColor4ub((GLubyte)((c >> 24) & 0xFF),
+               (GLubyte)((c >> 16) & 0xFF),
+               (GLubyte)((c >> 8) & 0xFF),
+               (GLubyte)(c & 0xFF));
+    glBegin(GL_TRIANGLES);
+    glVertex2i(x0, y0);
+    glVertex2i(x1, y1);
+    glVertex2i(x2, y2);
+    glEnd();
+    glEnable(GL_TEXTURE_2D);
+}
+
+void Platform_DrawTexturedTriangle2D(
+    int x0,
+    int y0,
+    float u0,
+    float v0,
+    int x1,
+    int y1,
+    float u1,
+    float v1,
+    int x2,
+    int y2,
+    float u2,
+    float v2,
+    void *textureHandle,
+    int textureIndex,
+    const unsigned int *color) {
+    unsigned int c = color != 0 ? *color : 0xFFFFFFFFu;
+
+    if (!Platform_BindTextureFromTextureSet(textureHandle, 0, textureIndex)) {
+        Platform_DrawTriangle2D(x0, y0, x1, y1, x2, y2, color);
+        return;
+    }
+
+    glEnable(GL_TEXTURE_2D);
+    glColor4ub((GLubyte)((c >> 24) & 0xFF),
+               (GLubyte)((c >> 16) & 0xFF),
+               (GLubyte)((c >> 8) & 0xFF),
+               (GLubyte)(c & 0xFF));
+    glBegin(GL_TRIANGLES);
+    glTexCoord2f(u0, v0);
+    glVertex2i(x0, y0);
+    glTexCoord2f(u1, v1);
+    glVertex2i(x1, y1);
+    glTexCoord2f(u2, v2);
+    glVertex2i(x2, y2);
+    glEnd();
+}
+
+void Platform_DrawTexturedTriangleStrip2D(
+    const int (*points)[2],
+    const float (*texcoords)[2],
+    const unsigned int *colors,
+    unsigned int vertexCount,
+    void *textureHandle,
+    int textureIndex) {
+    unsigned int i;
+
+    if (points == 0 || vertexCount < 3) {
+        return;
+    }
+
+    if (Platform_BindTextureFromTextureSet(textureHandle, 0, textureIndex)) {
+        glEnable(GL_TEXTURE_2D);
+    }
+    else {
+        glDisable(GL_TEXTURE_2D);
+    }
+
+    glBegin(GL_TRIANGLE_STRIP);
+    for (i = 0; i < vertexCount; i++) {
+        unsigned int c = colors != 0 ? colors[i] : 0xFFFFFFFFu;
+        glColor4ub((GLubyte)((c >> 24) & 0xFF),
+                   (GLubyte)((c >> 16) & 0xFF),
+                   (GLubyte)((c >> 8) & 0xFF),
+                   (GLubyte)(c & 0xFF));
+        if (texcoords != 0) {
+            glTexCoord2f(texcoords[i][0], texcoords[i][1]);
+        }
+        glVertex2i(points[i][0], points[i][1]);
+    }
+    glEnd();
+    glEnable(GL_TEXTURE_2D);
+}
+
 unsigned int Platform_CreateTextureFromTplResource(
     TextureManagerKnownFields *textureManager,
     void *resourceData,
@@ -554,6 +673,7 @@ unsigned int Platform_CreateTextureFromTplResource(
 
     set = &gTextureSets[textureSlot];
     memset(set, 0, sizeof(*set));
+    gBoundTextureId = 0;
 
     textureCount = ReadBe32(data, 4);
     tableOffset = ReadBe32(data, 8);
@@ -604,8 +724,8 @@ unsigned int Platform_CreateTextureFromTplResource(
         glBindTexture(GL_TEXTURE_2D, id);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
         free(pixels);
 

@@ -318,6 +318,70 @@ double CtsStageObjDescriptor_GetCurrentDuration(int *descriptor) {
     return (double)*(float *)activeEntry;
 }
 
+int CtsStageObjDescriptor_GetCurrentEntryActiveFlag(int *descriptor) {
+    /* 0x8005AC14 returns the active flag at descriptor current entry +0x20.
+
+       Original flow:
+       - return 1 when descriptor[0] is null
+       - otherwise return *(descriptor[0] + descriptor[1] * 0xA8 +0x20)
+
+       This is used by CtsStageObjSlot_IsBusy to decide whether an animation/model
+       slot entry has completed. */
+    (void)descriptor;
+    return 1;
+}
+
+int CtsStageObjSlot_IsBusy(float *slot) {
+    /* 0x8005CA9C checks whether a CtsStageObj slot/descriptor is still active.
+
+       The original chooses one of several descriptor records depending on slot state:
+       - a special sentinel at slot +0x150 selects the descriptor at +0x1FC
+       - when slot +0x114 is zero, it indexes a descriptor table through +0x164/+0x168
+       - otherwise it uses the main descriptor at +0x180 and may defer completion
+         based on current frame, total frame count, and entry count
+
+       It returns nonzero when the selected descriptor is complete/idle, or when the
+       slot has no positive duration/current frame to wait on. */
+    (void)slot;
+    return 1;
+}
+
+void CtsStageObjSlot_SetState(int *slot, int state) {
+    /* 0x8005D0E8 changes the CtsStageObj slot state stored at slot +0x80.
+
+       Confirmed states:
+       - 0: clear slot +0x80
+       - 1: run FUN_8005CB94 transition/setup helper
+       - 2: if current state is 0 or 4, run FUN_8005CB94, then set +0x80 = 2
+       - 3: run FUN_8005CB94, then set +0x80 = 3
+       - 4: set +0x80 = 4, activate descriptor table at +0x164, clear +0x64,
+            set +0x114 = 1
+       - 5: ensure helper/state at +0x118 exists through FUN_8005CE7C, set +0x80 = 5,
+            set +0x11C = 1
+       - 6: set +0x80 = 6
+
+       ActiveGameplayControllerBase_UpdateTimelineMarker uses state 6 as a forced
+       disabled/sentinel state. */
+    (void)slot;
+    (void)state;
+}
+
+void CtsStageObjSlot_ResetDescriptorFrames(double frameProgress, int *slot) {
+    /* 0x8005C9F4 iterates the descriptor table owned by a CtsStageObj slot and
+       rewinds/activates each descriptor entry.
+
+       Original flow:
+       - for each descriptor counted by slot +0x15C with stride 0x7C at slot +0x164:
+         - CtsStageObjDescriptor_ActivateEntry(1.0f, descriptor, 0, 0)
+         - CtsStageObjDescriptor_SetFrameProgress(frameProgress,
+           descriptor[0] + descriptor[1] * 0xA8, 0)
+
+       ActiveGameplayControllerBase_StopStageModelSlot calls this with 0.0f before
+       switching the movie/background bindings into mode 3. */
+    (void)frameProgress;
+    (void)slot;
+}
+
 void CtsStageObjDescriptor_ActivateEntry(double blendDuration, int *descriptor, int entryIndex, int entryHandle) {
     uintptr_t activeEntry;
 

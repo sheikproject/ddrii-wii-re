@@ -1622,7 +1622,7 @@ owner +0xB0B8 -> cached value copied from +0xB378 during switch
 owner +0xB0D4 + mode*4 -> per-mode bank-5 link/resource pointer
 owner +0xB340 + mode*4 -> per-mode gManager_802E70A8 handle/id
 owner +0xB34C -> alternate handle/id when mode == 3
-owner +0xB36C -> boolean flag passed to FUN_80025248 after reload
+owner +0xB36C -> boolean flag passed to MovieSlotHandle_SetObjectEnabled after reload
 owner +0xB370 -> pending/transition flag
 owner +0xB374 -> requested mode/index byte
 owner +0xB378 -> cached value copied to +0xB0B8
@@ -1639,14 +1639,14 @@ if requestedMode != currentMode and +0xB370 == 0:
   if current mode has a bank-5 link/resource pointer:
     CzanModelManager_UnloadBank(gManager_802E70B8, 5)
   CzanModelManager_UnloadBank(gManager_802E70B8, 5)
-  disable/clear old mode handle with FUN_80025248 when handle != -1
+  disable/clear old mode handle with MovieSlotHandle_SetObjectEnabled when handle != -1
   owner +0xB0B8 = owner +0xB378
   previousMode = currentMode
   currentMode = requestedMode
   if requested mode has a bank-5 link/resource pointer:
     CzanModelManager_LoadResource(gManager_802E70B8, 5, ...)
     FUN_80053124(owner)
-  enable/update new mode handle with FUN_80025248 when handle != -1
+  enable/update new mode handle with MovieSlotHandle_SetObjectEnabled when handle != -1
 ```
 
 This is a dynamic model bank switcher. It is useful for finding which resources feed
@@ -2503,7 +2503,7 @@ Confirmed behavior:
 return unless model +0x04 exists and model +0x7C is nonzero
 copy/compose the caller base matrix
 store arg2 at model +0x128 and caller matrix at model +0x15C
-optionally build an alternate transform through FUN_8014E96C
+optionally build an alternate transform through CzanModel_BuildSpecialObjectMatrix
 walk the primary model object's 0xA0-byte table
 skip hidden/runtime-disabled objects
 for each visible object:
@@ -2516,6 +2516,37 @@ for each visible object:
 increment model +0x1A4 modulo model +0x1A0
 mark model +0x164 = 1
 ```
+
+`FUN_8014E96C` builds the special/alternate object matrix used by the visible-object
+draw path when an external/base matrix is present. Suggested name:
+
+```text
+CzanModel_BuildSpecialObjectMatrix
+```
+
+Confirmed behavior:
+
+```text
+copy selected basis columns from baseMatrix into a temporary matrix
+derive a local direction vector from DAT_802941DC/E0/E4 through baseMatrix
+if model +0x140 is not mode 2, or the derived vector length is zero:
+  copy baseMatrix into outMatrix
+  replace outMatrix translation from objectMatrix
+  outMatrix = baseMatrix * outMatrix
+
+compute objectMatrix basis-vector lengths
+build a scale matrix from those lengths
+outMatrix = outMatrix * scaleMatrix
+
+if model +0x140 == 2 and the derived vector length is nonzero:
+  normalize the vector
+  build a rotation angle from atan-like helper
+  apply that rotation
+  multiply objectMatrix/baseMatrix again
+```
+
+So this is a special draw transform/billboard-style adjustment. It is not where the
+geometry or primitive data is decoded.
 
 `FUN_80151E90` recursively walks the type-2 object part/material tree. Suggested name:
 
@@ -3342,10 +3373,13 @@ alignment < 0  -> FUN_801DC200(allocator, roundedSize, -alignment)
 alignment >= 0 -> FUN_801DC120(allocator, roundedSize, alignment)
 ```
 
-`FUN_8012A130`, `FUN_8012A164`, and `FUN_8012A1B0` are not gameplay/runtime APIs.
-`FUN_8012A130` and `FUN_8012A164` are compiler helper stubs Ghidra emits for spilling
-nonvolatile registers to the implicit `r11` context area. `FUN_8012A1B0` is the paired
-empty return/restore marker for that helper family.
+`FUN_8012A130`, `FUN_8012A134`, `FUN_8012A144`, `FUN_8012A150`, `FUN_8012A154`,
+`FUN_8012A158`, `FUN_8012A15C`, `FUN_8012A164`, and `FUN_8012A1B0` are not
+gameplay/runtime APIs. The named spill variants are documented in
+`docs/runtime_addresses.md` as `RuntimeContext_SpillSavedRegistersR*ToR31` helpers.
+They are compiler helper stubs Ghidra emits for spilling nonvolatile registers to the
+implicit `r11` context area. `FUN_8012A1B0` is the paired empty return/restore marker
+for that helper family.
 
 Entry creation map:
 
@@ -4913,7 +4947,113 @@ if blockIndex < *(int *)(*linkManager + 8):
 return 0
 ```
 
-The OpenGL host now stores `select_cmn.bin` on `HostCSelectModule` and logs the common
-model package at CSelect startup. This still does not render the ZMB models; it proves
-the host is finally following the correct resource path before we implement the actual
-ZMB model runtime/build and draw path.
+`FUN_80098810` is the select-common movie/background update and bind step. Suggested
+name:
+
+```text
+CSelectCommon_UpdateMovieBackground
+```
+
+Suggested host signature:
+
+```c
+void CSelectCommon_UpdateMovieBackground(
+    int *selectCommon,
+    int skipInitialUpdate,
+    int allowMovieStart,
+    int forceInitialBind);
+```
+
+The decompile shows the object pointer recovered through the runtime saved-register
+helper, but all field offsets are relative to the `selectCommon` object loaded by
+`CSelectCommon_LoadResource`.
+
+Confirmed behavior:
+
+```text
+1. Resets/pauses select-common model state:
+   - model owner at selectCommon +0x128
+   - CtsStageObj layer at selectCommon +0x48
+   - CtsStageObj layer at selectCommon +0xB8
+
+2. If allowMovieStart is nonzero and selectCommon +0x358 == 1:
+   - when selectCommon +0x35C == 1, selects a THP/movie path based on
+     selectCommon +0x34C and calls the movie manager load function.
+   - selected paths are under:
+       /sound/stream/mu_bgm_999/movie/b_*
+   - the movie handle used for these operations is selectCommon +0x344.
+
+3. Polls movie readiness through the movie manager. Once ready:
+   - starts/fades the movie.
+   - gets the active movie object.
+   - writes movie object field +0x288 = 1.
+   - binds the movie object/texture into the two CSelModeEntry objects at
+     selectCommon +0x254 and +0x2A4 through the Czan UI manager at
+     selectCommon +0x250.
+
+4. After binding, chooses one of two reveal/update paths:
+   - selectCommon +0x368 == 1 -> FUN_80098FA0(selectCommon, 1)
+   - otherwise                -> FUN_800991C4(selectCommon, 0)
+
+5. If selectCommon +0x364 == 1, releases/hides the bound movie object and clears
+   the movie/background state flags.
+```
+
+Important state fields:
+
+```text
++0x250 -> Czan UI manager pointer used to bind the movie object into CSelModeEntry
++0x254 -> first CSelModeEntry receiving the movie-backed object
++0x2A4 -> second CSelModeEntry receiving the movie-backed object
++0x344 -> movie manager handle/slot
++0x34C -> mode/category selector used to pick the b_* movie path
++0x350 -> movie load requested flag
++0x354 -> movie binding active/requested flag
++0x358 -> movie-background state enabled/loading flag
++0x35C -> request new movie path flag
++0x360 -> movie ready/bind pending flag
++0x364 -> release/hide movie binding flag
++0x368 -> reveal path selector
+```
+
+Important follow-up callees:
+
+```text
+FUN_80024F3C -> movie manager load/assign path
+FUN_800250B0 -> movie load/readiness poll
+FUN_8002500C -> start/fade movie playback
+FUN_80025368 -> get active movie object/state
+FUN_80025104 -> release/stop movie binding
+FUN_80098FA0 -> one select-common reveal/update path
+FUN_800991C4 -> alternate select-common reveal/update path
+```
+
+The OpenGL host now stores `select_cmn.bin` on `HostCSelectModule`, logs the common
+model package at CSelect startup, matches block 2 ZAB channels against block 0 ZMB
+objects, and caches visible block 0 ZMB primitive vertices for a host preview.
+
+The preview uses the recovered Czan transform path rather than host-local transform
+guesses:
+
+```text
+CzanModel_ReadZmbObjectLocalMatrix:
+  reads the object entry matrix at +0x30 and writes the translation column from
+  object +0x60/+0x64/+0x68.
+
+CzanModel_BuildZmbObjectWorldMatrices:
+  composes object local matrices through parent index +0x94, matching the
+  CzanModel_BuildRuntimeData -> CzanModel_UpdateObjectTransforms split.
+
+CzanModel_TransformPoint:
+  applies the 3x4 world matrix before the host preview stores each primitive vertex.
+```
+
+This still is not the final select_cmn renderer. The remaining model work is to move
+from cached preview primitives into the actual Czan draw-submit path:
+
+```text
+CzanModel_DrawVisibleObjects
+  -> CzanModel_DrawStandardPartTree / CzanModel_DrawType2PartTree
+  -> CzanModel_SubmitPartPrimitive / special/type2 submitters
+  -> material state, vertex attribute setup, texture binding, and primitive batches
+```

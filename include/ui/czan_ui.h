@@ -90,6 +90,7 @@ void CzanUiManager_SetChildObjectEnabled(
     int childObjectIndex,
     unsigned char enabled);
 void CzanUiManager_SetObjectGroupDrawEnabled(int uiManager, int objectGroupHandle, unsigned char drawEnabled);
+double CzanUiManager_GetObjectAnimationDuration(double fallbackDuration, int uiManager, int objectGroupHandle, int childObjectIndex, int animationIndex);
 void CzanUiManager_LinkObjectGroupToReferenceObject(
     int uiManager,
     int targetObjectGroupHandle,

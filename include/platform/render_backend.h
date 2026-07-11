@@ -15,6 +15,38 @@ void Platform_DrawTexturedQuad(
     int textureIndex
 );
 void Platform_DrawFilledRect(int x, int y, int z, int width, int height, const unsigned int *color, int flags);
+void Platform_DrawLine2D(int x0, int y0, int x1, int y1, const unsigned int *color);
+void Platform_DrawTriangle2D(
+    int x0,
+    int y0,
+    int x1,
+    int y1,
+    int x2,
+    int y2,
+    const unsigned int *color);
+void Platform_DrawTexturedTriangle2D(
+    int x0,
+    int y0,
+    float u0,
+    float v0,
+    int x1,
+    int y1,
+    float u1,
+    float v1,
+    int x2,
+    int y2,
+    float u2,
+    float v2,
+    void *textureHandle,
+    int textureIndex,
+    const unsigned int *color);
+void Platform_DrawTexturedTriangleStrip2D(
+    const int (*points)[2],
+    const float (*texcoords)[2],
+    const unsigned int *colors,
+    unsigned int vertexCount,
+    void *textureHandle,
+    int textureIndex);
 unsigned int Platform_CreateTextureFromTplResource(
     TextureManagerKnownFields *textureManager,
     void *resourceData,

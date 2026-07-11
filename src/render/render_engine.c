@@ -332,6 +332,54 @@ void DrawFilledRect(int x, int y, int z, int width, int height, const unsigned i
     Platform_DrawFilledRect(x, y, z, width, height, color, flags);
 }
 
+void DrawLine2D(int x0, int y0, int x1, int y1, const unsigned int *color) {
+    Platform_DrawLine2D(x0, y0, x1, y1, color);
+}
+
+void DrawTriangle2D(
+    int x0,
+    int y0,
+    int x1,
+    int y1,
+    int x2,
+    int y2,
+    const unsigned int *color) {
+    Platform_DrawTriangle2D(x0, y0, x1, y1, x2, y2, color);
+}
+
+void DrawTexturedTriangle2D(
+    int x0,
+    int y0,
+    float u0,
+    float v0,
+    int x1,
+    int y1,
+    float u1,
+    float v1,
+    int x2,
+    int y2,
+    float u2,
+    float v2,
+    void *textureHandle,
+    int textureIndex,
+    const unsigned int *color) {
+    Platform_DrawTexturedTriangle2D(
+        x0, y0, u0, v0,
+        x1, y1, u1, v1,
+        x2, y2, u2, v2,
+        textureHandle, textureIndex, color);
+}
+
+void DrawTexturedTriangleStrip2D(
+    const int (*points)[2],
+    const float (*texcoords)[2],
+    const unsigned int *colors,
+    unsigned int vertexCount,
+    void *textureHandle,
+    int textureIndex) {
+    Platform_DrawTexturedTriangleStrip2D(points, texcoords, colors, vertexCount, textureHandle, textureIndex);
+}
+
 void UiRootManager_LoadResource(int *uiRootManager, void *linkData) {
     /* 0x800FE548 links a WII UI-root resource and initializes the UI root manager.
        It creates Czan object groups from blocks 0..3 using the global Czan UI manager
@@ -339,6 +387,62 @@ void UiRootManager_LoadResource(int *uiRootManager, void *linkData) {
        creates five standalone TPL textures from blocks 9..13, and sets uiRootManager[0] = 1. */
     (void)uiRootManager;
     (void)linkData;
+}
+
+void UiEffectController_ResetOrStartFade(double duration, int *effectController) {
+    /* 0x800FB698 resets or starts a fade-like UI/effect controller transition.
+
+       If effectController +0x44 is -1, the original returns immediately. Positive
+       durations set +0x4C active and store the duration at +0x68. Zero/non-positive
+       durations clear active ids at +0x44/+0x58/+0x5C/+0x60, clear +0x4C, and reset
+       +0x64/+0x68. */
+    (void)duration;
+    (void)effectController;
+}
+
+void UiEffectController_StartMultiTargetFade(double duration, int *effectController, int primaryTarget, int secondaryTargetA, int secondaryTargetB) {
+    /* 0x800FB608 starts a fade/effect transition when the effect controller is
+       enabled (+0x40 != 0) and no primary target is active (+0x44 == -1).
+
+       It stores:
+       +0x44 = primaryTarget
+       +0x4C = 0
+       +0x58 = -1
+       +0x5C = secondaryTargetA
+       +0x60 = secondaryTargetB
+       +0x64 = 0.0f
+       +0x68 = duration */
+    (void)duration;
+    (void)effectController;
+    (void)primaryTarget;
+    (void)secondaryTargetA;
+    (void)secondaryTargetB;
+}
+
+void UiEffectController_StartSingleTargetFade(double duration, int *effectController, int primaryTarget, int secondaryTarget) {
+    /* 0x800FB64C starts the single-secondary-target fade/effect variant when the
+       effect controller is enabled and no primary target is active.
+
+       It stores:
+       +0x44 = primaryTarget
+       +0x4C = 0
+       +0x50 = 1
+       +0x58 = secondaryTarget
+       +0x5C/+0x60 = -1
+       +0x64 = 0.0f
+       +0x68 = duration */
+    (void)duration;
+    (void)effectController;
+    (void)primaryTarget;
+    (void)secondaryTarget;
+}
+
+int UiEffectController_GetState(int *effectController) {
+    /* 0x800FD3B8 returns the UI/effect controller state at +0x48. */
+    if (effectController == 0) {
+        return 0;
+    }
+    return effectController[0x12];
 }
 
 int UiRootManager_CreateReferenceObjectGroup(

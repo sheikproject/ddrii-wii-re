@@ -31,9 +31,10 @@ void CGame_PrepareSceneFromSelectedSetup(int *cgame) {
     /* 0x8003EE48 is a CGame setup/loading state machine sibling to 0x8003CDC4.
 
        It resets the same global managers and CGame subsystems at substate 0, then:
-       - if cgame +0x0B8 == -1, calls FUN_8003D1F0 and configures subsystem +0x3F0
-         directly, entering substate 3
-       - otherwise enters substate 2 and runs FUN_8003DC74 until it returns -1 or 1
+       - if cgame +0x0B8 == -1, calls CGame_BuildSceneSetupFromPlayerData and
+         configures subsystem +0x3F0 directly, entering substate 3
+       - otherwise enters substate 2 and runs CGame_UpdateSceneSetupSelection until
+         it returns -1 or 1
        - when ready, waits for the resource managers, then calls
          CGame_LoadSceneResourceManagers(cgame)
        - substate 0x0C sets cgame +0x08 = 3
@@ -41,6 +42,27 @@ void CGame_PrepareSceneFromSelectedSetup(int *cgame) {
        Compared with CGame_PrepareManagersAndResources, failure sets cgame +0x08 = 1,
        and ready completion sets cgame +0x08 = 3 instead of 2. */
     (void)cgame;
+}
+
+void CGame_BuildSceneSetupFromPlayerData(int *cgame) {
+    /* 0x8003D1F0 builds the scene/setup block directly from player/setup data when
+       cgame +0x0B8 is -1.
+
+       It is the direct path used by CGame_PrepareSceneFromSelectedSetup before
+       subsystem cgame +0x3F0 is configured through FUN_80118724. The sibling
+       interactive path is CGame_UpdateSceneSetupSelection. */
+    (void)cgame;
+}
+
+int CGame_UpdateSceneSetupSelection(int *cgame) {
+    /* 0x8003DC74 is the interactive/waiting scene setup path used when CGame cannot
+       build directly from player data.
+
+       It resolves selectable/setup state over multiple frames, returns -1 when the
+       scene setup should abort back to module state 1, and returns 1 when cgame
+       +0x0B8 is ready for FUN_80118724 and CGame_LoadSceneResourceManagers. */
+    (void)cgame;
+    return 0;
 }
 
 void CGame_LoadSceneResourceManagers(int *cgame) {
@@ -73,7 +95,7 @@ int CGame_UpdateStateMachine(int *cgame, int currentModuleId) {
        1 -> CGame_PrepareManagersAndResources
        2 -> CGame_PrepareSceneFromSelectedSetup
        3 -> CGame_PrepareActiveGameplayState
-       4 -> FUN_800430CC, likely exit/result/transition state
+       4 -> CGame_UpdateActiveGameplayTransitionState
        5 -> return cgame[0] as next module/state
 
        If the state changes, it resets cgame[3] to zero. */
@@ -91,6 +113,9 @@ int CGame_UpdateStateMachine(int *cgame, int currentModuleId) {
     else if (cgame[2] == 2) {
         CGame_PrepareSceneFromSelectedSetup(cgame);
     }
+    else if (cgame[2] == 4) {
+        CGame_UpdateActiveGameplayTransitionState(cgame);
+    }
     else if (cgame[2] == 5) {
         currentModuleId = cgame[0];
     }
@@ -106,15 +131,92 @@ void CGame_PrepareActiveGameplayState(int *cgame) {
     /* 0x800418F8 is the state-3 CGame setup/transition state machine.
 
        It resets a smaller subset of global managers/subsystems, then:
-       - if cgame +0x0B8 == -1, calls FUN_8003F24C and configures subsystem +0x3F0
-         through FUN_80118E54, entering substate 3
-       - otherwise enters substate 2 and waits for FUN_8003FEB0 to return 1
+       - if cgame +0x0B8 == -1, calls CGame_BuildActiveGameplaySetupFromPlayerData
+         and configures subsystem +0x3F0 through FUN_80118E54, entering substate 3
+       - otherwise enters substate 2 and waits for
+         CGame_UpdateActiveGameplaySetupSelection to return 1
        - once resource managers are ready, calls FUN_8003FBB0(cgame)
        - substate 0x0C sets cgame +0x08 = 4
 
        This is still setup/transition logic. FUN_8003FBB0 is the next likely owner-side
        function after setup completes. */
     (void)cgame;
+}
+
+void CGame_BuildActiveGameplaySetupFromPlayerData(int *cgame) {
+    /* 0x8003F24C builds the active gameplay setup block directly from player/setup
+       data when cgame +0x0B8 is -1.
+
+       It is the direct path used by CGame_PrepareActiveGameplayState before
+       subsystem cgame +0x3F0 is configured through FUN_80118E54. */
+    (void)cgame;
+}
+
+int CGame_UpdateActiveGameplaySetupSelection(int *cgame) {
+    /* 0x8003FEB0 is the interactive/options waiting path for active gameplay setup.
+
+       It resolves the active gameplay setup across frames, including selection/options
+       state and player/setup records. It returns -1 to abort back to scene setup and
+       returns 1 once cgame +0x0B8 is ready for FUN_80118E54 and
+       CGame_CreateActiveGameplayController. */
+    (void)cgame;
+    return 0;
+}
+
+void CGame_StartActiveGameplayControllerTransition(int *cgame) {
+    /* 0x8004205C starts the active gameplay controller transition after CGame has
+       created the controller at cgame +0x42C.
+
+       Confirmed behavior:
+       - derives a transition duration from cgame +0x11C through gLargeResourceManager
+       - calls active controller vtable +0x20, now named
+         ActiveGameplayControllerBase_StartTimedTransition, with the recovered tick/id
+       - if movie slot cgame +0x414 exists and MovieSlotHandle_HasPlaybackStarted is
+         false, starts playback through MovieSlotHandle_StartPlayback
+       - starts a manager/audio/UI transition through CGameTransitionManager_Start
+         using the table at DAT_8026E828 and cgame +0x10C
+       - updates subsystem cgame +0x428 through CGameTransitionSlot_Start
+       - sets cgame +0x424 = 1 */
+    (void)cgame;
+}
+
+void CGame_UpdateActiveGameplayTransitionState(int *cgame) {
+    /* 0x800430CC is CGame state 4, the active gameplay controller transition/update
+       state reached after CGame_PrepareActiveGameplayState completes.
+
+       The attached decompile shows this as a large state machine around the active
+       gameplay controller, UI root, movie playback readiness, input abort handling,
+       and transition completion. It owns the handoff out of active gameplay and is
+       the main CGame-level runtime state after the controller has been created. */
+    (void)cgame;
+}
+
+void CGameTransitionManager_Start(double duration, double speed, int *manager, int cueOrDelay, int spawnEffect) {
+    /* 0x800245A4 starts the manager-side transition used by
+       CGame_StartActiveGameplayControllerTransition.
+
+       Confirmed behavior:
+       - requires manager +0x448 to be nonzero
+       - looks up a transition record through FUN_800F3068(manager +0x44C, +0x450)
+       - enters a critical section and initializes timer/state fields at
+         +0x45C..+0x474
+       - converts duration/speed through FUN_8012A03C
+       - when spawnEffect is nonzero, starts a manager effect through FUN_8016B270
+         and stores the returned handle at +0x454 plus the duration at +0x458 */
+    (void)duration;
+    (void)speed;
+    (void)manager;
+    (void)cueOrDelay;
+    (void)spawnEffect;
+}
+
+void CGameTransitionSlot_Start(int *transitionSlot) {
+    /* 0x80125728 starts/arms the transition subsystem stored at cgame +0x428.
+
+       If transitionSlot +0x80 exists, it calls FUN_800F8DB0 on that object and marks
+       transitionSlot +0x84 = 1. This is the final small kick in
+       CGame_StartActiveGameplayControllerTransition. */
+    (void)transitionSlot;
 }
 
 void CGame_CreateActiveGameplayController(int *cgame) {
@@ -164,6 +266,21 @@ int ActiveGameplayControllerBase_Init(int *controller) {
     if (controller == 0) {
         return 0;
     }
+    return (int)(uintptr_t)controller;
+}
+
+int ActiveGameplayControllerBase_Destroy(int *controller, short releaseMode) {
+    /* 0x801125E8 destroys the base active gameplay controller.
+
+       Confirmed behavior:
+       - if controller is non-null, destroys the embedded subobject at controller
+         +0x68 through ActiveGameplayControllerSubobject_Destroy(..., -1)
+       - if releaseMode > 0, frees the controller from MemoryPool 0
+       - returns the original controller pointer */
+    if (controller == 0) {
+        return 0;
+    }
+    (void)releaseMode;
     return (int)(uintptr_t)controller;
 }
 
@@ -241,6 +358,79 @@ int ActiveGameplayControllerBase_GetEmbeddedSubobject(int *controller) {
         return 0;
     }
     return (int)(uintptr_t)(controller + 0x1a);
+}
+
+int ActiveGameplayControllerEventData_SampleCurrentEvent(int *eventData, int *outEvent, unsigned int category) {
+    /* 0x8011AB4C samples the current event record for one runtime category from
+       the controller event data object used at controller +0x64.
+
+       Confirmed behavior:
+       - uses eventData[3] as the current event/frame index
+       - dispatches category 0..10 through the parser table at PTR_LAB_802918B8
+       - succeeds only when the parser fills a nonnegative event id
+       - writes a 9-word result:
+         [0] range value from ActiveGameplayControllerEventData_ResolveRangeValue
+         [1] secondary range value from
+             ActiveGameplayControllerEventData_ResolveSecondaryRangeValue
+         [2] parsed event id
+         [3..7] parsed event payload/timing floats/words
+         [8] whether the current index matches one of the range boundary markers
+
+       This is the direct/current sample used by the active controller runtime
+       channel code. */
+    (void)eventData;
+    (void)outEvent;
+    (void)category;
+    return 0;
+}
+
+int ActiveGameplayControllerEventData_FindNearbyEvent(
+    int *eventData,
+    int *outEvent,
+    unsigned int category,
+    int direction,
+    int skipCurrent) {
+    /* 0x8011AD00 searches forward or backward from the current event index until
+       the parser for category finds a valid event.
+
+       Confirmed behavior:
+       - direction < 0 searches backward, otherwise forward
+       - skipCurrent starts from currentIndex +/- step
+       - decrements skipCurrent while valid events are found, allowing callers to
+         request the next/previous matching event
+       - emits the same 9-word result layout as
+         ActiveGameplayControllerEventData_SampleCurrentEvent */
+    (void)eventData;
+    (void)outEvent;
+    (void)category;
+    (void)direction;
+    (void)skipCurrent;
+    return 0;
+}
+
+int ActiveGameplayControllerEventData_ResolveRangeValue(int *eventData, int frameOrIndex) {
+    /* 0x8011AF30 resolves a value from the event data's 0x11 range table.
+
+       When frameOrIndex is -1, it uses eventData[3] as the frame/index. It then
+       scans paired ushort ranges at +0x10/+0x12 and +0x18/+0x1A, returning the
+       corresponding word from +0x14/+0x1C. If no range contains the frame/index,
+       it returns zero. */
+    (void)eventData;
+    (void)frameOrIndex;
+    return 0;
+}
+
+int ActiveGameplayControllerEventData_ResolveSecondaryRangeValue(int *eventData, int frameOrIndex) {
+    /* 0x8011B030 resolves the secondary value from the same 0x11 paired range table
+       used by ActiveGameplayControllerEventData_ResolveRangeValue.
+
+       When frameOrIndex is -1, it uses eventData[3]. It scans paired ushort ranges
+       at +0x10/+0x12 and +0x18/+0x1A, computes the matching range slot index, then
+       returns the corresponding word from eventData +0x120 + slotIndex*4. If no
+       range matches, the original falls back to slot index zero. */
+    (void)eventData;
+    (void)frameOrIndex;
+    return 0;
 }
 
 int ActiveGameplayControllerSubobject_ResolveModeTransitionSlot(
@@ -326,7 +516,8 @@ void ActiveGameplayControllerBase_UpdateTimelineMarker(int *controller) {
 
        Confirmed behavior:
        - when setup flags permit, asks the controller data at +0x64 for category-5
-         marker data through FUN_8011AB4C/FUN_8011AD00
+         marker data through ActiveGameplayControllerEventData_SampleCurrentEvent /
+         ActiveGameplayControllerEventData_FindNearbyEvent
        - stores the selected marker id at controller +0x2AB4
        - falls back to the current base timeline value at *(controller[0] +0x0C)
        - in forced/disabled cases uses a large sentinel value 100000 and may force
@@ -500,6 +691,49 @@ void ActiveGameplayControllerBase_ResetTransitionMovieBindings(int *controller) 
     (void)controller;
 }
 
+void ActiveGameplayControllerBase_TickRuntime(int *controller, int transitionPass) {
+    /* 0x801142C4 is the active gameplay controller runtime tick after setup.
+
+       Ghidra may show void(void) because FUN_8012A150 recovers arguments. The second
+       recovered value acts like a pass/transition flag; the main update work runs for
+       pass zero while controller +0x0C is active and the transition duration at +0x28
+       has elapsed.
+
+       Confirmed behavior:
+       - copies controller +0x2AA0 size 0x2C as previous event state
+       - advances controller time through gLargeResourceManager and writes +0x10/+0x14
+       - advances controller event data at +0x64
+       - samples category 4 events to select/apply CtsStageObj model slots at
+         controller +0x54
+       - samples categories 0 and 1 to update subsystem controller +0x60 through
+         FUN_8006153C / FUN_80061848
+       - applies runtime event channels when setup flags allow
+       - finishes by calling ActiveGameplayControllerBase_UpdateTimelineMarker */
+    (void)controller;
+    (void)transitionPass;
+}
+
+void ActiveGameplayControllerBase_LateUpdateTransforms(int *controller, int skipRuntimeAdvance) {
+    /* 0x80114D18 is a later active controller update pass that pushes matrices and
+       advances presentation/preset state.
+
+       Confirmed behavior:
+       - copies the current model-owner matrix from controller +0x54
+       - asks the controller +0x54 UI/model subobject for another matrix through a
+         vtable +0x18 call
+       - pushes those matrices to the bank-5/current-mode model owner at controller
+         +0x5C through CzanModelManager_UpdateCurrentModeMatrices
+       - when skipRuntimeAdvance is zero and setup flags allow, advances five
+         0x478-byte presentation records at controller +0x1428
+       - updates the currently selected 0x478-byte mode record through FUN_80114FA4
+       - when controller +0x1424 == 4, advances the visual preset table at +0x2A94
+         and mirrors selected ids into subsystem controller +0x60
+       - calls FUN_80114BF0 and may restart UI/effect fades when large-resource state
+         and controller +0x08 conditions match */
+    (void)controller;
+    (void)skipRuntimeAdvance;
+}
+
 void ActiveGameplayControllerBase_ApplyVisualPreset(int *controller, int presetA, int presetB, int presetGroup) {
     /* 0x80115B80 applies one controller visual/stage preset selected by two preset
        indices and a group.
@@ -539,4 +773,16 @@ int ActiveGameplayController_Create(unsigned int characterOrSetupId) {
        DAT_80290B80. */
     (void)characterOrSetupId;
     return 0;
+}
+
+int ActiveGameplayControllerSubobject_Destroy(int *subobject, short releaseMode) {
+    /* 0x80129280 destroys the small embedded subobject used at controller +0x68.
+
+       The function only frees the subobject when releaseMode > 0, which is why
+       ActiveGameplayControllerBase_Destroy calls it with -1 for the embedded case. */
+    if (subobject == 0) {
+        return 0;
+    }
+    (void)releaseMode;
+    return (int)(uintptr_t)subobject;
 }

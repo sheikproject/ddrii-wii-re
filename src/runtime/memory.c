@@ -69,6 +69,19 @@ void *MemoryPool_AllocateAligned(int allocator, int size, int alignment) {
     return 0;
 }
 
+void *CopyMemoryOverlapSafe(void *dest, const void *src, unsigned int size) {
+    /* 0x80004000 is the optimized overlap-safe byte copy helper.
+
+       The original chooses forward or backward copy depending on dest/src ordering,
+       has aligned 4/8-byte fast paths for medium/large copies, and handles overlap
+       like memmove rather than memcpy. It returns the destination pointer. */
+    if (dest == 0 || src == 0 || size == 0) {
+        return dest;
+    }
+
+    return memmove(dest, src, (size_t)size);
+}
+
 void *ClearMemory(void *dest, int value, int size) {
     /* 0x80004350 wraps FUN_8000429C and returns the original destination pointer.
        Call sites use it like memset(dest, value, size). */

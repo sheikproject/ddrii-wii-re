@@ -39,6 +39,20 @@ void Matrix34_Copy(float *dest, const float *src) {
     }
 }
 
+void Matrix44_Copy(float *dest, const float *src) {
+    int i;
+
+    /* 0x801459FC wraps FUN_801B0E00(src, dest). The leaf copies 16 words, so keep it
+       separate from the 3x4 matrix helpers. */
+    if (dest == 0 || src == 0) {
+        return;
+    }
+
+    for (i = 0; i < 16; i++) {
+        dest[i] = src[i];
+    }
+}
+
 void Matrix34_Multiply(float *dest, const float *lhs, const float *rhs) {
     /* 0x80145A0C is a tiny wrapper around FUN_801B0190(lhs, rhs, dest). Callers use
        it to compose parent/object 3x4 transforms. */

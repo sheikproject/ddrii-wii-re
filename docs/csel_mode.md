@@ -3509,6 +3509,13 @@ FUN_8011058C -> CSelModeEntry_AddChildUiObject
   If objectId != -1, calls CzanUiManager_CloneObjectGroup(entry->uiManager), stores the returned handle
   in the same handle array, then increments objectHandleCount.
 
+FUN_801106C4 -> CSelModeEntry_ResetObjectAnimation
+  Forwards the selected object handle to the Czan UI manager reset/clear-animation helper.
+
+FUN_801105FC -> CSelModeEntry_StartObjectAnimation
+  Configures mode/playback flags, starts the selected animation with a start frame,
+  and caches the animation id at entry +0x24 + objectSlot*4.
+
 FUN_80110754 -> CSelModeEntry_SetAnimationOrLayout
   If animationId == -1, calls FUN_801751B8(entry->uiManager, handle, animationData).
   Otherwise calls FUN_80175240(entry->uiManager, handle).
@@ -3996,7 +4003,7 @@ for groupIndex in 0..5:
 
   childCount = FUN_80175FB8(global Czan UI manager, group)
   for childIndex in 0..childCount-1:
-    childObject = FUN_801761C4(global Czan UI manager, group, childIndex)
+    childObject = CzanUiManager_GetChildObjectInstance(global Czan UI manager, group, childIndex)
     objectId = *(childObject + 0x160)
     *(subManager + groupIndex * 0x80 + 0x17 + objectId) = childIndex
 
@@ -4642,6 +4649,14 @@ Behavior:
 
 The animation interpreter calls this after color opcodes `0x18`, `0x25..0x33`.
 
+`FUN_80172F30` writes one or all four RGBA color blocks on a `CzanUiObjectInstance`,
+marks color state dirty at `+0x182/+0x183`, then calls
+`CzanUiObjectInstance_ApplyColorBlocks`. Suggested name:
+
+```text
+CzanUiObjectInstance_SetColorBlocks
+```
+
 ## Czan Sprite Object Init
 
 `FUN_8016BA8C` initializes the `0x1D8`-byte sprite/texture object attached to a
@@ -4992,8 +5007,8 @@ Confirmed behavior:
      selectCommon +0x250.
 
 4. After binding, chooses one of two reveal/update paths:
-   - selectCommon +0x368 == 1 -> FUN_80098FA0(selectCommon, 1)
-   - otherwise                -> FUN_800991C4(selectCommon, 0)
+   - selectCommon +0x368 == 1 -> CSelectCommon_RevealMovieEntriesPrimary(selectCommon, 1)
+   - otherwise                -> CSelectCommon_RevealMovieEntriesAlternate(selectCommon, 0)
 
 5. If selectCommon +0x364 == 1, releases/hides the bound movie object and clears
    the movie/background state flags.
@@ -5020,12 +5035,36 @@ Important follow-up callees:
 
 ```text
 MovieSlotHandle_LoadResource -> movie manager load/assign path
-FUN_800250B0 -> movie load/readiness poll
+MovieSlotHandle_HasPlaybackStarted -> movie playback-started poll
 MovieSlotHandle_StartPlayback -> start/fade movie playback
 MovieSlotHandle_GetClaimedObject -> get active movie object/state
 FUN_80025104 -> release/stop movie binding
-FUN_80098FA0 -> one select-common reveal/update path
-FUN_800991C4 -> alternate select-common reveal/update path
+CSelectCommon_RevealMovieEntriesPrimary -> one select-common reveal/update path
+CSelectCommon_RevealMovieEntriesAlternate -> alternate select-common reveal/update path
+```
+
+`FUN_80098FA0` reveals/transitions the two movie-backed `CSelModeEntry` objects using
+the primary timing/layout path. Suggested name:
+
+```text
+CSelectCommon_RevealMovieEntriesPrimary
+```
+
+`FUN_800991C4` performs the alternate reveal path, using layout ids `1` and `3` for
+the two mirrored entries. Suggested name:
+
+```text
+CSelectCommon_RevealMovieEntriesAlternate
+```
+
+The reveal helpers use these lower UI helpers:
+
+```text
+FUN_801106C4 -> CSelModeEntry_ResetObjectAnimation
+FUN_801105FC -> CSelModeEntry_StartObjectAnimation
+FUN_80174FA4 -> CzanUiManager_ResetObjectGroupAnimationTime
+FUN_801761C4 -> CzanUiManager_GetChildObjectInstance
+FUN_80172F30 -> CzanUiObjectInstance_SetColorBlocks
 ```
 
 The OpenGL host now stores `select_cmn.bin` on `HostCSelectModule`, logs the common

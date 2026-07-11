@@ -404,11 +404,12 @@ void CSelectCommon_UpdateMovieBackground(int *selectCommon, int skipInitialUpdat
 
        Important follow-up callees from the original:
        - MovieSlotHandle_LoadResource: load/assign THP movie path.
-       - FUN_800250B0: poll movie load/readiness.
+       - MovieSlotHandle_HasPlaybackStarted: poll movie playback-started bit.
        - MovieSlotHandle_StartPlayback: start/fade movie playback.
        - MovieSlotHandle_GetClaimedObject: get active movie object/state.
        - FUN_80025104: release/stop movie binding.
-       - FUN_80098FA0 / FUN_800991C4: reveal/transition the two menu entry objects
+       - CSelectCommon_RevealMovieEntriesPrimary /
+         CSelectCommon_RevealMovieEntriesAlternate: reveal/transition the two menu entry objects
          after the movie object has been attached. */
     (void)skipInitialUpdate;
     (void)allowMovieStart;
@@ -416,6 +417,37 @@ void CSelectCommon_UpdateMovieBackground(int *selectCommon, int skipInitialUpdat
     if (selectCommon == 0) {
         return;
     }
+}
+
+void CSelectCommon_RevealMovieEntriesPrimary(int *selectCommon, int useImmediateTiming) {
+    /* 0x80098FA0 reveals/transitions the two movie-backed CSelModeEntry objects
+       after CSelectCommon_UpdateMovieBackground has attached the movie object.
+
+       Confirmed behavior:
+       - if selectCommon +0x350 is set, disables object 0 in entry +0x254, applies
+         timing/layout through CSelModeEntry_ResetObjectAnimation and
+         CSelModeEntry_StartObjectAnimation, runs the entry vtable method at +0x14,
+         then binds/updates the UI object through the Czan UI manager at +0x250 and
+         applies a 10-frame alpha/color transition
+       - repeats the same flow for selectCommon +0x354 and entry +0x2A4
+       - useImmediateTiming selects between the shorter FLOAT_802E883C timing and
+         the alternate FLOAT_802E8850 timing/layout mode */
+    (void)selectCommon;
+    (void)useImmediateTiming;
+}
+
+void CSelectCommon_RevealMovieEntriesAlternate(int *selectCommon, int useImmediateTiming) {
+    /* 0x800991C4 is the alternate movie-entry reveal path.
+
+       It mirrors CSelectCommon_RevealMovieEntriesPrimary but uses the alternate
+       layout/animation ids for the two entries:
+       - entry +0x254 uses animation/layout id 1
+       - entry +0x2A4 uses animation/layout id 3
+
+       This is selected by CSelectCommon_UpdateMovieBackground when +0x368 is not
+       the primary reveal mode. */
+    (void)selectCommon;
+    (void)useImmediateTiming;
 }
 
 int CSelModeEntry_Init(void *entry) {
@@ -481,6 +513,39 @@ void CSelModeEntry_SetAnimationOrLayout(void *entry, int objectSlot, int animati
     /* 0x80110754 applies animation/layout data to one stored object handle.
        animationId == -1 calls FUN_801751B8(uiManager, handle, animationData);
        otherwise it calls FUN_80175240(uiManager, handle). */
+}
+
+void CSelModeEntry_ResetObjectAnimation(void *entry, int objectSlot) {
+    /* 0x801106C4 forwards the selected CSelModeEntry object handle to the Czan UI
+       manager reset/clear-animation helper.
+
+       Original behavior:
+       CzanUiManager_ResetObjectAnimation(entry +0x3C, entry->objectHandles[objectSlot]) */
+    (void)entry;
+    (void)objectSlot;
+}
+
+void CSelModeEntry_StartObjectAnimation(
+    double startFrame,
+    void *entry,
+    int objectSlot,
+    int animationId,
+    unsigned char mode,
+    int playbackMode) {
+    /* 0x801105FC starts/configures one CSelModeEntry object animation when the
+       object handle is valid.
+
+       Confirmed behavior:
+       - object handle comes from entry +0x14 + objectSlot*4
+       - calls UI-manager helpers at 0x80174F60 and 0x80174FE0 with mode/playbackMode
+       - calls 0x80174E2C(startFrame, uiManager, objectHandle, animationId)
+       - caches animationId at entry +0x24 + objectSlot*4 */
+    (void)startFrame;
+    (void)entry;
+    (void)objectSlot;
+    (void)animationId;
+    (void)mode;
+    (void)playbackMode;
 }
 
 void CSelModeEntry_PlayObject(void *entry, int objectSlot) {
@@ -830,6 +895,30 @@ double CzanUiManager_GetObjectAnimationDuration(double fallbackDuration, int uiM
     return fallbackDuration;
 }
 
+void CzanUiManager_ResetObjectGroupAnimationTime(double frame, int uiManager, int objectGroupHandle) {
+    /* 0x80174FA4 writes frame to +0x178 on every child CzanUiObjectInstance in an
+       object group. CSelModeEntry_ResetObjectAnimation uses this before starting
+       the movie-backed entry reveal animation. */
+    (void)frame;
+    (void)uiManager;
+    (void)objectGroupHandle;
+}
+
+int CzanUiManager_GetChildObjectInstance(int uiManager, int objectGroupHandle, int childObjectIndex) {
+    /* 0x801761C4 resolves one child CzanUiObjectInstance from an object group.
+
+       Original behavior:
+       return *( *( *(uiManager +4) + objectGroupHandle*0x28 +0x20 ) + childObjectIndex*4 )
+
+       It is used by the select-common movie reveal path after getting a
+       CSelModeEntry object handle, then the returned child instance receives color
+       transition data. */
+    (void)uiManager;
+    (void)objectGroupHandle;
+    (void)childObjectIndex;
+    return 0;
+}
+
 void CzanUiObjectInstance_PreplayInitialAnimation(int objectInstance) {
     CzanUiObjectInstanceKnownFields *instance = (CzanUiObjectInstanceKnownFields *)objectInstance;
 
@@ -882,6 +971,23 @@ void CzanUiObjectInstance_ApplyColorBlocks(int objectInstance) {
        Czan UI object instance. Flags at +0x182/+0x183 select alternate RGB and
        scaled alpha behavior. */
     if (instance == 0) {
+        return;
+    }
+}
+
+void CzanUiObjectInstance_SetColorBlocks(int objectInstance, int colorSlot, unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
+    /* 0x80172F30 writes RGBA color bytes to one or all four color blocks on a
+       CzanUiObjectInstance, marks color state dirty at +0x182/+0x183, then calls
+       CzanUiObjectInstance_ApplyColorBlocks.
+
+       colorSlot == -1 writes the same RGBA to all four blocks at +0x134..+0x143.
+       Otherwise it writes only the selected 4-byte block. */
+    (void)colorSlot;
+    (void)r;
+    (void)g;
+    (void)b;
+    (void)a;
+    if (objectInstance == 0) {
         return;
     }
 }

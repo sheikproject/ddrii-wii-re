@@ -3,6 +3,7 @@
 
 void Matrix34_SetIdentity(float *matrix34);
 void Matrix34_Copy(float *dest, const float *src);
+void Matrix44_Copy(float *dest, const float *src);
 void Matrix34_Multiply(float *dest, const float *lhs, const float *rhs);
 void Matrix34_GetTranslation(float *outVec3, const float *matrix34);
 void Matrix34_SetTranslation(float *matrix34, const float *vec3);

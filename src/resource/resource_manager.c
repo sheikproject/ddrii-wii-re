@@ -207,7 +207,7 @@ void MovieSlotHandle_SetObjectEnabled(int *slotHandle, int slotIndex, int enable
 
        Original flow:
        - if slotHandle[0] exists, fetch ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotIndex)
-       - if the slot object exists, call FUN_80190440(slotObject +0x114, enabled)
+       - if the slot object exists, call CzanMovieObjChild_SetEnabled(slotObject +0x114, enabled)
 
        This is the small on/off switch used by bank-5/movie binding mode changes. */
     (void)slotHandle;
@@ -231,15 +231,29 @@ void MovieSlotHandle_StartPlayback(int *slotHandle, int slotIndex, int enabled) 
 
        Original flow:
        - fetch ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotIndex)
-       - call FUN_80185150(slotObject)
+       - call CzanMovieObj_ClearPlaybackState(slotObject)
        - clamp the input scalar to the movie fade/start range and store it at +0x150
-       - call FUN_80184FE8(slotObject, enabled, 0)
+       - call CzanMovieObj_StartPlayback(slotObject, enabled, 0)
 
        The common callers pass 1.0f as the scalar, gManager_802E70A8 as the handle,
        and an enable flag chosen from the active-controller movie category. */
     (void)slotHandle;
     (void)slotIndex;
     (void)enabled;
+}
+
+int MovieSlotHandle_HasPlaybackStarted(int *slotHandle, int slotIndex) {
+    /* 0x800250B0 polls bit 0x400 on a claimed CzanMovieObj slot.
+
+       CzanMovieObj_StartPlayback sets this bit after updating playback state, so this
+       wrapper is the small movie-background readiness/start poll used by the select
+       common movie path. */
+    (void)slotIndex;
+    if (slotHandle == 0 || slotHandle[0] == 0) {
+        return 0;
+    }
+
+    return 0;
 }
 
 int *MovieSlotHandle_GetClaimedObject(int *slotHandle, int slotIndex) {
@@ -343,6 +357,54 @@ void ActiveControllerMovieBindings_SetMode(int *movieBindings, int mode) {
     (void)mode;
 }
 
+unsigned char ActiveControllerMovieBindings_GetVisibleModeIndex(int *movieBindings) {
+    /* 0x80055008 resolves which bank-5/movie mode should be considered visible.
+
+       Confirmed behavior:
+       - starts from movieBindings +0x2D, the current mode byte
+       - when transition state +0xB0C4 is 3, may return +0x2E, the previous mode byte
+       - uses transition flags +0xE6E8/+0xB37C and timer +0xB0BC/+0xB0C0 to decide
+         whether the old mode is still effectively visible */
+    if (movieBindings == 0) {
+        return 0;
+    }
+    return *(unsigned char *)((unsigned char *)movieBindings + 0x2d);
+}
+
+void ActiveControllerMovieBindings_UpdateCategoryVisibility(int *movieBindings, int forceAllVisible) {
+    /* 0x80055A94 enables/disables the claimed movie objects for the active
+       controller's bank-5 category slots.
+
+       Confirmed behavior:
+       - resolves the visible mode through ActiveControllerMovieBindings_GetVisibleModeIndex
+       - if forceAllVisible is nonzero, enables every valid category slot
+       - otherwise, while movieBindings +0xB36C is clear and mode +0xB360 is 4,
+         disables the currently visible category slot and enables the others
+       - all toggles go through MovieSlotHandle_SetObjectEnabled(gManager_802E70A8, slot, enabled)
+
+       This is a visibility mux for already claimed THP/movie slots; it does not load
+       or start playback. */
+    (void)movieBindings;
+    (void)forceAllVisible;
+}
+
+void ActiveControllerMovieBindings_SetTransitionFlagAndUpdateVisibility(
+    int *movieBindings,
+    int forceAllVisible,
+    int transitionFlag) {
+    /* 0x80055084 stores the global transition/visibility flag at +0xB36C, then calls
+       ActiveControllerMovieBindings_UpdateCategoryVisibility.
+
+       The middle argument is passed through to the visibility update path in the
+       original calling convention even though Ghidra may lose it around the runtime
+       context helper. */
+    (void)forceAllVisible;
+    if (movieBindings == 0) {
+        return;
+    }
+    *(int *)((unsigned char *)movieBindings + 0xb36c) = transitionFlag;
+}
+
 void ActiveControllerMovieBindings_LoadCategoryMovie(int *movieBindings, unsigned int category) {
     /* 0x80055590 chooses and binds the THP movie path for one active-controller
        background category.
@@ -438,6 +500,38 @@ void CzanMovieObj_Reset(int *movieObj) {
     }
 }
 
+void CzanMovieObj_ClearPlaybackState(int *movieObj) {
+    /* 0x80185150 clears the transient playback/subsystem state on an active
+       CzanMovieObj without rebinding a resource or reinitializing defaults.
+
+       It shares the flag-clearing/release block at the start of CzanMovieObj_Reset:
+       when +0x230 bit 1 is set, it releases the child object/audio/progressive
+       subsystems guarded by bits 0x40000, 0x10000, and 0x20000, then clears
+       +0x234/+0x238/+0x23C/+0x240 and masks +0x230 with 0xFFFFC3FF. */
+    if (movieObj == 0) {
+        return;
+    }
+}
+
+void CzanMovieObj_StartPlayback(int *movieObj, int enabled, int startParam) {
+    /* 0x80184FE8 starts playback on an already-loaded CzanMovieObj.
+
+       Confirmed behavior:
+       - requires +0x230 bit 0 to be set
+       - clears transient playback state through the same block as
+         CzanMovieObj_ClearPlaybackState
+       - enters a critical section
+       - clears +0x238/+0x23C and stores startParam at +0x234
+       - enabled != 0 sets +0x230 bit 0x800; enabled == 0 clears it
+       - if +0x230 bit 1 is already set, calls FUN_80185230(movieObj)
+       - sets +0x230 bit 0x400 as the playback-started/requested bit */
+    (void)enabled;
+    (void)startParam;
+    if (movieObj == 0) {
+        return;
+    }
+}
+
 void CzanMovieObj_LoadResource(int *movieObj, int resourceOrPayload) {
     /* 0x801844E8 performs the same reset as CzanMovieObj_Reset, then binds a new
        resource/payload.
@@ -449,6 +543,20 @@ void CzanMovieObj_LoadResource(int *movieObj, int resourceOrPayload) {
        - calls FUN_8019CE38(movieObj +0x08) */
     (void)resourceOrPayload;
     if (movieObj == 0) {
+        return;
+    }
+}
+
+void CzanMovieObjChild_SetEnabled(int *movieChild, int enabled) {
+    /* 0x80190440 toggles bit 0x200 on the movie object's child/object record at
+       slot +0x114. MovieSlotHandle_SetObjectEnabled reaches it after resolving a
+       claimed CzanMovieObj slot.
+
+       Original behavior is protected by Runtime_EnterCriticalSection:
+       - enabled == 0 clears bit 0x200 when present
+       - enabled != 0 sets bit 0x200 */
+    (void)enabled;
+    if (movieChild == 0) {
         return;
     }
 }

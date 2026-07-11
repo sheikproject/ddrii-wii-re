@@ -346,18 +346,64 @@ int CtsStageObjSlot_IsBusy(float *slot) {
     return 1;
 }
 
+void CtsStageObjSlot_ApplySelectedDescriptorTransform(int *slot) {
+    /* 0x8005CB94 selects the active descriptor for the current CtsStageObj slot
+       state and applies its transform into the slot runtime matrix/vector fields.
+
+       Confirmed behavior:
+       - picks a descriptor from the normal descriptor table at +0x164/+0x168 when
+         +0x114 is zero
+       - otherwise uses the state-4 descriptor block at +0x180
+       - when +0x150 is one, uses the special descriptor at +0x1FC
+       - if there is no valid descriptor or the slot state is not 1, installs default
+         axes/vectors from DAT_80271678..DAT_802716A4
+       - otherwise composes descriptor +0x48/+0x54/+0x68 data with the slot offset
+         at +0x68 and stores the resulting transform at +0x10/+0x40
+       - finishes by setting slot +0x80 = 1 */
+    (void)slot;
+}
+
+void CtsStageObjSlot_InitState5Transform(int *slot) {
+    /* 0x8005CE7C initializes the CtsStageObj slot transform used by state 5.
+
+       The original builds a small orientation matrix from constant vectors/scalars,
+       writes a base vector at slot +0x40, composes the matrix into slot +0x10, stores
+       FLOAT_802E8534 at +0x4C, and marks slot +0x118 = 1. */
+    (void)slot;
+}
+
+int CtsStageObjSlot_BeginSpecialDescriptor(int *slot) {
+    /* 0x8005C4AC starts the special descriptor path when slot +0x144 is positive.
+
+       Original behavior:
+       - set slot +0x154 = 1
+       - if slot +0x150 is zero, set +0x150 = 1
+       - activate descriptor at +0x1FC using entry count/index at +0x14C
+       - return 1 only when that activation path ran */
+    (void)slot;
+    return 0;
+}
+
+void CtsStageObjSlot_EndSpecialDescriptor(int *slot) {
+    /* 0x8005C50C ends the special descriptor path.
+
+       If slot +0x158 is zero, it clears slot +0x150, then always clears +0x154. */
+    (void)slot;
+}
+
 void CtsStageObjSlot_SetState(int *slot, int state) {
     /* 0x8005D0E8 changes the CtsStageObj slot state stored at slot +0x80.
 
        Confirmed states:
        - 0: clear slot +0x80
-       - 1: run FUN_8005CB94 transition/setup helper
-       - 2: if current state is 0 or 4, run FUN_8005CB94, then set +0x80 = 2
-       - 3: run FUN_8005CB94, then set +0x80 = 3
+       - 1: run CtsStageObjSlot_ApplySelectedDescriptorTransform
+       - 2: if current state is 0 or 4, run CtsStageObjSlot_ApplySelectedDescriptorTransform,
+            then set +0x80 = 2
+       - 3: run CtsStageObjSlot_ApplySelectedDescriptorTransform, then set +0x80 = 3
        - 4: set +0x80 = 4, activate descriptor table at +0x164, clear +0x64,
             set +0x114 = 1
-       - 5: ensure helper/state at +0x118 exists through FUN_8005CE7C, set +0x80 = 5,
-            set +0x11C = 1
+       - 5: ensure helper/state at +0x118 exists through
+            CtsStageObjSlot_InitState5Transform, set +0x80 = 5, set +0x11C = 1
        - 6: set +0x80 = 6
 
        ActiveGameplayControllerBase_UpdateTimelineMarker uses state 6 as a forced

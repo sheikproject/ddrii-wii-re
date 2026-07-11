@@ -49,11 +49,21 @@ void CSelMode_Update(void);
 void CSelMode_SetInitialSelectedMode(void *cselMode);
 void CSelectCommon_LoadResource(int *selectCommon, void *linkData);
 void CSelectCommon_UpdateMovieBackground(int *selectCommon, int skipInitialUpdate, int allowMovieStart, int forceInitialBind);
+void CSelectCommon_RevealMovieEntriesPrimary(int *selectCommon, int useImmediateTiming);
+void CSelectCommon_RevealMovieEntriesAlternate(int *selectCommon, int useImmediateTiming);
 int CSelModeEntry_Init(void *entry);
 int CSelModeEntry_Update(void *entry, short activeCountOrFlag);
 int CSelModeEntry_AddUiObject(void *entry, int linkBlock);
 int CSelModeEntry_AddChildUiObject(void *entry, int objectId);
 void CSelModeEntry_SetAnimationOrLayout(void *entry, int objectSlot, int animationId, int animationData);
+void CSelModeEntry_ResetObjectAnimation(void *entry, int objectSlot);
+void CSelModeEntry_StartObjectAnimation(
+    double startFrame,
+    void *entry,
+    int objectSlot,
+    int animationId,
+    unsigned char mode,
+    int playbackMode);
 void CSelModeEntry_PlayObject(void *entry, int objectSlot);
 void CSelModeEntry_SetTransformTriplet(void *entry, const int *values);
 void CSelMode_SetHostLinkResourceSize(unsigned int resourceSize);

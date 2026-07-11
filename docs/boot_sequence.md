@@ -258,7 +258,7 @@ Confirmed state map from `cgame[2]`:
 1 -> CGame_PrepareManagersAndResources(cgame)
 2 -> CGame_PrepareSceneFromSelectedSetup(cgame)
 3 -> CGame_PrepareActiveGameplayState(cgame)
-4 -> FUN_800430CC(cgame)
+4 -> CGame_UpdateActiveGameplayTransitionState(cgame)
 5 -> return cgame[0] as the next module/state
 ```
 
@@ -270,7 +270,7 @@ The next likely per-frame/render targets are therefore:
 
 ```text
 FUN_800418F8  -> state 3
-FUN_800430CC  -> state 4
+CGame_UpdateActiveGameplayTransitionState -> state 4
 ```
 
 `FUN_800418F8` is the state-3 setup/transition state machine. Suggested name:
@@ -288,14 +288,14 @@ Confirmed behavior:
   reset cgame +0x428 and optional cgame +0x42C
   reset subsystems cgame +0x400 and cgame +0x3F0
   if cgame +0x0B8 == -1:
-    FUN_8003F24C(cgame)
+    CGame_BuildActiveGameplaySetupFromPlayerData(cgame)
     FUN_80118E54(cgame +0x3F0, cgame +0x0B8)
     substate = 3
   else:
     substate = 2
 
 2:
-  result = FUN_8003FEB0(cgame)
+  result = CGame_UpdateActiveGameplaySetupSelection(cgame)
   if result == -1:
     cgame +0x08 = 2
   else if result == 1:
@@ -446,6 +446,22 @@ This constructor is ownership/default-state setup. It does not load the menu
 background, THP movies, or ZMB/ZAB data directly. The boot/runtime path still needs
 the `PTR_PTR_802BEF00` methods after construction, starting with setup at vtable
 `+0x0C`.
+
+`FUN_801125E8` destroys the base active gameplay controller. Suggested name:
+
+```text
+ActiveGameplayControllerBase_Destroy
+```
+
+It destroys the embedded controller subobject at `controller +0x68` through
+`ActiveGameplayControllerSubobject_Destroy(..., -1)`, then frees the controller only
+when the release mode is positive.
+
+`FUN_80129280` is the matching embedded-subobject destroy/free helper. Suggested name:
+
+```text
+ActiveGameplayControllerSubobject_Destroy
+```
 
 The `PTR_PTR_802BEF00` vtable is now the next target. From
 `CGame_CreateActiveGameplayController`, we already know:
@@ -647,7 +663,7 @@ FUN_800624C4(*(controller +0x60))
 
 if controller +0x64 exists:
   derive timing scale from gManager_802E70A4
-  sample channel/state data through FUN_8011AD00
+  sample channel/state data through ActiveGameplayControllerEventData_FindNearbyEvent
   apply it to subsystem controller +0x60 through FUN_8006153C and FUN_80061848
   when setup flags allow, calls ActiveGameplayControllerBase_ApplyRuntimeVisualState
   and ActiveGameplayControllerBase_ApplyRuntimeEventChannels
@@ -680,7 +696,9 @@ Confirmed behavior:
 
 ```text
 if setup flags permit:
-  query category-5 marker data from controller +0x64 through FUN_8011AB4C/FUN_8011AD00
+  query category-5 marker data from controller +0x64 through
+  ActiveGameplayControllerEventData_SampleCurrentEvent /
+  ActiveGameplayControllerEventData_FindNearbyEvent
   store the marker id at controller +0x2AB4
   otherwise fall back to *(controller[0] +0x0C)
 else:
@@ -717,6 +735,79 @@ Confirmed channel categories:
 
 When the selected event group changes and `controller +0x5C` exists, the original
 also calls `CzanModelManager_StopBank5ModeEffects(0.0f, controller +0x5C)`.
+
+`FUN_8011AB4C` samples the current event record for one runtime category from the
+controller event data object at `controller +0x64`. Suggested name:
+
+```text
+ActiveGameplayControllerEventData_SampleCurrentEvent
+```
+
+`FUN_8011AD00` searches forward/backward from the current event index until a valid
+event for the requested category is found. Suggested name:
+
+```text
+ActiveGameplayControllerEventData_FindNearbyEvent
+```
+
+Both helpers emit the same 9-word event result used by the active controller channel
+logic. `FUN_8011AF30` resolves the primary range value from the event data range
+table. Suggested name:
+
+```text
+ActiveGameplayControllerEventData_ResolveRangeValue
+```
+
+`FUN_8011B030` resolves the matching secondary range value from the same range table,
+returning the word at `eventData +0x120 + slotIndex*4`. Suggested name:
+
+```text
+ActiveGameplayControllerEventData_ResolveSecondaryRangeValue
+```
+
+`FUN_8004205C` starts the active gameplay controller transition from CGame after the
+controller exists at `cgame +0x42C`. Suggested name:
+
+```text
+CGame_StartActiveGameplayControllerTransition
+```
+
+It calls active controller vtable `+0x20`, starts optional movie playback through
+`MovieSlotHandle_StartPlayback`, kicks a manager transition through
+`CGameTransitionManager_Start`, updates subsystem `cgame +0x428` through
+`CGameTransitionSlot_Start`, and sets `cgame +0x424 = 1`.
+
+`FUN_800245A4` starts the manager-side transition used by
+`CGame_StartActiveGameplayControllerTransition`. Suggested name:
+
+```text
+CGameTransitionManager_Start
+```
+
+It looks up a transition record from the manager, initializes timer/state fields at
+`+0x45C..+0x474`, converts duration/speed through `FUN_8012A03C`, and can spawn a
+manager effect through `FUN_8016B270`.
+
+`FUN_80125728` starts/arms the transition subsystem stored at `cgame +0x428`.
+Suggested name:
+
+```text
+CGameTransitionSlot_Start
+```
+
+It calls `FUN_800F8DB0` on `transitionSlot +0x80` when present, then marks
+`transitionSlot +0x84 = 1`.
+
+`FUN_800430CC` is the CGame state-4 active gameplay transition/update state. Suggested
+name:
+
+```text
+CGame_UpdateActiveGameplayTransitionState
+```
+
+It is the large CGame-level state machine after `CGame_CreateActiveGameplayController`.
+The attached decompile shows controller updates, UI-root checks, movie playback
+readiness, input/abort handling, and transition completion/handoff logic.
 
 `FUN_80113098` applies category-6 visual/runtime state to one lane/source record.
 Suggested name:
@@ -950,6 +1041,49 @@ for categories 0..2:
     movieBindings +0xB334 + category * 4 = 0
 ```
 
+`FUN_801142C4` is the active gameplay controller runtime tick. Suggested name:
+
+```text
+ActiveGameplayControllerBase_TickRuntime
+```
+
+This is one of the important runtime methods after controller setup. It advances
+controller time through `gLargeResourceManager`, updates event data at `controller
++0x64`, samples category 4 events to select/apply `CtsStageObj` model slots at
+`controller +0x54`, samples categories 0 and 1 to update subsystem `controller +0x60`,
+applies runtime event channels when setup flags allow, and finishes through
+`ActiveGameplayControllerBase_UpdateTimelineMarker`.
+
+`FUN_80114D18` is a later active-controller update pass that pushes model matrices and
+advances presentation/preset state. Suggested name:
+
+```text
+ActiveGameplayControllerBase_LateUpdateTransforms
+```
+
+Confirmed behavior:
+
+```text
+copy current matrix from controller +0x54 through CzanModelOwner_CopyCurrentModelMatrix
+obtain another matrix from controller +0x54 subobject vtable +0x18
+push both into controller +0x5C through CzanModelManager_UpdateCurrentModeMatrices
+when not skipped, advance five 0x478-byte presentation records at controller +0x1428
+update current mode record controller +0x1428 + controller[0x1424]*0x478
+when controller +0x1424 == 4, advance the visual preset table at +0x2A94
+mirror selected preset ids into subsystem controller +0x60
+call FUN_80114BF0 and possibly restart UI/effect fade state
+```
+
+The matrix helpers in that path are:
+
+```text
+FUN_8015EAD0 -> CzanModelOwner_CopyCurrentModelMatrix
+FUN_80052D98 -> CzanModelManager_UpdateCurrentModeMatrices
+FUN_80059294 -> CtsStageObjDescriptor_GetModelTransform
+FUN_8011F8A8 -> CzanModelLiveObject_SetModelMatrices
+FUN_801459FC / FUN_801B0E00 -> Matrix44_Copy
+```
+
 `FUN_80055090` changes the active controller movie/background binding mode. Suggested
 name:
 
@@ -965,6 +1099,35 @@ Confirmed modes:
 2 -> enable/switch category movie handles through MovieSlotHandle_SetObjectEnabled and
      ActiveControllerMovieBindings_StartCategoryMovie; set +0xF06C = 1
 4 -> enable the special/current mode slot for a timed controller transition
+```
+
+`FUN_80055008` resolves which bank-5/movie mode is currently visible. Suggested name:
+
+```text
+ActiveControllerMovieBindings_GetVisibleModeIndex
+```
+
+It normally returns the current mode byte at `movieBindings +0x2D`, but during
+transition state `+0xB0C4 == 3` it can return the previous mode byte at `+0x2E` while
+the old background is still effectively visible.
+
+`FUN_80055A94` toggles the claimed movie objects for the category slots. Suggested
+name:
+
+```text
+ActiveControllerMovieBindings_UpdateCategoryVisibility
+```
+
+If the force flag is set, it enables every valid category slot. Otherwise, when
+`+0xB36C` is clear and binding mode `+0xB360` is `4`, it disables the currently visible
+category slot and enables the others. The actual toggle is
+`MovieSlotHandle_SetObjectEnabled(gManager_802E70A8, slot, enabled)`.
+
+`FUN_80055084` stores the global transition/visibility flag at `+0xB36C`, then calls
+the visibility update helper. Suggested name:
+
+```text
+ActiveControllerMovieBindings_SetTransitionFlagAndUpdateVisibility
 ```
 
 `FUN_80055590` chooses and binds the THP movie path for one active-controller
@@ -1012,7 +1175,7 @@ Confirmed behavior:
 ```text
 slot = ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotIndex)
 if slot exists:
-  FUN_80190440(slot +0x114, enabled)
+  CzanMovieObjChild_SetEnabled(slot +0x114, enabled)
 ```
 
 `FUN_80024F3C` binds a THP/movie resource path to a claimed movie slot. Suggested name:
@@ -1041,10 +1204,19 @@ Confirmed behavior:
 ```text
 slot = ResourceSlotManager_GetClaimedSlot(slotHandle[0], slotIndex)
 if slot exists:
-  FUN_80185150(slot)
+  CzanMovieObj_ClearPlaybackState(slot)
   slot +0x150 = clamp(inputScalar)
-  FUN_80184FE8(slot, enabled, 0)
+  CzanMovieObj_StartPlayback(slot, enabled, 0)
 ```
+
+`FUN_800250B0` polls bit `0x400` on a claimed movie slot. Suggested name:
+
+```text
+MovieSlotHandle_HasPlaybackStarted
+```
+
+That bit is set by `CzanMovieObj_StartPlayback`, so this is the select/common
+movie-background playback-started poll rather than a full decode/readiness check.
 
 `FUN_80025368` is the thin getter for a claimed movie object. Suggested name:
 
@@ -1064,6 +1236,49 @@ temporary name:
 
 ```text
 MovieSlotHandle_SetPlaybackFlag278
+```
+
+`FUN_80185150` clears transient playback/subsystem state on an active movie object.
+Suggested name:
+
+```text
+CzanMovieObj_ClearPlaybackState
+```
+
+`FUN_80184FE8` starts playback on an already-loaded movie object and sets flag bit
+`0x400`. Suggested name:
+
+```text
+CzanMovieObj_StartPlayback
+```
+
+`FUN_80190440` toggles bit `0x200` on the child/object record at movie slot `+0x114`.
+Suggested name:
+
+```text
+CzanMovieObjChild_SetEnabled
+```
+
+`FUN_8005CB94` applies the selected descriptor transform into a CtsStageObj slot.
+Suggested name:
+
+```text
+CtsStageObjSlot_ApplySelectedDescriptorTransform
+```
+
+`FUN_8005CE7C` initializes the transform used by CtsStageObj slot state 5. Suggested
+name:
+
+```text
+CtsStageObjSlot_InitState5Transform
+```
+
+`FUN_8005C4AC` and `FUN_8005C50C` begin/end the special descriptor path at
+`slot +0x1FC`. Suggested names:
+
+```text
+CtsStageObjSlot_BeginSpecialDescriptor
+CtsStageObjSlot_EndSpecialDescriptor
 ```
 
 `FUN_8005D0E8` changes the state at `CtsStageObjSlot +0x80`. Suggested name:
@@ -1289,14 +1504,14 @@ Confirmed behavior:
 0:
   reset global managers and the same owned CGame subsystems as FUN_8003CDC4
   if cgame +0x0B8 == -1:
-    FUN_8003D1F0(cgame)
+    CGame_BuildSceneSetupFromPlayerData(cgame)
     FUN_80118724(cgame +0x3F0, cgame +0x0B8, 0)
     substate = 3
   else:
     substate = 2
 
 2:
-  result = FUN_8003DC74(cgame)
+  result = CGame_UpdateSceneSetupSelection(cgame)
   if result == -1:
     cgame +0x08 = 1
   else if result == 1:
@@ -1319,7 +1534,36 @@ Confirmed behavior:
 
 Compared with `CGame_PrepareManagersAndResources`, this path does not start the
 boot-temp resource bundle in substate 0/1. It either prepares from direct setup data or
-waits on `FUN_8003DC74`, then enters the same detailed scene wiring function.
+waits on `CGame_UpdateSceneSetupSelection`, then enters the same detailed scene wiring
+function.
+
+`FUN_8003D1F0` builds the scene/setup block directly from player/setup data when
+`cgame +0x0B8` is `-1`. Suggested name:
+
+```text
+CGame_BuildSceneSetupFromPlayerData
+```
+
+`FUN_8003DC74` is the interactive/waiting scene setup path used when CGame must resolve
+selection/setup state across frames. Suggested name:
+
+```text
+CGame_UpdateSceneSetupSelection
+```
+
+`FUN_8003F24C` is the direct active-gameplay setup builder used by
+`CGame_PrepareActiveGameplayState` when `cgame +0x0B8` is `-1`. Suggested name:
+
+```text
+CGame_BuildActiveGameplaySetupFromPlayerData
+```
+
+`FUN_8003FEB0` is the interactive/options waiting path for active gameplay setup.
+Suggested name:
+
+```text
+CGame_UpdateActiveGameplaySetupSelection
+```
 
 `FUN_8003D740` is the detailed CGame scene/resource-manager wiring function reached
 after the loaded resource managers are ready. Suggested name:
@@ -1353,7 +1597,8 @@ resources from the secondary list:
 
 mode/flag-dependent resources:
   configure subsystem cgame +0x404
-  load extra blocks through FUN_8004EB54 / FUN_80054CF4 / FUN_8004EBB8
+  load extra blocks through CzanModelOwner_SetCategoryAndLoadStageResourceGroup /
+  FUN_80054CF4 / FUN_8004EBB8
 
 if cgame +0x108 != 0:
   resource 9 -> CzanModelManager_LoadBank1Resource(cgame +0x404, resource)

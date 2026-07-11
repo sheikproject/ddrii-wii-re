@@ -20,6 +20,7 @@ void MovieSlotHandle_SetObjectEnabled(int *slotHandle, int slotIndex, int enable
 void MovieSlotHandle_LoadResource(int *slotHandle, int slotIndex, int resourceOrPath);
 void MovieSlotHandle_StartPlayback(int *slotHandle, int slotIndex, int enabled);
 int *MovieSlotHandle_GetClaimedObject(int *slotHandle, int slotIndex);
+int MovieSlotHandle_HasPlaybackStarted(int *slotHandle, int slotIndex);
 void MovieSlotHandle_SetPlacementRect(
     int *slotHandle,
     int slotIndex,
@@ -31,12 +32,21 @@ void MovieSlotHandle_SetPlaybackFlag278(int *slotHandle, int slotIndex, int valu
 int ActiveControllerMovieBindings_HasPendingSlots(int *movieBindings, int mode);
 void ActiveControllerMovieBindings_Reset(int *movieBindings);
 void ActiveControllerMovieBindings_SetMode(int *movieBindings, int mode);
+unsigned char ActiveControllerMovieBindings_GetVisibleModeIndex(int *movieBindings);
+void ActiveControllerMovieBindings_UpdateCategoryVisibility(int *movieBindings, int forceAllVisible);
+void ActiveControllerMovieBindings_SetTransitionFlagAndUpdateVisibility(
+    int *movieBindings,
+    int forceAllVisible,
+    int transitionFlag);
 void ActiveControllerMovieBindings_LoadCategoryMovie(int *movieBindings, unsigned int category);
 void ActiveControllerMovieBindings_StartCategoryMovie(int *movieBindings, unsigned int category);
 void CzanMovieObj_AllocBuffer(int *movieObj, int bufferSize);
 void CzanMovieObj_InitDefaults(int *movieObj);
 void CzanMovieObj_Reset(int *movieObj);
+void CzanMovieObj_ClearPlaybackState(int *movieObj);
+void CzanMovieObj_StartPlayback(int *movieObj, int enabled, int startParam);
 void CzanMovieObj_LoadResource(int *movieObj, int resourceOrPayload);
+void CzanMovieObjChild_SetEnabled(int *movieChild, int enabled);
 void LargeResourceManager_ReloadFromLink(int *largeResourceManager, int linkData);
 void CharacterAssetManager_UnloadActiveAssets(int *characterAssetManager);
 

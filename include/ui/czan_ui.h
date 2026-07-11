@@ -62,6 +62,7 @@ int CzanUiManager_CloneObjectGroup(
     int initialAnimIndex);
 void CzanUiObjectInstance_StartAnimation(double startFrame, int objectInstance, int animationIndex);
 void CzanUiObjectInstance_PreplayInitialAnimation(int objectInstance);
+void CzanUiManager_ResetObjectGroupAnimationTime(double frame, int uiManager, int objectGroupHandle);
 void CzanSpriteObject_SetRenderMode(int spriteObject, int mode);
 void CzanUiObjectInstance_RunAnimationScript(int objectInstance, int allowUnknownOpcode);
 void CzanUiObjectInstance_ApplyColorBlocks(int objectInstance);
@@ -91,6 +92,7 @@ void CzanUiManager_SetChildObjectEnabled(
     unsigned char enabled);
 void CzanUiManager_SetObjectGroupDrawEnabled(int uiManager, int objectGroupHandle, unsigned char drawEnabled);
 double CzanUiManager_GetObjectAnimationDuration(double fallbackDuration, int uiManager, int objectGroupHandle, int childObjectIndex, int animationIndex);
+int CzanUiManager_GetChildObjectInstance(int uiManager, int objectGroupHandle, int childObjectIndex);
 void CzanUiManager_LinkObjectGroupToReferenceObject(
     int uiManager,
     int targetObjectGroupHandle,
@@ -99,6 +101,7 @@ void CzanUiManager_LinkObjectGroupToReferenceObject(
     unsigned char linkMode);
 void CzanSpriteObject_Draw(int spriteObject, int parentTransform, int externalTransform, int drawMode);
 void CzanUiObjectInstance_Draw(int objectInstance);
+void CzanUiObjectInstance_SetColorBlocks(int objectInstance, int colorSlot, unsigned char r, unsigned char g, unsigned char b, unsigned char a);
 void CzanUiManager_DrawObjectListReverse(int objectList, int drawLayerFilter);
 void CzanUiManager_DrawObjectGroupInListOrder(int uiManager, int objectGroupHandle);
 void CzanUiManager_DrawChildObject(int uiManager, int objectGroupHandle, int childObjectIndex);

@@ -1364,6 +1364,20 @@ void CzanModelManager_StopBank5ModeEffects(double stopTime, int *owner) {
     (void)owner;
 }
 
+void CzanModelManager_UpdateCurrentModeMatrices(int *owner, const void *modelMatrix, const void *objectMatrix) {
+    /* 0x80052D98 updates the live-object matrices for the current bank-5 mode.
+
+       Confirmed behavior:
+       - uses owner byte +0x2D as the current mode index
+       - if the current mode's count/handle at +0x20 is positive, resolves the active
+         model transform through CtsStageObjDescriptor_GetModelTransform
+       - writes matrices into the per-mode live object record at
+         owner + currentMode*0x328 +0xE6F0 through CzanModelLiveObject_SetModelMatrices */
+    (void)owner;
+    (void)modelMatrix;
+    (void)objectMatrix;
+}
+
 void CzanModelManager_RequestBank5ModeTransition(double duration, int *owner, unsigned int modeIndex, int transitionAnimIndex) {
     /* 0x8005386C requests a bank-5/model-owner mode transition.
 
@@ -1409,6 +1423,37 @@ void CzanModelManager_InitBank5LiveObjectsForMode(int *owner) {
     }
 }
 
+void CzanModelOwner_CopyCurrentModelMatrix(int *owner, void *outMatrix) {
+    /* 0x8015EAD0 copies the current model-owner matrix from owner +0x278 +0x4C.
+
+       In the active controller path, owner is controller +0x54 and the copied matrix
+       is then pushed into CzanModelManager_UpdateCurrentModeMatrices. */
+    (void)owner;
+    (void)outMatrix;
+}
+
+int CtsStageObjDescriptor_GetModelTransform(int descriptor) {
+    /* 0x80059294 returns descriptor +0x1C. The active controller uses this as the
+       transform source passed to CzanModelLiveObject_SetModelMatrices. */
+    if (descriptor == 0) {
+        return 0;
+    }
+    return descriptor + 0x1c;
+}
+
+void CzanModelLiveObject_SetModelMatrices(int *object, int transformSource, const void *modelMatrix, const void *objectMatrix) {
+    /* 0x8011F8A8 writes matrix state into a bank-5/current-mode live object record.
+
+       Confirmed behavior:
+       - if transformSource is nonzero, copies source matrix data into object +0x284
+       - if modelMatrix is nonzero, copies a 3x4 matrix into object +0x2B4
+       - if objectMatrix is nonzero, copies a 4x4 matrix into object +0x2E4 */
+    (void)object;
+    (void)transformSource;
+    (void)modelMatrix;
+    (void)objectMatrix;
+}
+
 void CzanEffectManager_SetStopTime(int *manager, int effectHandle, int stopTime) {
     /* 0x80179178 sets stop time for one Czan effect-manager live object.
 
@@ -1444,6 +1489,21 @@ void CzanModelOwner_LoadStageResourceGroup(int *owner, void *linkData) {
     if (owner == 0) {
         return;
     }
+}
+
+void CzanModelOwner_SetCategoryAndLoadStageResourceGroup(int *owner, unsigned char groupCategory, void *linkData) {
+    /* 0x8004EB54 stores the active resource-group category byte at owner +0x8A04,
+       ensures group handle 3 exists, then loads the supplied stage resource group
+       through CzanModelOwner_LoadStageResourceGroup.
+
+       This is the small wrapper used by stage/menu logic when switching which bank-5
+       model/effect resource group is active. */
+    (void)linkData;
+    if (owner == 0) {
+        return;
+    }
+    *((unsigned char *)owner + 0x8a04) = groupCategory;
+    CzanModelOwner_EnsureResourceGroupHandle(owner, 3);
 }
 
 void CzanModelOwner_SetupResourceGroupEntries(int *owner, unsigned char groupCategory, void *bank5LinkData, void *entryListLinkData) {

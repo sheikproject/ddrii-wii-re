@@ -25,6 +25,675 @@ void RuntimeEntry(void);
 `GameMain` initializes engine/runtime systems, allocates global managers, runs the main
 loop, then destroys managers in reverse order.
 
+Current host integration:
+
+```text
+GameMain
+  initialize stdout buffering for host diagnostics
+  initialize MainLoopManagerKnownFields + pointed ModuleControllerKnownFields
+  GameMain_InitRuntimeManagers()
+    GlobalRuntimeContext_CreateOnce(1, 0x800, 4, 0x10, 0x32, 3, 0x46, 1, 0xF00403, 1)
+      RuntimeLowLevel_InitCoreLibraries()
+      RuntimeLowLevel_InitMemoryPools(0x70007)
+      RuntimeLowLevel_InitVideoInterface()
+      GlobalRuntimeContext_Init()
+    DebugText_InitFontBacking()
+    GlobalUiFrameState_CreateOnce()
+    CzanUiManager_AllocateObjectGroupStorage(*(DAT_802E71B8 +0x270), 300, 0x800)
+    GlobalResourceManager260_SetModeTable(*(DAT_802E71B8 +0x260), ...)
+    allocate recovered CGame/global manager chain
+  MainLoopManager_SetInitialFrameStep(0x3C)
+  loop:
+    MainLoopManager_Tick(mainLoopManager)
+```
+
+The old `DDRII host skeleton` console banner was removed; the host path now enters the
+recovered runtime/global-context boot functions before the module controller begins.
+
+The current host `MainLoopManager_Tick` now follows the exported `0x80020CC8` frame
+order: debug-text prep, pending-module apply, global pre-frame update, resource/effect
+busy gates, active module tick, UI draw/update, movie-slot update, post-frame flush,
+UI-frame tick, input update, manager `802E70B4` update, cue-manager update, reset/shutdown
+checks, and frame increment. Several deep Wii/UI/audio callees are still named host
+shims until their bodies are safe to run on the host, but the boot loop control flow is
+no longer the old local wrapper.
+
+The new `main_DDRII.dol` export confirms the real manager allocation sequence:
+
+```text
+0x00014 -> gMainLoopManager          -> PlayerDataStateContainer_Init
+0x02F54 -> gPlayerDataManager        -> PlayerDataManager_Init
+0x28F58 -> gManager_802E70E0         -> Manager802e70e0_Init, then Manager802e70e0_DestroyNoop
+0x0049C -> gManager_802E70A4         -> FUN_80022630
+0x0000C -> gManager_802E70A8         -> ResourceSlotHandle_Init, then FUN_80024D38
+0x00EF0 -> gInputOrMenuStateManager  -> FUN_80029FB0, then FUN_8002A0B0
+0x00050 -> gManager_802E70B0         -> FUN_800C0BF8
+0x00BF0 -> gManager_802E70B4         -> FUN_8010E504
+0x0004C -> gUiRootManager            -> FUN_800FE48C
+0x284E0 -> gCharacterAssetManager    -> CharacterAssetManager_Init
+0x01B38 -> gManager_802E70B8         -> FUN_80178278, then FUN_80178438(..., 0x100)
+0x3010B8 -> gLargeResourceManager    -> FUN_80025A7C
+0x00028 -> gBootTempManager          -> FUN_80021D60
+```
+
+This also corrects an earlier label: `FUN_80099F70` belongs to
+`gManager_802E70E0`; the actual `gCharacterAssetManager` constructor is
+`FUN_800CC450`.
+
+`FUN_801438F4` is the lazy creator for the global runtime context stored at
+`DAT_802E71B8`. Suggested name:
+
+```text
+GlobalRuntimeContext_CreateOnce
+```
+
+Confirmed behavior:
+
+```text
+if DAT_802E71B8 == 0:
+  FUN_801A2C80()
+  FUN_80144B50(0x70007)
+  FUN_801BACA0()
+  context = AllocObjectAligned(0, 0x278, 0x20, 0)
+  if context != 0:
+    FUN_80142BF0(context, arg0..arg9)
+
+DAT_802E71B8 = context
+```
+
+The attached `FUN_801A2C80` is the one-time Revolution SDK / OS core initializer called
+first by `GlobalRuntimeContext_CreateOnce`. Suggested name:
+
+```text
+RuntimeLowLevel_InitCoreLibraries
+```
+
+Confirmed behavior:
+
+```text
+if DAT_802E7250 == 0:
+  DAT_802E7250 = 1
+  DAT_802E7270/DAT_802E7274 = FUN_801AD440()
+  enter critical section
+  initialize OS globals and callbacks around DAT_802EFF20
+  clear/set low-level OS callback slots through FUN_801A2040..FUN_801A2090
+  configure MEM1/MEM2 arena boundaries through FUN_801A4320/FUN_801A42F0/FUN_801A4330
+  derive boot info from DAT_800000F4 or DAT_800030E8
+  initialize runtime subsystems:
+    FUN_801ADD50, FUN_801A31E0, FUN_801ABD90, FUN_801A36A0,
+    FUN_801A9C00, FUN_801A94D0, FUN_801A56D0, FUN_801A4D50,
+    FUN_801D9740, FUN_801DAC60, FUN_801AB400, FUN_801ABE00,
+    FUN_801A45B0
+  mask OS state through FUN_801A20F0/FUN_801A2100
+  initialize scheduler/thread state when DAT_802E7230 == 0
+  print/log RVL SDK release build string
+  initialize more OS/device pieces:
+    FUN_801A29D0, FUN_801DE770, FUN_801ADF10, FUN_801E4D10,
+    FUN_801AED80, FUN_801B1BF0, FUN_801AFBB0, FUN_801AE910
+  check boot/apploader error bytes DAT_8000315C/DAT_8000315D
+  check firmware date/version from c0003140/c0003144 against DAT_80003188
+  optionally create an OS alarm/thread hook at DAT_802EFF40/DAT_802EFF60
+```
+
+This function is mostly platform startup. The Windows host cannot reproduce the Wii
+hardware register reads, firmware checks, or OS interrupt installation, but it must run
+before allocator/video/global-context setup in the same order.
+
+`FUN_801A2130` is a small low-level OS register update helper. Suggested name:
+
+```text
+RuntimeLowLevel_SetH4AFlag
+```
+
+It reads the register/state from `FUN_801A1FC0`, ORs in bit `0x200`, and writes it back
+through `FUN_801A1FD0`.
+
+`FUN_801A29D0` prints the Revolution OS/kernel startup report. Suggested name:
+
+```text
+RuntimeLowLevel_ReportKernelInfo
+```
+
+Confirmed report sequence:
+
+```text
+Revolution OS
+Kernel built : Aug 23 2010 17:33:06
+Console Type : ...
+Firmware : major.minor.patch (month/day/year)
+Memory N MB
+MEM1 Arena : low - high
+MEM2 Arena : low - high
+```
+
+The console-type branch identifies retail, NDEV, emulator, and TDEV-style hardware
+from `FUN_801A2360()` and prints the matching label.
+
+`FUN_80144B50` is the low-level allocator/memory-pool initializer called before the
+global context is allocated. Suggested name:
+
+```text
+RuntimeLowLevel_InitMemoryPools
+```
+
+Confirmed behavior:
+
+```text
+DAT_802E71D0 = 0
+DAT_802EE15C = FUN_801A42C0()
+DAT_802EE160 = FUN_801A4290()
+DAT_802EE190 = FUN_801A42D0()
+DAT_802EE194 = FUN_801A42A0()
+FUN_801A4320(DAT_802EE160)
+FUN_801A4330(DAT_802EE194)
+initialize global mutex DAT_802EE1C0
+for two memory pool records at DAT_802EE158, stride 0x34:
+  pool[0] = FUN_801DC440(pool[1], pool[2] - pool[1], 6)
+  initialize pool mutex at +0x1C
+  FUN_801DC7C0(pool +0x0C, pool[0], 0x20)
+lock global mutex
+DAT_802E71C8 = 0
+unlock global mutex
+```
+
+This is why `AllocObjectAligned`-style calls are valid immediately afterward in
+`FUN_801438F4`.
+
+`FUN_801BACA0` is the one-time VI/video interrupt/display-mode initializer called
+before `DAT_802E71B8` allocation. Suggested name:
+
+```text
+RuntimeLowLevel_InitVideoInterface
+```
+
+Confirmed behavior:
+
+```text
+if DAT_802E7480 == 0:
+  initialize low-level time/interrupt state
+  if video register cc002002 bit 0 is clear:
+    FUN_801BAAA0(0)
+  clear many DAT_802E74xx/DAT_802E75xx state values
+  write VI timing registers cc00204c..cc002070 from DAT_802D16A4..DAT_802D16D4
+  derive region/display mode from FUN_801E6700, DAT_800000CC, cc002002, cc00206c
+  fill DAT_802F6350..DAT_802F63A4 viewport/timing/display-mode records
+  install interrupt/callback handlers through FUN_801A94A0, FUN_801AA990, etc.
+  choose retrace timing constants:
+    mode group 1 -> 15000, 15000, 90000
+    other modes -> 18000, 18000, 0x1A5E0
+  store progressive/display flags from FUN_801E6860
+  call FUN_801BE580(previousState)
+```
+
+The host cannot write Wii VI registers, but it should preserve the game-facing derived
+state: display width `0x280`, viewport offsets, scan/mode selection, and timing
+constants.
+
+The constructor at `FUN_80142BF0` is the next important body here. The global context
+is the object later read through offsets such as `+0x258`, `+0x260`, `+0x268`, and
+`+0x270`.
+
+`FUN_80142BF0` constructs the `0x278`-byte global runtime context. Suggested name:
+
+```text
+GlobalRuntimeContext_Init
+```
+
+Confirmed field setup:
+
+```text
++0x000 = 0
++0x004 = -1
++0x008 = 0
++0x08C = low byte from FUN_801E6790()
++0x090..+0x0B4 = two groups of five words, all set to 1
++0x0B8 = -1
++0x0BC = recovered arg0/context value from the register-spill helper
++0x0C0 = 0
++0x244 = 0
++0x248 = 2
++0x24C = FLOAT_802E9C5C
++0x250 = FLOAT_802E9C60
++0x254 = rgba(0xFF,0xFF,0xFF,0xFF)
++0x258 = 0x70-byte submanager from FUN_801410F8
++0x25C = 0x504-byte submanager from FUN_801499F4, then FUN_80149C80(..., arg8)
++0x260 = 0x54-byte resource manager from FUN_80143E7C(..., 0x100, +0x0BC)
++0x264 = 0x874-byte submanager from FUN_801644D0(..., arg2, arg3)
++0x268 = 0x4248-byte effect/scene manager from FUN_80166DF0(..., arg4..arg7, 0)
++0x26C = 0x0C-byte submanager from FUN_80146950(..., arg1)
++0x270 = 0x38-byte UI/object manager from FUN_80173084
++0x274 = 0xB4-byte submanager from FUN_80141AC8(..., arg9)
+```
+
+The startup tail registers `LAB_80143A88`, reads environment/region values, seeds other
+systems through `FUN_80131C2C`, `FUN_8018D144`, `FUN_8015F4AC`, and stores a region-like
+string at `+0x0C` based on the low byte from `FUN_801E6790()`.
+
+`FUN_80143830` chooses the active region/language resource table. Suggested name:
+
+```text
+GlobalRuntimeContext_SelectRegionVariant
+```
+
+Confirmed behavior:
+
+```text
+region = *(globalContext +0x8C)
+if *(globalContext +0x90 + region * 4) == 0:
+  return *(globalContext +0xB8)
+return region
+```
+
+This is the selector used by boot resource loading before indexing the
+`/banner`, `/text`, `/font`, `/select`, `/ssq`, `/2Dcommon`, and `/Pointer` path table.
+
+`FUN_80144EA0` and `FUN_80144EF4` are the memory/global-state guard pair used around
+manager setup. Suggested names:
+
+```text
+RuntimeMemory_SetCriticalFlag
+RuntimeMemory_ClearCriticalFlag
+```
+
+Confirmed behavior:
+
+```text
+RuntimeMemory_SetCriticalFlag(value):
+  lock DAT_802EE1C0
+  DAT_802E71C8 = 1
+  uRam802E71CC = value
+  unlock DAT_802EE1C0
+
+RuntimeMemory_ClearCriticalFlag():
+  lock DAT_802EE1C0
+  DAT_802E71C8 = 0
+  unlock DAT_802EE1C0
+```
+
+`FUN_80143E7C` constructs the `0x54`-byte manager stored at global context `+0x260`.
+Suggested name:
+
+```text
+GlobalResourceManager260_Init
+```
+
+Confirmed behavior:
+
+```text
+manager +0x50 = PTR_PTR_802C05C8
+DAT_802E71C4 = -1
+if DAT_802E71C0 == 0:
+  FUN_801B1BF0()
+  DAT_802E71C0 = 1
+FUN_801B7550(1)
+
+records = AllocObjectAligned(0, capacity * 0x4C + 0x10, 0x20, 0)
+records are initialized through FUN_80129C64(..., recordSize=0x4C, count=capacity)
+
+manager +0x00 = 0
+manager +0x04 = FLOAT_802E9CA8
+manager +0x08 = 0
+manager +0x0C = capacity
+manager +0x10 = records
+manager +0x14 = 0
+manager +0x18 = 0
+manager +0x1C..+0x2C = five words set to 1
+manager +0x30 = 0
+manager +0x34 = -1
+manager +0x38..+0x48 = 0
+manager +0x4C = mode table, PTR_DAT_802C05A0 when param_3 == 2, otherwise PTR_DAT_802C0578
+```
+
+Each `0x4C` record has at least:
+
+```text
+record +0x00 = -1
+record +0x04 = 0
+record +0x44 = 0
+```
+
+`FUN_80129C64` is the generic contiguous object-array constructor used here and by
+other manager pools. Suggested name:
+
+```text
+RuntimeObjectArray_Construct
+```
+
+Confirmed behavior:
+
+```text
+allocation[0] = recordSize
+allocation[1] = count
+records = allocation + 0x10
+for i in 0..count-1:
+  constructor(records + i * recordSize, 1)
+return records
+```
+
+If construction failed before all entries were initialized, it would run the supplied
+destructor backward with release mode `-1`. In the recovered decompile, the normal
+loop completion makes that rollback branch effectively unreachable.
+
+`FUN_80143E10` is the destructor paired with the `+0x260` manager's `0x4C` records:
+
+```text
+ResourceManager260_DestroyRecord
+```
+
+It only frees the record pointer when the supplied release mode is positive, so records
+owned inside a `RuntimeObjectArray_Construct` block are not individually freed during
+rollback/destruction with `-1`.
+
+`FUN_80144294` updates the `+0x260` manager's aggregate loading progress. Suggested
+name:
+
+```text
+GlobalResourceManager260_UpdateProgress
+```
+
+Confirmed behavior:
+
+```text
+pendingSize = 0
+hasNoActiveRecords = true
+for each 0x4C record:
+  if record +0x04 == 1:
+    pendingSize += GlobalResourceManager260_GetRecordPayloadSize(record +0x08)
+    hasNoActiveRecords = false
+
+manager +0x04 = (manager +0x14 + pendingSize) / manager +0x18
+
+if manager +0x00 == 0, or no records remain active and progress reaches 1.0:
+  clear manager +0x00, +0x14, +0x18
+  manager +0x04 = 0.0
+  return 1
+
+return 0
+```
+
+`FUN_801B1AC0` is the per-record payload size/weight helper used by that progress
+scan. Suggested name:
+
+```text
+GlobalResourceManager260_GetRecordPayloadSize
+```
+
+Most payload kinds return `payload +0x20`; kind `2` returns zero. A few uncommon
+sentinel kinds return the payload pointer itself in the original decompile, which is
+preserved for now until the resource record constructors are fully named.
+
+`FUN_80173084` constructs the `0x38`-byte UI/object manager stored at global context
+`+0x270`. Suggested name:
+
+```text
+UiObjectManager270_Init
+```
+
+Confirmed defaults:
+
+```text
++0x00 = 0
++0x04 = 0
++0x0C = 0
++0x18 = 1
++0x19 = 0
++0x1A = 0
++0x14 = 0
++0x1C = 0
++0x24 = FLOAT_802E9F6C
++0x28 = FLOAT_802E9F6C
++0x2C = 0
++0x30 = 1
++0x34 = 0x0C
++0x35 = 1
+```
+
+The attached `FUN_80166DF0` is the constructor for the large manager stored at global
+context `+0x268`. Suggested name:
+
+```text
+EffectSceneManager268_Init
+```
+
+Confirmed high-level layout:
+
+```text
+manager size = 0x4248
++0x4244 = PTR_PTR_802C08A0
++0x080 = 0
++0x084 = -1, later replaced by FUN_80168070 result
++0x088 = -1 / environment mode state
++0x08C = 1
++0x090/+0x0A0 = initialized subobjects
++0x0E8 = initialized 0xC0-ish subobject
++0x0F8 = pointer map over all records
++0x0FC = group0 records, count param_2, stride 0x0D0
++0x100 = group1 records, count param_3, stride 0x220
++0x104 = group2 records, count param_4, stride 0xAA4
++0x108 = group0 start index
++0x10C = group0 end index
++0x110 = group1 start index
++0x114 = group1 end index
++0x118 = group2 start index
++0x11C = group2 end index
++0x120 = total record count
++0x128..+0x9D0 = many cleared runtime/state ranges
++0x8D8 = four 0x50-byte auxiliary slots, each spaced by 0x28 in the owner
++0x9E0 = 0x3800-byte table initialized through FUN_801C41C0(..., 0x100)
++0x41E0 = timestamp/random seed from FUN_801AD410
++0x41F0 = 8 bytes set to 0xFF
+```
+
+It builds `+0xF8` as a per-index pointer table: indices in the first range point into
+the `0xD0` pool, indices in the second range point into the `0x220` pool, and indices
+in the third range point into the `0xAA4` pool. Any non-null record receives its global
+index at `record +0xC0`.
+
+The constructor also initializes GX/effect callback hooks, environment mode, timing
+subobjects, default float/int tuning fields around `+0x210..+0x87C`, and performs
+late activation through helpers like `FUN_801682FC`, `FUN_80168714`, and
+`FUN_8016944C`.
+
+`FUN_80023030` resets the large resource manager's pending sound/effect references and
+loads the default BRSAR archive through global context `+0x268`. Suggested name:
+
+```text
+LargeResourceManager_ResetAudioAndLoadDefaultSound
+```
+
+Confirmed behavior:
+
+```text
+if owner +0x43C is set:
+  release handles listed in DAT_8027A570 through DAT_802E71B8 +0x268
+  decrement owner-local refcounts and free handles whose count reaches zero
+  clear +0x43C
+
+if owner +0x440 is set:
+  resolve a handle list through FUN_800F3024(owner +0x444)
+  release/decrement all listed handles
+  clear +0x440..+0x447
+  set +0x444 = 0xFFFF
+
+if owner +0x448 is set:
+  resolve transition record through FUN_800F3068(+0x44C, +0x450)
+  call FUN_8016AFB8(soundManager, 1, 0)
+  release/decrement record[0] if valid
+  clear +0x448 size 0x30
+  set +0x44C = -1, +0x454 = -1
+
+FUN_8016A8C0(soundManager)
+FUN_8016A638(soundManager, "sound/DDRHP5_SOUND.brsar")
+```
+
+`FUN_8003D180` seeds the default CGame gameplay/setup block before menu/player-data
+paths overwrite individual fields. Suggested name:
+
+```text
+CGame_InitDefaultGameplaySetup
+```
+
+Confirmed fields:
+
+```text
+cgame +0xD4 = 0x06880000
+cgame +0xDC = 0
+cgame +0xE0 = 0
+cgame +0xE4 = 0
+cgame +0xE8 = pointer to default string table beginning with "more than alive"
+cgame +0xEC = 0
+cgame +0xF0 = 0x12345678
+cgame +0xF4 = 0
+cgame +0xF8 = 0
+cgame +0xFC = -1
+cgame +0x100 = 0
+cgame +0x104 = 0
+cgame +0x108 = 0
+cgame +0x10C = 5
+cgame +0x114 = 0
+cgame +0x118 = 0
+cgame +0x3EC = 0
+```
+
+The small player-data helpers are direct field accessors:
+
+```text
+FUN_80028120 -> playerDataManager +0xF8
+FUN_8002813C -> playerDataManager +0xFC
+FUN_800282C4 -> playerDataManager +0x110
+FUN_800282CC -> playerDataManager +0x114
+FUN_800F3B9C -> record +0x170
+```
+
+`FUN_8002754C` and `FUN_800275D8` map sparse gameplay/resource ids into compact
+indices. Suggested names:
+
+```text
+GameIndexedId_GetCategory
+GameIndexedId_ToLinearIndex
+```
+
+Confirmed categories:
+
+```text
+0x00..0x0E -> category 0, count 15, base 0
+0x14..0x1F -> category 1, count 12, base 0x14
+0x28..0x36 -> category 2, count 15, base 0x28
+0x3C..0x4A -> category 3, count 15, base 0x3C
+200..208   -> category 4, count 9,  base 200
+0x50..0x59 -> category 5, count 10, base 0x50
+100        -> category 6, count 1,  base 100
+```
+
+`GameIndexedId_ToLinearIndex(id)` returns:
+
+```text
+prefixCount(category) + (id - categoryBase)
+```
+
+Invalid ids return `-1`.
+
+`FUN_80023634` is the setup/refcount counterpart for the default reference table
+`DAT_8027A570`. Suggested name:
+
+```text
+LargeResourceManager_ActivateDefaultAudioReferences
+```
+
+Confirmed behavior:
+
+```text
+if largeResourceManager +0x43C != 0:
+  for each handle in DAT_8027A570:
+    FUN_8016AABC(*(DAT_802E71B8 +0x268), handle, 0)
+  for each handle in DAT_8027A570:
+    decrement largeResourceManager[handle +1]
+    if refcount reaches 0:
+      FUN_8016A9E4(*(DAT_802E71B8 +0x268))
+  largeResourceManager +0x43C = 0
+
+largeResourceManager +0x43C = 1
+for each handle in DAT_8027A570:
+  if handle < 0x10E:
+    if refcount is zero:
+      FUN_8016A9D0(*(DAT_802E71B8 +0x268))
+    increment largeResourceManager[handle +1]
+  else:
+    RuntimeDebugReport(...)
+```
+
+The host currently preserves the state/refcount shape with a placeholder table until
+`DAT_8027A570` and `DAT_802E8ED8` are exported.
+
+`FUN_80026AC8` is not a general large-resource transition setter; it forwards the
+supplied value into sound player banks 8 and 9. Suggested name:
+
+```text
+LargeResourceManager_SetTransitionSoundBanks
+```
+
+Confirmed call chain:
+
+```text
+FUN_80026AC8(_, value):
+  FUN_8002458C(gManager_802E70A4, 8, value)
+  FUN_8002458C(gManager_802E70A4, 9, value)
+
+FUN_8002458C(cueManager, bankIndex, value):
+  FUN_8016AFB8(*(DAT_802E71B8 +0x268), bankIndex, value)
+```
+
+`FUN_8016AFB8` indexes `soundManager +0x9B8` by `bankIndex * 0x9C`, checks
+`bankIndex < *(soundManager +0x9B4)`, then walks active linked nodes and applies
+`FUN_8018FB20(node, value)`.
+
+`FUN_8018FB20` stores the supplied value at node `+0x2A`, clears `+0x28/+0x30`, sets
+`+0x2C` to `0` for hard stop or `1` for passive/fade behavior, and either marks the
+state low nibble as `5` or moves a negative owner/link index back into the passive
+range. The original also performs vtable-driven unlink/relink callbacks; the host keeps
+those as named pending work until sound node vtables are mapped.
+
+`FUN_80024AF4` resets transient global cue manager state during CGame teardown.
+Suggested name:
+
+```text
+GlobalCueManager_ResetRuntimeState
+```
+
+Confirmed behavior:
+
+```text
+FUN_80169DDC(*(DAT_802E71B8 +0x268))
+for cueManager +0x484 and +0x488:
+  if pointer != 0:
+    MemoryPool_Free(...)
+cueManager +0x480 = 0
+clear cueManager +0x484 size 8
+cueManager +0x48C = 0
+cueManager +0x490 = 0
+cueManager +0x494 = 0
+```
+
+`FUN_80169DDC` is the sound-manager side of that reset:
+
+```text
+CzanSoundManager_ClearAuxState
+```
+
+It frees the optional pointer at `soundManager +0x9C0`, then clears
+`soundManager +0x9BC` size `0x14`.
+
+`FUN_8016A638` reloads the sound archive on the manager at `DAT_802E71B8 +0x268`.
+Suggested name:
+
+```text
+CzanSoundManager_LoadArchive
+```
+
+It frees the current player list at `+0x9B0/+0x9B4/+0x9B8`, destroys the previous
+archive object at `+0x9AC`, allocates a new `0x158`-byte archive object, and binds the
+given archive path through `FUN_80181F0C`.
+
 Important allocation pattern:
 
 ```c
@@ -44,6 +713,184 @@ DAT_802E70C8 -> gBootTempManager
 
 Other `DAT_802E70xx` globals are manager objects too, but their exact roles should stay
 cautious until their constructors and call sites are documented.
+
+`FUN_80027CA8` constructs the player-data manager. Suggested name:
+
+```text
+PlayerDataManager_Init
+```
+
+Confirmed top-level flow:
+
+```text
+playerDataManager +0x2F50 = vtable PTR_PTR_802B92B0
+FUN_800F37E8(playerDataManager +0x14A4)
+FUN_800F3654(playerDataManager +0x1BA8)
+FUN_800DE44C(playerDataManager +0x1C28)
+FUN_800DF5F8(playerDataManager +0x1C54)
+FUN_8011F920(playerDataManager +0x2F1C)
+FUN_80123504(playerDataManager +0x2F40)
+FUN_80027DE4(playerDataManager)
+```
+
+`FUN_80020B68`, `FUN_80020EE4`, and `FUN_80021030` form a small player-data/state
+container:
+
+```text
+PlayerDataStateContainer_Init
+PlayerDataState_Init
+PlayerDataState_SetInitialValue
+```
+
+The child state is a `0x10`-byte object with `+0x00 = 0xFFFF`, `+0x04 = 0xFFFF`,
+`+0x08 = 0`, and a vtable at `+0x0C`. Its initial value can only be written while
+`+0x04` remains `0xFFFF`.
+
+`FUN_80027DE4` is now identified as:
+
+```text
+PlayerDataManager_Reset
+```
+
+Confirmed reset behavior:
+
+```text
+clear playerDataManager +0x0000..+0x14A3
++0x0000 = -1
++0x0004 = 0
++0x0008 = -1
++0x000C = 3
++0x0010 = 0
++0x0014 = 1
++0x0178 halfword = 0
+clear +0x0018 size 0xE0
++0x00F8 = 0
++0x00FC = 0x3C
++0x0100 byte = 1
++0x0101 byte = 1
+clear +0x0108 size 0x70
++0x0108 = -1
+six timer blocks at word indices 0x46/0x4A/0x4E/0x52/0x56/0x5A:
+  first word = 0, second word = 0x3C, next two bytes = 1,1
+reset seven player records through FUN_80028330
+reset +0xCC0 menu/setup records through FUN_80028500
+clear +0x0F3C size 0x28 and seed two {0, 0xD, 5, 0, 0} records
+reset six mode records through FUN_8002896C
+reset constructed subblocks:
+  FUN_800F3940(+0x14A4)
+  FUN_800F36C4(+0x1BA8)
+  FUN_800DE50C(+0x1C28)
+  FUN_800DF6BC(+0x1C54)
+  FUN_801206D8(+0x2F1C)
+  FUN_80123574(+0x2F40)
+```
+
+`FUN_80028330` clears one/all seven player records at `+0x17C + index * 0x19C`
+and seeds the first word to `-1`.
+
+`FUN_80028500` resets the menu/setup record block:
+
+```text
++0xCC0 = 0
+clear +0xCC4 size 0x220
+clear +0xEE4 size 0x10
+clear +0xEF4 size 0x48
++0xCC0 = 1
+for eight records at +0xCC4 + index * 0x44:
+  +0x00 = -1
+  +0x04 = DAT_8026E8B8[index % 4]
+  +0x08 = 0
+  +0x0C = 0
+  +0x10 = 0
+  +0x14 = -1
+  +0x18 = 0
+  +0x1C = 0
+  +0x20 = 0
+  +0x24 = 0
+  +0x28 = 0
+  +0x30 = 0
+  +0x34 = 0xD
+  +0x38 = 5
+  +0x3C = 0
+  +0x40 = 0
+for indices 0..3:
+  +0xEE4 + index * 4 = 0
+for indices 4..7:
+  clear +0xEF4 + (index - 4) * 0x12 size 0x12
+```
+
+`DAT_8026E8B8` is still a pending four-word data export.
+
+`FUN_8002896C` clears one/all six mode/setup records:
+
+```text
++0xF64 + mode * 4 = 0
+clear +0xF7C + mode * 0xDC size 0xDC
+for five 0x2C-byte rows:
+  FUN_80028D4C(playerDataManager, row, 0, 0, mode)
+  FUN_80028FA0(playerDataManager, row, mode)
+```
+
+`FUN_80028D4C` writes row `+0x00/+0x04` for one row across one or all six mode
+records. `FUN_80028FA0` resets row `+0x0C = 0` and `+0x10 = -1` for one row across
+one or all six mode records.
+
+The subblock reset helpers are now identified:
+
+```text
+FUN_800F3940 -> PlayerDataManager_ResetSubBlock14A4
+  clear +0x000 size 0x128
+  clear +0x128 size 4
+  clear +0x154 size 0x14
+  +0x15C = -1
+  clear +0x168 size 0x388
+  +0x17C = 5
+  +0x4F4 = 0
+  +0x4F8 = 0
+  +0x12C/+0x130/+0x134/+0x138/+0x13C/+0x140/+0x144/+0x148/+0x14C/+0x150 = 0
+  +0x4F0 = 1
+
+FUN_800F36C4 -> PlayerDataManager_ResetSubBlock1BA8
+  four 0x20-byte records:
+    {6, 0, 0x52, 0, 0, 0, 0, 0}
+    {6, 1, 0x52, 0, 0, 0, 0, 0}
+    {6, 2, 0x52, 0, 0, 0, 0, 0}
+    {6, 3, 0x52, 0, 0, 0, 0, 0}
+
+FUN_800DE50C -> PlayerDataManager_ResetSubBlock1C28
+  clear first 0x14 bytes
+  bytes +0x00..+0x05 = 0xFF
+  bytes +0x08..+0x0F except +0x0A? are explicitly set to 0xFF by the pasted body
+  +0x14/+0x18/+0x1C/+0x20 = 1
+  +0x24 = -1
+  +0x28 = 0
+
+FUN_800DF6BC -> PlayerDataManager_ResetSubBlock1C54
+  nine records at +0x000 + i * 0x204:
+    clear size 0x204
+    byte +0x50 = 1
+    byte +0x51 = 1
+  four records at +0x1224 + i * 0x20:
+    clear size 0x20
+  +0x12B0/+0x12B4/+0x12B8/+0x12BC/+0x12C0/+0x12C4 = 0
+
+FUN_801206D8 -> PlayerDataManager_ResetSubBlock2F1C
+  +0x04 = 0
+  +0x08 = 1
+  +0x0C = -1
+  +0x10 = 0
+  +0x14 = -1
+  +0x18 = 0
+  +0x19 = byte derived from RuntimeRandom_Next15()
+  +0x1A..+0x1D = 0
+  +0x20 = -1
+
+FUN_80123574 -> PlayerDataManager_ResetSubBlock2F40
+  four words cleared to 0
+```
+
+The remaining pending item in this exact reset path is the four-word data table
+`DAT_8026E8B8`.
 
 ## Main Loop
 
@@ -168,7 +1015,8 @@ Known tick states:
 6  -> setup fade-in
 7  -> fade in
 8  -> setup hold/animation
-9  -> hold logo, animate frames, wait timeout/input
+9  -> hold logo, animate frames, wait timeout/input, and on the second logo step wait
+      for GlobalResourceManager260_UpdateProgress(DAT_802E71B8 +0x260) to finish
 10 -> setup fade-out
 11 -> fade out, maybe next logo step
 12 -> wait for system fade/task complete
@@ -271,6 +1119,252 @@ The next likely per-frame/render targets are therefore:
 ```text
 FUN_800418F8  -> state 3
 CGame_UpdateActiveGameplayTransitionState -> state 4
+```
+
+`FUN_8003C4F8` tears down/reset CGame runtime state and returns the caller-supplied
+next module/state value. Suggested name:
+
+```text
+CGame_TeardownRuntimeState
+```
+
+Confirmed behavior:
+
+```text
+mirror cgame +0xB0 low five bits into DAT_802E71B8 +0x260 records
+reset gLargeResourceManager and gManager_802E70A4
+release movie slot cgame +0x414 and reset transition subsystem cgame +0x428
+destroy active controller cgame +0x42C through vtable +0x10 and controller destroy
+reset/clear CGame subsystems +0x3F0..+0x410 and +0x428
+release owned subsystem objects and null +0x40C/+0x410
+restore UI/input flags from cgame +0xA8/+0xB4 and +0xB0
+run local cleanup 0x8003BF90, clear UI root, reset render/GX state
+```
+
+`FUN_800439AC` is the heavy active CGame runtime update/render pass. Suggested name:
+
+```text
+CGame_UpdateAndRenderActiveGameplayRuntime
+```
+
+The attached decompile shows the live frame path after the active controller exists at
+`cgame +0x42C`. It runs controller vtable `+0x34`, toggles render/movie manager state,
+calls `ActiveControllerMovieBindings_SetTransitionFlagAndUpdateVisibility`, updates
+large-resource transition state, calls controller vtable `+0x38`, pushes matrices into
+model subsystems, calls controller vtable `+0x3C`, walks the `cgame +0x2D0` entry list
+to submit model draws, then runs the UI/effect/model-manager render phases and updates
+subsystem `cgame +0x428`.
+
+`FUN_80027FFC` returns the first word of a small player-data/state block. Suggested
+name:
+
+```text
+PlayerDataState_GetCurrentValue
+```
+
+Confirmed behavior:
+
+```text
+return state[0]
+```
+
+The attached `FUN_80041A9C` sets up active gameplay transition resources immediately
+before the transition timing/update handoff. Suggested name:
+
+```text
+CGame_SetupActiveGameplayTransitionResources
+```
+
+Confirmed behavior:
+
+```text
+cgame +0x41C = 0
+cgame +0x418 = 0
+if cgame +0xC0 == 5 or cgame +0xBC == 6:
+  cgame +0x418 = 1
+
+read player-data values through FUN_80028040/FUN_80028048
+reset transition subsystem cgame +0x428
+configure gLargeResourceManager from cgame +0xC4/+0xD0/+0x11C/+0x120
+configure large-resource banks 5..6 from entries at cgame +0x258
+configure five large-resource banks from entries at cgame +0x12C
+store derived bank ids in a five-entry local map
+apply tempo/timing values from DAT_8026E828
+wire transition subsystem cgame +0x428 with cgame +0xB8 and cgame +0x3F8
+call active controller vtable +0x18
+set per-entry state on subsystem cgame +0x400
+FUN_801007B8(gUiRootManager, 1)
+FUN_800249A8(gManager_802E70A4, FLOAT_802E8308)
+cgame +0x420 = 1
+```
+
+`FUN_800421A0` derives and commits active gameplay transition timing. Suggested name:
+
+```text
+CGame_UpdateActiveGameplayTransitionTiming
+```
+
+Confirmed behavior:
+
+```text
+duration = UiRootManager_GetSelectionPanelAnimationDuration(gUiRootManager)
+transitionTicks = FLOAT_802E8304 * (duration / FLOAT_802E831C)
+
+if cgame +0xB8 == -1:
+  if cgame +0xBC == 8 or cgame +0x94 == 0:
+    playerCount = FUN_800282CC(gPlayerDataManager)
+    inactiveCount = FUN_800282C4(gPlayerDataManager)
+    if playerCount - inactiveCount <= 1:
+      if cgame +0xBC == 8 or cgame +0x94 != 0:
+        FUN_801004F8(gUiRootManager)
+      else:
+        FUN_801004E8(gUiRootManager)
+        transitionTicks = 2000
+    else:
+      FUN_801004E0(gUiRootManager)
+  else:
+    FUN_801004E0(gUiRootManager)
+
+halfTicks = transitionTicks >> 1 & 0x7FFF
+FUN_8012576C(cgame +0x428)
+FUN_80026AC8(gLargeResourceManager, halfTicks)
+FUN_80024578(gManager_802E70A4, halfTicks)
+FUN_8002483C(gManager_802E70A4, transitionTicks & 0xFFFF)
+```
+
+`FUN_80100538` forwards to the selection panel at `gUiRootManager +0x34`. Suggested
+name:
+
+```text
+UiRootManager_GetSelectionPanelAnimationDuration
+```
+
+`FUN_801054D8` computes the underlying panel duration. Suggested name:
+
+```text
+CGameUiSelectionPanel_GetAnimationDuration
+```
+
+Confirmed behavior:
+
+```text
+if panel +0x20 == 1:
+  duration = CzanUiManager_GetObjectAnimationDuration(global UI manager, panel[1], 0, 1)
+else:
+  duration = CzanUiManager_GetObjectAnimationDuration(global UI manager, panel[0], 0, 1)
+
+return duration / FLOAT_802E9214
+```
+
+`FUN_80100520` forwards to the same selection panel at `gUiRootManager +0x34`.
+Suggested name:
+
+```text
+UiRootManager_IsSelectionPanelIdle
+```
+
+`FUN_801054B8` is the underlying panel-state test. Suggested name:
+
+```text
+CGameUiSelectionPanel_IsIdle
+```
+
+Confirmed behavior:
+
+```text
+return countLeadingZeros(*(panel +0x14)) >> 5
+```
+
+That is `1` only when the panel state word at `+0x14` is zero.
+
+The host has these names and call shapes in code, but the full tick computation still
+needs exported `gUiRootManager`, `gLargeResourceManager`, `gManager_802E70A4`, and
+`gPlayerDataManager` pointers to drive the exact manager side effects.
+
+`FUN_801004E0`, `FUN_801004E8`, and `FUN_801004F8` are UI-root wrappers for the three
+transition branches used by `CGame_UpdateActiveGameplayTransitionTiming`.
+
+```text
+FUN_801004E0 -> UiRootManager_SelectDefaultTransition
+  calls CGameUiSelectionPanel_SelectDefaultTransition(*(uiRootManager +0x34))
+
+FUN_801004E8 -> UiRootManager_SelectShortTransition
+  calls CGameUiSelectionPanel_SelectShortTransition(*(uiRootManager +0x34))
+
+FUN_801004F8 -> UiRootManager_SelectImmediateTransition
+  calls CGameUiSelectionPanel_SelectImmediateTransition(*(uiRootManager +0x34))
+```
+
+`FUN_8010502C` is the default selection-panel transition branch. Suggested name:
+
+```text
+CGameUiSelectionPanel_SelectDefaultTransition
+```
+
+Confirmed behavior:
+
+```text
+if panel[5] == 0:
+  panel[5] = 4
+  CzanUiManager_SetObjectGroupEnabled(global UI manager, panel[0], 0)
+  CzanUiManager_ResetObjectGroupAnimationTime(0.0, global UI manager, panel[0])
+  CGameUi_StartObjectGroupAnimation(panel[0], panel[0x20], 0, 0)
+  GlobalCueManager_PlayCue(0.0, gManager_802E70A4, 0x25A, 0, 0)
+```
+
+`FUN_801050BC` is the short/alternate selection-panel transition branch. Suggested
+name:
+
+```text
+CGameUiSelectionPanel_SelectShortTransition
+```
+
+Confirmed behavior:
+
+```text
+if panel[5] == 0:
+  panel[5] = 4
+  CzanUiManager_SetObjectGroupEnabled(global UI manager, panel[0], 0)
+  CzanUiManager_ResetObjectGroupAnimationTime(0.0, global UI manager, panel[0])
+  CGameUi_StartObjectGroupAnimation(panel[0], panel[0x20] + 2, 0, 0)
+  GlobalCueManager_PlayCue(0.0, gManager_802E70A4, 0x261, 0, 0)
+```
+
+`FUN_80105150` is the immediate selection-panel transition branch. Suggested name:
+
+```text
+CGameUiSelectionPanel_SelectImmediateTransition
+```
+
+Confirmed behavior:
+
+```text
+if panel +0x14 == 0:
+  panel +0x14 = 4
+  CzanUiManager_SetObjectGroupEnabled(global UI manager, panel[1], 0)
+  CGameUi_StartObjectGroupAnimation(panel[1], 0, 0, 0)
+  panel +0x20 = 1
+  GlobalCueManager_PlayCue(0.0, gManager_802E70A4, 0x274, 0, 0)
+```
+
+`FUN_801007B8` forwards to a sub-manager at `uiRootManager +0x44`. Suggested name:
+
+```text
+UiRootManager_SetSubManager44Value
+```
+
+`FUN_8010D8C0` is the sub-manager setter. Suggested name:
+
+```text
+UiRootSubManager44_SetValue
+```
+
+Confirmed behavior:
+
+```text
+if subManager +0x08 == 1:
+  subManager +0x14 = -1
+  subManager +0x0C = value
 ```
 
 `FUN_800418F8` is the state-3 setup/transition state machine. Suggested name:
@@ -1077,7 +2171,7 @@ call FUN_80114BF0 and possibly restart UI/effect fade state
 The matrix helpers in that path are:
 
 ```text
-FUN_8015EAD0 -> CzanModelOwner_CopyCurrentModelMatrix
+FUN_8015EAD0 -> CzanModelOwner_CopyCurrentModelMatrix; copies owner +0x4C
 FUN_80052D98 -> CzanModelManager_UpdateCurrentModeMatrices
 FUN_80059294 -> CtsStageObjDescriptor_GetModelTransform
 FUN_8011F8A8 -> CzanModelLiveObject_SetModelMatrices
@@ -1468,7 +2562,7 @@ Confirmed substates:
   substate = 2
 
 2:
-  result = FUN_8003C9A0(cgame)
+  result = CGame_UpdateViewerSetupSelection(cgame)
   if result == -1:
     cgame +0x08 = 5
   else if result == 1:
@@ -1489,7 +2583,56 @@ Confirmed substates:
 ```
 
 This is the runtime path that calls `BootResourceBundle_ApplyLoadedResources`, which then
-feeds `resourceBundle[7] +0x10` into `LargeResourceManager_ReloadFromLink`.
+feeds `resourceBundle[7] +0x10` into `LargeResourceManager_ReloadFromDefaultLink`.
+
+`FUN_8003C9A0` is the interactive debug/viewer setup selector used by
+`CGame_PrepareManagersAndResources` after the boot resource bundle is applied.
+Suggested name:
+
+```text
+CGame_UpdateViewerSetupSelection
+```
+
+Confirmed behavior:
+
+```text
+left/right on controller 4:
+  switch selected row cgame +0x14 between STYLE and MODE
+  clear cgame +0x48 pulse timer
+
+when selected row is STYLE:
+  up/down cycles cgame +0xC8 through allowed style ids 0, 3, 4, 6
+
+when selected row is MODE:
+  up/down cycles cgame +0x10 between 0 and 1
+
+cgame +0xC0 = local type table[cgame +0x10]
+accept input -> return 1
+cancel input -> return -1
+otherwise -> return 0
+
+draws one of:
+  SSQ VIEWER
+  MOTION VIEWER
+  VIEWER
+
+then draws:
+  STYLE : <label>
+  MODE  : <label>
+
+cgame +0x48 increments every frame
+```
+
+Important fields:
+
+```text
+cgame +0x10 -> mode/type index, 0..1
+cgame +0x14 -> selected debug row, 0 STYLE, 1 MODE
+cgame +0x48 -> pulse/highlight timer
+cgame +0xB8 -> viewer kind; 0 SSQ, 1 MOTION, otherwise generic VIEWER
+cgame +0xC0 -> selected local type value/pointer
+cgame +0xC8 -> style id
+```
 
 `FUN_8003EE48` is a sibling CGame setup/loading state machine that eventually calls
 `CGame_LoadSceneResourceManagers`, but has different result states. Suggested name:
@@ -1649,7 +2792,7 @@ slot 1 -> resourceBundle[3] -> /mii/RFLRes01.arc
 slot 2 -> resourceBundle[4] -> /text/text_*.bin
 slot 3 -> resourceBundle[5] -> /font/font_*.bin
 slot 4 -> resourceBundle[6] -> /select/select_cmn.bin
-slot 5 -> resourceBundle[7] -> /ssq/SSQ_CMN*.bin -> LargeResourceManager_ReloadFromLink
+slot 5 -> resourceBundle[7] -> /ssq/SSQ_CMN*.bin -> LargeResourceManager_ReloadFromDefaultLink
 slot 6 -> resourceBundle[8] -> /2Dcommon/comAF_*.bin -> UiRootManager_LoadResource
 slot 7 -> resourceBundle[9] -> /Pointer/Pointer.bin
 ```
@@ -1672,6 +2815,30 @@ Suggested name:
 BootResourceBundle_ApplyLoadedResources
 ```
 
+`FUN_800221BC` constructs that boot/resource bundle before loading begins. Suggested
+name:
+
+```text
+BootResourceBundle_Init
+```
+
+Confirmed behavior:
+
+```text
+resourceBundle[0x126] = vtable/type pointer
+resourceBundle[0] = -1
+clear resourceBundle[1..] size 0x438
+resourceBundle[0x10F] = 0
+clear resourceBundle[0x110..0x111] size 8
+resourceBundle[0x111] = 0xFFFF
+clear resourceBundle[0x112..] size 0x30
+resourceBundle[0x113] = -1
+resourceBundle[0x115] = -1
+resourceBundle[0x11E..0x120] = 0
+clear resourceBundle[0x121..] size 8
+resourceBundle[0x123..0x125] = 0
+```
+
 Confirmed behavior:
 
 ```text
@@ -1690,7 +2857,7 @@ resourceBundle[3] +0x10 -> DAT_802E71F8 manager setup
 resourceBundle[4] +0x10 -> gManager_802E70B0 setup
 resourceBundle[5] +0x10 -> large sub-manager setup through FUN_800B72F8
 resourceBundle[6] +0x10 -> gCharacterAssetManager setup
-resourceBundle[7] +0x10 -> gLargeResourceManager via LargeResourceManager_ReloadFromLink
+resourceBundle[7] +0x10 -> gLargeResourceManager via LargeResourceManager_ReloadFromDefaultLink
 resourceBundle[8] +0x10 -> gUiRootManager via UiRootManager_LoadResource
 resourceBundle[9] +0x10 -> gManager_802E70B4 setup
 ```
@@ -1706,7 +2873,7 @@ Confirmed behavior:
 ```text
 if resourceBundle[1] == 1:
   FUN_8010E95C(gManager_802E70B4)
-  FUN_80025DEC(gLargeResourceManager)
+  LargeResourceManager_ResetLoadedState(gLargeResourceManager)
   FUN_800FE8C8(gUiRootManager)
   CharacterAssetManager_UnloadActiveAssets(gCharacterAssetManager)
   FUN_800B73F4()
@@ -1752,7 +2919,7 @@ gLargeResourceManager
 `FUN_80025CA0` reloads this manager from a link resource passed in `r4`. Suggested name:
 
 ```text
-LargeResourceManager_ReloadFromLink
+LargeResourceManager_ReloadFromDefaultLink
 ```
 
 Confirmed behavior:
@@ -1796,3 +2963,415 @@ CzanLinkManager_InitAndSetLink
 
 The listing confirms `r3` is preserved as `linkManager` and incoming `r4` is passed
 through as `linkData`.
+
+The `FUN_8002ADxx/FUN_8002AExx` helpers are input/menu-state queries over one
+`0x20`-byte controller record. Suggested names:
+
+```text
+FUN_8002AE28 -> InputOrMenuStateManager_TestHeldMask
+FUN_8002AE48 -> InputOrMenuStateManager_TestTriggeredMask
+FUN_8002ADE0 -> InputOrMenuStateManager_IsConfirmPressed
+FUN_8002ADF4 -> InputOrMenuStateManager_IsBackPressed
+```
+
+Confirmed behavior:
+
+```text
+InputOrMenuStateManager_TestHeldMask(manager, controller, mask):
+  return (*(manager + controller * 0x20 +0x08) & mask) != 0
+
+InputOrMenuStateManager_TestTriggeredMask(manager, controller, mask):
+  return (*(manager + controller * 0x20 +0x10) & mask) != 0
+
+InputOrMenuStateManager_IsConfirmPressed(manager, controller):
+  return (*(manager + controller * 0x20 +0x08) >> 11) & 1
+
+InputOrMenuStateManager_IsBackPressed(manager, controller):
+  return (*(manager + controller * 0x20 +0x08) >> 10) & 1
+```
+
+The mask helpers use the branchless `(-mask | mask) >> 31` boolean idiom.
+
+`FUN_80131B38` formats a string into a caller-provided buffer through
+`RuntimeFormatWrite`. Suggested name:
+
+```text
+RuntimeString_FormatBuffer
+```
+
+`FUN_80145060`, `FUN_80145104`, and `FUN_80145390` are the debug text draw helpers
+used by `CGame_UpdateViewerSetupSelection`.
+
+```text
+FUN_80145060 -> DebugText_SetGlyphSize
+FUN_80145104 -> DebugText_Draw
+FUN_80145390 -> DebugText_ConfigureRenderState
+FUN_80144F48 -> DebugText_InitFontBacking
+FUN_801A9050 -> DebugText_LoadFontPlanes
+FUN_801A8460 -> DebugText_LoadFontPlane
+FUN_801A8DE0 -> DebugText_DecodePackedGlyphPlane
+```
+
+`DebugText_Draw` resolves glyphs from the font texture globals, configures render state
+through `DebugText_ConfigureRenderState(7)`, and emits one quad per glyph.
+
+The font backing init sets glyph size `0x18`, plane count `6`, allocates the backing
+buffer, loads/decodes font plane data, then derives font UV scales from header fields
+`+0x10/+0x12` divided by `+0x1E/+0x20`. The actual plane load still depends on fixed
+Wii source reads through `FUN_801AB8F0` and a `Yay` decompression path; the host now has
+the named entry points and the packed glyph-plane decoder, but not the fixed-address
+asset read.
+
+`FUN_80188284` lazily creates the `DAT_802E71F8` global UI/frame state object:
+
+```text
+GlobalUiFrameState_CreateOnce
+```
+
+It allocates `0xF4` bytes, clears `+0x00..+0xE3`, clears `+0xE4/+0xE8/+0xEC`, and
+stores the vtable pointer at `+0xF0`.
+
+`FUN_801731E4` allocates the Czan UI manager object-group storage:
+
+```text
+CzanUiManager_AllocateObjectGroupStorage
+```
+
+It first updates projection globals through `FUN_80170FA4`, then allocates
+`groupCapacity` records of size `0x28`, initializes each group as empty
+(`+0x00 = -1`, cleared fields), allocates a small four-byte table at manager `+0x08`,
+stores pointer capacity at `+0x0C`, and allocates the pointer table at `+0x1C`.
+
+`FUN_80170FA4` derives the global UI projection/view matrices from display config
+under `DAT_802E71B8 +0x258`. It calls `FUN_801B0C30`, now named
+`BuildPerspectiveProjectionMatrix`, to fill the projection matrix.
+
+`FUN_80168060` only writes `DAT_802E71E0`. Suggested host name:
+
+```text
+Runtime_SetSoundArchiveReloadGuard
+```
+
+The global is read around `CzanSoundManager_LoadArchive`, where the game temporarily
+queries/restores low-level state while replacing the active BRSAR archive. The exact
+subsystem meaning should stay cautious until `FUN_80144F34`, `FUN_80144F3C`,
+`FUN_80144EF4`, and `FUN_80144EA0` are fully recovered.
+
+`FUN_80141AA4` copies a four-byte color/config block from the global-context
+submanager family. Suggested name:
+
+```text
+GlobalSubManager274_CopyRgba48
+```
+
+Confirmed behavior:
+
+```text
+out[0] = *(manager +0x48)
+out[1] = *(manager +0x49)
+out[2] = *(manager +0x4A)
+out[3] = *(manager +0x4B)
+```
+
+`FUN_80100510` is a tiny UI-root wrapper. Suggested name:
+
+```text
+CGameUiRoot_AdvanceSelectionPanelState
+```
+
+Confirmed behavior:
+
+```text
+CGameUiSelectionPanel_AdvanceState(*(uiRoot +0x34))
+```
+
+`FUN_80105318` advances one selection-panel state machine and starts the matching UI
+object group animation. Suggested name:
+
+```text
+CGameUiSelectionPanel_AdvanceState
+```
+
+Confirmed state transitions:
+
+```text
+state 5 -> 6:
+  if panel +0x20 == 0:
+    disable panel[0] through CzanUiManager_SetObjectGroupEnabled
+    reset panel[0] animation time to 0.0
+    start panel[0] animation panel[0x20] + 1 through CGameUi_StartObjectGroupAnimation
+    play global cue 0x259 through GlobalCueManager_PlayCue
+  else:
+    disable panel[1]
+    start panel[1] animation 1 through CGameUi_StartObjectGroupAnimation
+  reset menu presentation grid through gUiRootManager
+
+state 2 -> 3:
+  disable panel[2]
+  start panel[2] animation 1 through CGameUi_StartObjectGroupAnimation
+  play global cue 0x25F through GlobalCueManager_PlayCue
+  reset menu presentation grid
+
+state 8 -> 9:
+  disable panel[3]
+  start panel[3] animation 1 through CGameUi_StartObjectGroupAnimation
+  play global cue 0x25D through GlobalCueManager_PlayCue
+  reset menu presentation grid
+```
+
+The function uses the global Czan UI manager at `DAT_802E71B8 +0x270`.
+
+`FUN_80062D58` is the CGame/UI convenience wrapper used by the state machine above.
+Suggested name:
+
+```text
+CGameUi_StartObjectGroupAnimation
+```
+
+Confirmed behavior:
+
+```text
+CzanUiManager_SetObjectGroupAnimationMode(global UI manager, group, arg3)
+CzanUiManager_StartObjectGroupAnimation(0.0f, global UI manager, group, animationIndex)
+CzanUiManager_SetObjectGroupAnimationResetMode(global UI manager, group, arg2)
+```
+
+The three Czan UI manager helpers are:
+
+```text
+FUN_80174FE0 -> CzanUiManager_SetObjectGroupAnimationMode
+  writes object +0x175 for every child in the group
+
+FUN_80174E2C -> CzanUiManager_StartObjectGroupAnimation
+  calls CzanUiObjectInstance_StartAnimation(startFrame, child, animationIndex)
+  for every child in the group, then marks uiManager +0x18 dirty when +0x1A is zero
+
+FUN_80174F60 -> CzanUiManager_SetObjectGroupAnimationResetMode
+  writes object +0x174 and clears object +0xB1 for every child in the group
+```
+
+`FUN_8002425C` resolves and starts a global cue/effect. Suggested name:
+
+```text
+GlobalCueManager_PlayCue
+```
+
+Confirmed behavior:
+
+```text
+initialize stack transform/state through FUN_80166D54
+local_7C = startTime
+local_78 = FLOAT_802E7BC8
+local_74 = FLOAT_802E7BC8
+local_88 = -1
+local_84 = -1
+GlobalCueManager_ResolveCueId(cueId, &local_88, &local_84)
+if local_88 != -1:
+  return CzanEffectManager_StartEffect(*(DAT_802E71B8 +0x268),
+                                       local_88,
+                                       local_84,
+                                       arg4 != 0,
+                                       stackTransform,
+                                       arg3,
+                                       -1)
+return -1
+```
+
+`FUN_800F3158` resolves packed/randomized cue ids. Suggested name:
+
+```text
+GlobalCueManager_ResolveCueId
+```
+
+Confirmed behavior:
+
+```text
+outEffectId = -1
+outEffectParam = -1
+
+if cueId != -1:
+  if cueId bit 0x80000 is set:
+    cueId = -1
+  if cueId has any high bits in 0xFFFF8000:
+    variantBits = cueId & 0x78000
+    cueId = cueId & 0x7FFF
+    if variantBits != 0:
+      variantCount = variantBits >> 15
+      cueId += RuntimeRandom_Next15() % variantCount
+
+outEffectId = cueId
+```
+
+`FUN_80131C0C` is the RNG used by the cue resolver and other random menu paths.
+Suggested name:
+
+```text
+RuntimeRandom_Next15
+```
+
+It updates `DAT_802E68D8` with:
+
+```text
+seed = seed * 0x41C64E6D + 0x3039
+return seed >> 16 & 0x7FFF
+```
+
+`FUN_8016B270` is now named `CzanEffectManager_StartEffect`, but its internal effect
+pool still needs a dedicated decompile before the host can do more than preserve
+synthetic effect handles.
+
+`FUN_80100460` forwards from `gUiRootManager` to the menu presentation grid object.
+Suggested name:
+
+```text
+CGameUiRoot_ResetMenuPresentationGrid
+```
+
+Confirmed behavior:
+
+```text
+ActiveGameplayControllerBase_ResetMenuPresentationGrid(*(uiRoot +0x38))
+```
+
+`FUN_800DA01C` initializes one menu/UI reference-state record. Suggested name:
+
+```text
+CGameUiReferenceState_Init
+```
+
+Confirmed layout:
+
+```text
+state +0x14 = enabled
+
+if enabled:
+  +0x08 = trackedChildIndex
+  +0x00 = objectGroupHandle
+  +0x04 = childObjectIndex
+  +0x0C = linkedHandle
+  +0x10 = 0
+  +0x18 = 0
+  +0x1C = 0
+  +0x20 = FLOAT_802E8BC8
+  CzanUiManager_GetChildObjectDimensions(global UI manager,
+                                         objectGroupHandle,
+                                         childObjectIndex,
+                                         state +0x24,
+                                         state +0x28)
+  if width/height are negative, multiply by FLOAT_802E8CB0
+  for 0x16 color words at +0x30:
+    set rgba to 0xFF,0xFF,0xFF,0xFF
+```
+
+`FUN_801760EC` is the child dimension query used above. Suggested name:
+
+```text
+CzanUiManager_GetChildObjectDimensions
+```
+
+`FUN_80176E34` writes one child object's `+0x188` field. Suggested name:
+
+```text
+CzanUiManager_SetChildObjectLinkedHandle
+```
+
+Confirmed behavior:
+
+```text
+object = *( *( *(uiManager +4) + group * 0x28 +0x20 ) + childIndex * 4 )
+object +0x188 = linkedHandle
+```
+
+The attached `FUN_800CF044` initializes a larger selection/menu UI sub-manager around
+object group `+0x96C`. Suggested name:
+
+```text
+CGameUiSubManager_InitSelectionReferenceGroups
+```
+
+Confirmed flow:
+
+```text
+build small position offset vector
+run local reset/setup helper FUN_800D67B8(subManager)
+
+CGameUiReferenceState_Init(subManager,
+                           enabled = (subManager +0xA90 == 0),
+                           group = subManager +0x96C,
+                           child = 0x0C,
+                           trackedChild = 0x40,
+                           linkedHandle = -1)
+
+if enabled:
+  +0x9B0 = +0x96C
+  +0x9B4 = 10
+  +0x9B8 = UiRootManager_CreateReferenceObjectGroup(gUiRootManager, +0x96C, 10, 0x1F)
+
+for six secondary records:
+  CGameUiReferenceState_Init(record, 0, -1, -1, -1, -1)
+  clear companion state
+
+if +0x4E8 == 2:
+  +0xA80 = 1
+  +0xA74 = +0x96C
+  +0xA78 = 2
+  +0xA7C = UiRootManager_CreateReferenceObjectGroup(gUiRootManager, +0x96C, 2, 0x1F)
+else:
+  +0xA80 = 0
+
+if +0x550 bit 0x2000:
+  link +0x970 to child 0x3A of +0x96C
+  link +0x98C to child 0x3E of +0x96C
+  apply child position offset to children 0x3A and 0x3E
+else:
+  link +0x970 to child 0x38 of +0x96C
+  link +0x98C to child 0x3C of +0x96C
+
+enable groups +0x970 and +0x98C
+
+set +0x188 to 0 on children:
+  4, 6, 0x42, 0x0C..0x21, 0x40, 8, 10, 0x44, 0x4A, 0x4B,
+  0x38, 0x3A, 0x3C, 0x3E
+
+set +0x188 to 1 on children:
+  5, 7, 0x43, 0x22..0x37, 0x41, 9, 0x0B, 0x45, 0x4C, 0x4D,
+  0x39, 0x3B, 0x3D, 0x3F
+```
+
+The host has the small helpers implemented. The full sub-manager body still needs the
+real `gUiRootManager` export before its `UiRootManager_CreateReferenceObjectGroup`
+calls can be made accurately.
+
+`FUN_80106964` resets the two-bank menu presentation grid. Suggested name:
+
+```text
+ActiveGameplayControllerBase_ResetMenuPresentationGrid
+```
+
+Confirmed structure:
+
+```text
+if grid +0x04 == 1:
+  grid +0x04 = 0
+  for childIndex in 0..0x27:
+    CzanUiManager_SetObjectTextureFrame(global UI manager,
+                                        groupHandle = grid[2 + childIndex],
+                                        childObjectIndex = 0,
+                                        textureFrame = childIndex,
+                                        updateSpriteDimensions = 0)
+
+clear aggregate/timer floats at +0xA8/+0xAC/+0x488/+0x48C
+
+for two banks:
+  for 0x28 entries:
+    mask = FUN_8012A5DC(0, 1, childIndex)
+    if entry is not masked:
+      seed per-entry animation bounds from FLOAT_802E923C/FLOAT_802E9240
+      enable the entry object group when handle != -1
+    else:
+      copy cached position pair
+```
+
+The packed float/int layout for the two 0xF8-word banks is not fully mutated in the
+host yet; the current executable preserves the confirmed texture-frame reset and
+group-enable side effects.

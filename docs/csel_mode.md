@@ -655,20 +655,39 @@ Status after this: the ZAB attach/parse chain is identified from
 is host-side implementation of the runtime allocations and draw submission, not mystery
 about where the ZAB blocks go.
 
-`FUN_8015EBF4` is the owner-side frame/start value setter. Suggested name:
+`FUN_8015C548` starts one CzanModel animation channel. Suggested name:
 
 ```text
-CzanModelOwner_SetAnimationStartFrame
+CzanModel_StartAnimationChannel
+```
+
+Confirmed behavior:
+
+```text
+channel = model +0x230 + channelIndex * 0x24
+channel +0x00 = startFrame
+channel +0x04 = animationIndex
+channel +0x08 = loop flag
+channel +0x0C = model +0x14 + animationIndex * modelObjectCount * 0x74
+channel +0x10 = animationRecord +0x34 duration
+channel +0x18/+0x1C = blend state
+```
+
+`FUN_8015EBF4` is the owner-side playback speed setter. Suggested name:
+
+```text
+CzanModelOwner_SetAnimationSpeed
 ```
 
 Confirmed behavior:
 
 ```text
 if owner +0x80 != 0:
-  *(*(owner +0x80) + 0x250) = startFrame
+  *(*(owner +0x80) + 0x250) = speed
 ```
 
-In `select_cmn`, it is called with `1.0` after attaching all ten continuation blocks.
+In `select_cmn`, `0x80098DFC` / `0x80098EAC` call this with `1.0` before
+starting one of the ten background transition animations.
 
 `FUN_80177CA8` loads a collection/bank of `CzanModel` objects from a WII link
 resource. Suggested name:
@@ -3340,6 +3359,9 @@ The lower allocator lock wrappers are now named:
 
 ```text
 FUN_801A9430 -> Runtime_EnterCriticalSection
+FUN_801A9470 -> Runtime_LeaveCriticalSection
+FUN_801AD410 -> Runtime_GetTimebase
+FUN_801AD440 -> Runtime_GetBootTime
 FUN_801AC0A0 -> Runtime_GetCurrentThreadContext
 FUN_801AA6E0 -> MemoryMutex_Lock
 FUN_801AA7C0 -> MemoryMutex_Unlock
@@ -3349,6 +3371,11 @@ FUN_801DC520 -> MemoryPool_AllocateAligned
 `Runtime_EnterCriticalSection` reads the PowerPC MSR and returns a token consumed by
 the matching restore helper `FUN_801A9470`. The decompile shows the low word as the
 original MSR and the high word as a masked/shifted copy of selected MSR state.
+`Runtime_LeaveCriticalSection` returns `(MSR >> 0x0F) & 1` from the restored token.
+
+`Runtime_GetTimebase` is the raw `FUN_801AD410` timebase read helper. `Runtime_GetBootTime`
+wraps it with `Runtime_EnterCriticalSection` / `Runtime_LeaveCriticalSection` and adds
+the boot offset stored at `DAT_800030D8/DAT_800030DC`.
 
 `Runtime_GetCurrentThreadContext` returns `DAT_800000E4`, which is the current
 thread/context pointer used by the allocator lock code. `MemoryMutex_Lock` reads and
@@ -3512,6 +3539,13 @@ FUN_8011058C -> CSelModeEntry_AddChildUiObject
 FUN_801106C4 -> CSelModeEntry_ResetObjectAnimation
   Forwards the selected object handle to the Czan UI manager reset/clear-animation helper.
 
+FUN_80110680 -> CSelModeEntry_IsObjectAnimationDone
+  Returns CzanUiManager_IsObjectGroupAnimationDone(entry->uiManager, handle) when
+  the stored object handle is valid.
+
+FUN_801106D8 -> CSelModeEntry_GetCachedAnimationId
+  Returns the cached animation id stored at entry +0x24 + objectSlot*4.
+
 FUN_801105FC -> CSelModeEntry_StartObjectAnimation
   Configures mode/playback flags, starts the selected animation with a start frame,
   and caches the animation id at entry +0x24 + objectSlot*4.
@@ -3530,6 +3564,12 @@ FUN_80110B80 -> CSelModeEntry_PlayObject
 
 FUN_80110BF4 -> CSelModeEntry_SetTransformTriplet
   Copies three 32-bit values into entry +0x44, +0x48, +0x4C.
+
+FUN_80110C10 -> CSelModeEntry_GetTransformState1
+  Returns entry +0x48.
+
+FUN_80110C18 -> CSelModeEntry_GetTransformState2
+  Returns entry +0x4C.
 ```
 
 `FUN_80175448` is best named:
@@ -3594,7 +3634,7 @@ object +0x028 -> resolved linked sprite candidate
 object +0x148 -> texture-frame override; -1 affects skip/link path
 object +0x160 -> object state/id used when resolving linked child sprite
 object +0x16C -> current animation index
-object +0x173 -> enabled/visibility flag checked before drawing
+object +0x173 -> draw-suppression flag checked before drawing; 0 enters the draw path, nonzero suppresses it
 object +0x198 -> CAE descriptor
 object +0x1A0 -> callback ordering flag
 object +0x1A4 -> owning object-group handle
@@ -3651,8 +3691,9 @@ for each child in group:
 ```
 
 This is separate from `CzanUiManager_SetObjectGroupEnabled` / `FUN_80174F04`, which
-writes `object +0x173`. The draw traversal in `CzanUiManager_DrawObjectListReverse`
-requires `object +0x181 == 1`.
+writes `object +0x173`. Despite the older host name, `+0x173` is inverted: the
+object draw wrapper suppresses drawing when it is nonzero. The draw traversal in
+`CzanUiManager_DrawObjectListReverse` still requires `object +0x181 == 1`.
 
 The global Czan UI draw is reached from `FUN_800FEB58`, suggested name:
 
@@ -4165,6 +4206,42 @@ texture/dummy pointer
 loads a texture object when one is provided, then writes four vertices/colors directly
 to the GX FIFO.
 
+## Texture Release
+
+`FUN_801467FC` releases one `zanTexture` slot. Suggested name:
+
+```text
+TextureSlot_Release
+```
+
+Confirmed behavior:
+
+```text
+if slot +0x0C != 0:
+  if slot +0x00 == 0 and slot +0x04 == 0:
+    free nested GX/TPL allocation records through slot +0x08
+  free slot +0x0C
+  clear slot +0x00/+0x04/+0x08/+0x0C
+  return 1
+
+if slot +0x00 != 0:
+  clear slot +0x00/+0x04
+  return 1
+
+return 0
+```
+
+`FUN_80146B8C` releases one indexed texture entry from a texture manager. Suggested
+name:
+
+```text
+TextureManager_DeleteTexture
+```
+
+It reads the slot at `manager[0] + textureIndex * 0x14`, calls
+`TextureSlot_Release`, and decrements `manager[1]` when release succeeds. If release
+fails despite an active slot, it reports `zanTexture: warning DeleteTexture`.
+
 ## Czan UI Object Group Creation
 
 `FUN_80173414` is the allocator/builder used by `CSelModeEntry_AddUiObject`. Suggested
@@ -4249,7 +4326,7 @@ Object descriptor fields inside the group metadata block:
 Descriptor `+0x1A` confirmed flag effects:
 
 ```text
-0x001 -> object +0x173 = 1, enabled/visible for object draw wrapper.
+0x001 -> object +0x173 = 1, suppresses the object in the draw wrapper.
 0x002 -> object +0x174 = 1 and object +0x0B1 = 0, playback/end state override.
 0x004 -> starts animation 0 immediately.
 0x008 -> contributes 1 to object +0x175 mode value.
@@ -4530,8 +4607,9 @@ Confirmed command behavior:
 
 ```text
 0x00 -> end/restart/stop command.
-       If object +0x174 == 0, marks playback finished. Otherwise resets +0x19C to the
-       selected animation entry start and sets +0xB2.
+       If object +0x174 == 0, sets +0xB1. If object +0x175 == 1 in that path, it
+       also sets +0x173, which suppresses drawing. If object +0x174 is nonzero,
+       it resets +0x19C to the selected animation entry start and sets +0xB2.
 
 0x01 -> set object +0x160 from next value.
 
@@ -4754,6 +4832,15 @@ confirmPressed -> FUN_8002ADE0(gInputOrMenuStateManager, 4)
 backPressed    -> FUN_8002ADF4(gInputOrMenuStateManager, 4)
 ```
 
+Named helper mapping:
+
+```text
+FUN_8002AE28 -> InputOrMenuStateManager_TestHeldMask
+FUN_8002AE48 -> InputOrMenuStateManager_TestTriggeredMask
+FUN_8002ADE0 -> InputOrMenuStateManager_IsConfirmPressed
+FUN_8002ADF4 -> InputOrMenuStateManager_IsBackPressed
+```
+
 Update fields:
 
 ```text
@@ -4928,11 +5015,26 @@ block 5:
 
 blocks 6..0xF:
   CzanModelOwner_LoadContinuationBlock(selectCommon +0x128, block, index 0..9)
-  CzanModelOwner_SetAnimationStartFrame(selectCommon +0x128, 1.0)
+  CzanModelOwner_SetAnimationSpeed(selectCommon +0x128, 0.0)
 
 block 0x10:
   create the shared CSelModeEntry UI object group and two mirrored entries
 ```
+
+`FUN_80098BF0` / `CSelectCommon_DrawEffects` is the normal select-common draw path:
+
+```text
+if selectCommon +0x36C == 1:
+  update owner/model controller at selectCommon +0x1AC
+  draw CtsStageObj at selectCommon +0x48 with matrix selectCommon +0x18
+  copy/draw the texture surface at selectCommon +0x234 as the half-screen reflection
+  update owner/model controller at selectCommon +0x1AC again
+  draw CtsStageObj at selectCommon +0xB8 with matrix selectCommon +0x18
+```
+
+The owner model at `selectCommon +0x128` is not drawn directly by this function.
+It drives the matrix copied to `selectCommon +0x18`; using a separate hand-projected
+`BG_Camera01` camera in the host is not the game path.
 
 So the current model status is no longer ambiguous:
 
@@ -5076,8 +5178,9 @@ guesses:
 
 ```text
 CzanModel_ReadZmbObjectLocalMatrix:
-  reads the object entry matrix at +0x30 and writes the translation column from
-  object +0x60/+0x64/+0x68.
+  matches `CzanModel_BuildRuntimeData` at `0x8014C6CC`: runtime matrix row 0 is
+  object `+0x30/+0x40/+0x50/+0x60`, row 1 is `+0x34/+0x44/+0x54/+0x64`, and
+  row 2 is `+0x38/+0x48/+0x58/+0x68`.
 
 CzanModel_BuildZmbObjectWorldMatrices:
   composes object local matrices through parent index +0x94, matching the

@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define HOST_CSELECT_DIAGNOSTICS 0
+
 enum HostInput {
     HOST_INPUT_NONE,
     HOST_INPUT_LEFT,
@@ -592,11 +594,13 @@ static void Host_CacheSelectCommonVisibleDebugMesh(HostSelectCommonModelBinding 
     primitiveBuffer.vertices = binding->debugVertices;
     primitiveBuffer.texcoords = binding->debugTexcoords;
     primitiveBuffer.colors = binding->debugColors;
+    primitiveBuffer.vertexObjectIndex = 0;
     primitiveBuffer.vertexCapacity = HOST_SELECT_DEBUG_VERTEX_CAP;
     primitiveBuffer.vertexCount = 0;
     primitiveBuffer.primitiveStart = binding->debugPrimitiveStart;
     primitiveBuffer.primitiveVertexCount = binding->debugPrimitiveVertexCount;
     primitiveBuffer.primitiveTextureIndex = binding->debugPrimitiveTextureIndex;
+    primitiveBuffer.primitiveMaterialMode = binding->debugPrimitiveMaterialMode;
     primitiveBuffer.primitiveCapacity = HOST_SELECT_DEBUG_PRIMITIVE_CAP;
     primitiveBuffer.primitiveCount = 0;
     primitiveBuffer.submittedObjectCount = 0;
@@ -652,11 +656,13 @@ static void Host_UpdateSelectCommonAnimatedDebugMesh(HostSelectCommonModelBindin
     primitiveBuffer.vertices = binding->debugVertices;
     primitiveBuffer.texcoords = binding->debugTexcoords;
     primitiveBuffer.colors = binding->debugColors;
+    primitiveBuffer.vertexObjectIndex = 0;
     primitiveBuffer.vertexCapacity = HOST_SELECT_DEBUG_VERTEX_CAP;
     primitiveBuffer.vertexCount = 0;
     primitiveBuffer.primitiveStart = binding->debugPrimitiveStart;
     primitiveBuffer.primitiveVertexCount = binding->debugPrimitiveVertexCount;
     primitiveBuffer.primitiveTextureIndex = binding->debugPrimitiveTextureIndex;
+    primitiveBuffer.primitiveMaterialMode = binding->debugPrimitiveMaterialMode;
     primitiveBuffer.primitiveCapacity = HOST_SELECT_DEBUG_PRIMITIVE_CAP;
     primitiveBuffer.primitiveCount = 0;
     primitiveBuffer.submittedObjectCount = 0;
@@ -929,19 +935,11 @@ void HostCSelect_SetCommonSelectResource(
     void *selectCommonLinkData,
     unsigned int selectCommonLinkSize) {
     CzanLinkBlock topBlock;
-    CzanLinkBlock nestedBlock;
-    CzanLinkBlock block0;
-    CzanLinkBlock block1;
-    CzanLinkBlock block2;
-    CzanLinkBlock block5;
-    CzanLinkBlock block6;
     unsigned int topCount;
-    unsigned int nestedCount;
-    unsigned int i;
 
     module->selectCommonLinkData = selectCommonLinkData;
     module->selectCommonLinkSize = selectCommonLinkSize;
-    memset(module->selectCommonModelOwner, 0, sizeof(module->selectCommonModelOwner));
+    memset(module->selectCommon, 0, sizeof(module->selectCommon));
 
     if (!CzanLinkResource_IsValid(selectCommonLinkData, selectCommonLinkSize)) {
         puts("select_cmn: not a valid WII resource");
@@ -949,129 +947,27 @@ void HostCSelect_SetCommonSelectResource(
     }
 
     topCount = CzanLinkResource_GetBlockCount(selectCommonLinkData, selectCommonLinkSize);
-    printf("select_cmn: WII blockCount=%u\n", topCount);
+    if (HOST_CSELECT_DIAGNOSTICS) {
+        printf("select_cmn: WII blockCount=%u\n", topCount);
+    }
 
     if (!CzanLinkResource_GetBlock(selectCommonLinkData, selectCommonLinkSize, 0, &topBlock)) {
         puts("select_cmn: missing top block 0");
         return;
     }
 
-    nestedCount = CzanLinkResource_GetBlockCount(topBlock.data, topBlock.size);
-    printf("select_cmn: top block 0 common model package blocks=%u\n", nestedCount);
-    for (i = 0; i < nestedCount; i++) {
-        if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, i, &nestedBlock)) {
-            Host_LogSelectCommonBlock(&nestedBlock, i);
-        }
-    }
-
-    if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 0, &block0) &&
-        CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 1, &block1) &&
-        CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 2, &block2)) {
-        Host_LoadSelectCommonModelBinding(&module->visibleModel, &block0, &block1, &block2, 0, 2, 0);
-        printf("select_cmn: loaded visible model zmb=0 tex=1 zab=2 objects=%u channels=%u matches=%u\n",
-               module->visibleModel.objectNameCount,
-               module->visibleModel.zabChannelCount,
-               module->visibleModel.matchedChannelCount);
-    }
-
-    CSelectCommon_LoadResource(module->selectCommonModelOwner, (void *)topBlock.data);
+    CSelectCommon_LoadResource(module->selectCommon, (void *)topBlock.data);
     {
-        int *ownerModel = CzanModelOwner_GetHostModel(module->selectCommonModelOwner);
+        int *ownerModel = CzanModelOwner_GetHostModel((int *)((unsigned char *)module->selectCommon + 0x128));
         if (ownerModel != 0) {
-            printf("select_cmn: loaded model owner through game loader model=%p primary=%p continuation0=%p\n",
-                   ownerModel,
-                   CzanModel_GetHostPrimaryBlock(ownerModel),
-                   CzanModel_GetHostContinuationBlock(ownerModel, 0));
-        }
-    }
-
-    if (CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 5, &block5) &&
-        CzanLinkResource_GetBlock(topBlock.data, topBlock.size, 6, &block6)) {
-        Host_LoadSelectCommonModelBinding(&module->cameraModel, &block5, 0, &block6, 5, 6, 1);
-        printf("select_cmn: loaded camera model zmb=5 zab=6 objects=%u channels=%u matches=%u\n",
-               module->cameraModel.objectNameCount,
-               module->cameraModel.zabChannelCount,
-               module->cameraModel.matchedChannelCount);
-        {
-            FILE *probeFile = fopen("outputs\\select_cmn_geometry_probe.txt", "a");
-            if (probeFile != 0) {
-                const unsigned char *cameraZmb = (const unsigned char *)module->cameraModel.zmbData;
-                fprintf(probeFile,
-                        "select_cmn: camera post-load ptr=%p size=0x%X magic=%02X%02X%02X%02X\n",
-                        cameraZmb,
-                        module->cameraModel.zmbSize,
-                        cameraZmb != 0 && module->cameraModel.zmbSize >= 4 ? cameraZmb[0] : 0,
-                        cameraZmb != 0 && module->cameraModel.zmbSize >= 4 ? cameraZmb[1] : 0,
-                        cameraZmb != 0 && module->cameraModel.zmbSize >= 4 ? cameraZmb[2] : 0,
-                        cameraZmb != 0 && module->cameraModel.zmbSize >= 4 ? cameraZmb[3] : 0);
-                fclose(probeFile);
+            if (HOST_CSELECT_DIAGNOSTICS) {
+                printf("select_cmn: loaded model owner through game loader model=%p primary=%p continuation0=%p\n",
+                       ownerModel,
+                       CzanModel_GetHostPrimaryBlock(ownerModel),
+                       CzanModel_GetHostContinuationBlock(ownerModel, 0));
             }
         }
     }
-}
-
-static const char *Host_GetModeName(int selectedModeIndex) {
-    static const char *modeNames[] = {
-        "Mode ID 1",
-        "Mode ID 2",
-        "Mode ID 3",
-        "Mode ID 6",
-        "Back / Title",
-    };
-
-    if (selectedModeIndex < 0 || selectedModeIndex >= 5) {
-        return "Unknown";
-    }
-    return modeNames[selectedModeIndex];
-}
-
-static void Host_PrintCSelModeChoiceDetails(int selectedModeIndex) {
-    const CSelModeChoice *choice = CSelMode_GetChoice(selectedModeIndex);
-
-    if (choice == 0) {
-        printf("CSelMode: selected index %d -> invalid\n", selectedModeIndex);
-        return;
-    }
-
-    printf("CSelMode: selected index %d -> nextState=%d mode=%d sub=%d extra=%d\n",
-           selectedModeIndex,
-           choice->nextSelectState,
-           choice->gameModeId,
-           choice->gameModeSubId,
-           choice->gameModeExtraId);
-}
-
-static void Host_DrawCSelModeMenu(int selectedModeIndex) {
-    int i;
-    const CSelModeChoice *choice;
-
-    puts("");
-    puts("---");
-    puts("DDRII Host Skeleton");
-    puts("===================");
-    puts("");
-    puts("CSelMode - Mode Select");
-    puts("");
-
-    for (i = 0; i < 5; i++) {
-        printf("%s %s\n", i == selectedModeIndex ? ">" : " ", Host_GetModeName(i));
-    }
-
-    choice = CSelMode_GetChoice(selectedModeIndex);
-    puts("");
-    if (choice != 0) {
-        printf("nextState=%d  mode=%d  sub=%d  extra=%d\n",
-               choice->nextSelectState,
-               choice->gameModeId,
-               choice->gameModeSubId,
-               choice->gameModeExtraId);
-    }
-    else {
-        puts("Invalid selection");
-    }
-
-    puts("");
-    puts("A/Left: previous   D/Right: next   Enter: confirm   Esc/B: exit");
 }
 
 static void Host_DrawSelectCommonBindingDiagnostic(const HostSelectCommonModelBinding *binding) {
@@ -1523,19 +1419,12 @@ static int Host_DrawSelectCommonPanelPrimitive(
 }
 
 static void Host_DrawCSelModeGl(HostCSelectModule *module) {
-    unsigned int backgroundColor = 0x182436FF;
-    const HostSelectCommonModelBinding *cameraBinding = &module->cameraModel;
+    unsigned int backgroundColor = 0xFFFFFFFF;
+    (void)module;
 
-    if ((module->frame & 7) == 0 && module->visibleModel.zabDurationTicks != 0) {
-        Host_UpdateSelectCommonAnimatedDebugMesh(
-            &module->visibleModel,
-            (float)(module->frame % module->visibleModel.zabDurationTicks));
-    }
     RenderBeginFrame();
     ApplyRenderConfig(0, &backgroundColor);
-    if (!Host_DrawSelectCommonPanelPrimitive(&module->visibleModel, cameraBinding)) {
-        Host_DrawSelectCommonBindingDiagnostic(&module->visibleModel);
-    }
+    CSelMode_DrawHostUi();
     RenderEndFrame();
 }
 
@@ -1543,12 +1432,7 @@ int CSelect_TickHost(void *cSelect) {
     HostCSelectModule *module = (HostCSelectModule *)cSelect;
     int input;
 
-    if (module->frame == 0) {
-        puts("CSelect: enter CSelMode");
-    }
-
     if (module->redrawNeeded) {
-        Host_DrawCSelModeMenu(module->selectedModeIndex);
         module->redrawNeeded = 0;
     }
 
@@ -1557,19 +1441,18 @@ int CSelect_TickHost(void *cSelect) {
     input = Host_ReadInput();
     if (input == HOST_INPUT_LEFT) {
         module->selectedModeIndex = CSelMode_MoveSelection(module->selectedModeIndex, -1);
+        CSelectCommon_AdvanceBackgroundBackward(module->selectCommon, 1);
         module->redrawNeeded = 1;
     }
     else if (input == HOST_INPUT_RIGHT) {
         module->selectedModeIndex = CSelMode_MoveSelection(module->selectedModeIndex, 1);
+        CSelectCommon_AdvanceBackgroundForward(module->selectCommon, 1);
         module->redrawNeeded = 1;
     }
     else if (input == HOST_INPUT_CONFIRM) {
-        puts("CSelMode: confirm");
-        Host_PrintCSelModeChoiceDetails(module->selectedModeIndex);
         return 1;
     }
     else if (input == HOST_INPUT_BACK) {
-        puts("CSelMode: back/exit");
         return 1;
     }
 

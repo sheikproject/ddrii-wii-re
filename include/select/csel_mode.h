@@ -31,11 +31,12 @@ typedef struct CSelModeKnownFields {
 
 typedef struct CSelModeEntryKnownFields {
     unsigned char base[0x14];
-    int objectHandles[8];
+    int objectHandles[4];
+    int cachedAnimationIds[4];
     int objectHandleCount;
     unsigned char reserved38[4];
-    void *uiManager;
-    void *vtable;
+    int uiManager;
+    int vtable;
     int transformOrState0;
     int transformOrState1;
     int transformOrState2;
@@ -45,18 +46,27 @@ extern const CSelModeChoice CSelMode_ChoiceTable[5];
 
 int CSelMode_Init(void *cselMode);
 void CSelMode_OnEnter(void *cselMode, void *linkData);
-void CSelMode_Update(void);
+int CSelMode_Update(void);
 void CSelMode_SetInitialSelectedMode(void *cselMode);
+void CSelectCommon_Init(int *selectCommon);
 void CSelectCommon_LoadResource(int *selectCommon, void *linkData);
+void CSelectCommon_DrawHostBackground(int *selectCommon);
 void CSelectCommon_UpdateMovieBackground(int *selectCommon, int skipInitialUpdate, int allowMovieStart, int forceInitialBind);
+void CSelectCommon_AdvanceBackgroundForward(int *selectCommon, int revealEntries);
+void CSelectCommon_AdvanceBackgroundBackward(int *selectCommon, int revealEntries);
 void CSelectCommon_RevealMovieEntriesPrimary(int *selectCommon, int useImmediateTiming);
 void CSelectCommon_RevealMovieEntriesAlternate(int *selectCommon, int useImmediateTiming);
 int CSelModeEntry_Init(void *entry);
 int CSelModeEntry_Update(void *entry, short activeCountOrFlag);
-int CSelModeEntry_AddUiObject(void *entry, int linkBlock);
+int CSelModeEntry_AddUiObject(void *entry, void *linkBlock);
 int CSelModeEntry_AddChildUiObject(void *entry, int objectId);
-void CSelModeEntry_SetAnimationOrLayout(void *entry, int objectSlot, int animationId, int animationData);
+void CSelModeEntry_SetObjectEnabled(void *entry, int objectSlot, int childSlot, unsigned char enabled);
+void CSelModeEntry_SetPositionOrLayout(void *entry, int objectSlot, int childObjectIndex, float *layoutData);
+void CSelModeEntry_SetAnimationOrLayout(void *entry, int objectSlot, int animationId, float *animationData);
 void CSelModeEntry_ResetObjectAnimation(void *entry, int objectSlot);
+int CSelModeEntry_IsObjectAnimationDone(void *entry, int objectSlot);
+int CSelModeEntry_GetCachedAnimationId(void *entry, int objectSlot);
+int CSelModeEntry_GetObjectHandle(void *entry, int objectSlot);
 void CSelModeEntry_StartObjectAnimation(
     double startFrame,
     void *entry,
@@ -64,9 +74,14 @@ void CSelModeEntry_StartObjectAnimation(
     int animationId,
     unsigned char mode,
     int playbackMode);
-void CSelModeEntry_PlayObject(void *entry, int objectSlot);
+void CSelModeEntry_SetObjectFlags(void *entry, int objectSlot, int flags);
+void CSelModeEntry_ActivateObject(void *entry, int objectSlot);
+void CSelModeEntry_PlayObject(void *entry, int objectSlot, int childObjectIndex, int textureFrame, int updateSpriteDimensions);
 void CSelModeEntry_SetTransformTriplet(void *entry, const int *values);
+void CzanUiManager_ApplyChildObjectQuadUv(int uiManager, int objectGroupHandle, int childObjectIndex, const float *quadUv);
 void CSelMode_SetHostLinkResourceSize(unsigned int resourceSize);
+void CSelMode_DrawHostUi(void);
+void CzanUiManager_DrawObjectGroupsReverse(int uiManager, const int *objectGroupHandles, int objectGroupCount);
 int CSelMode_ModeIdToSelectedIndex(int modeId);
 const CSelModeChoice *CSelMode_GetChoice(int selectedModeIndex);
 int CSelMode_MoveSelection(int selectedModeIndex, int direction);

@@ -33,6 +33,8 @@ void RenderFlushVertexDescriptorState(void);
 void RenderFlushVertexAttributeFormatState(void);
 void RenderRecomputeVertexStride(void);
 void RenderFlushProjectionState(void);
+void BuildPerspectiveProjectionMatrix(double fovYRadians, double aspect, double nearZ, double farZ, float *outMatrix44);
+void UiScreenProjection_UpdateGlobals(void);
 void RenderFlushViewportState(void);
 void RenderFlushMatrixIndexState(int selector);
 void RenderClearVertexDescriptors(void);
@@ -43,6 +45,13 @@ void RenderSetVertexAttrFormat(int attribute, unsigned int format);
 void RenderSetBlendMode(unsigned int blendEnabled, unsigned int srcFactor, unsigned int dstFactor, unsigned int logicOp);
 void RenderSetAlphaUpdate(unsigned int enabled);
 void RenderSetAlphaCompare(unsigned int compare0, unsigned int reference0, unsigned int op, unsigned int compare1, unsigned int reference1);
+void DebugText_SetGlyphSize(int glyphSize);
+void DebugText_InitFontBacking(void);
+int DebugText_LoadFontPlanes(void *fontMemory);
+int DebugText_LoadFontPlane(void *scratchOrCompressedData, int planeIndex, void *fontMemory);
+void DebugText_DecodePackedGlyphPlane(void *fontHeader, void *source, void *destination);
+void DebugText_ConfigureRenderState(int textureMap);
+void DebugText_Draw(int x, int y, const char *text);
 int GetTextureDimensions(void *textureHandle, int textureIndex, int *width, int *height);
 void DrawTexturedQuad(
     RenderQuad *position,
@@ -52,6 +61,15 @@ void DrawTexturedQuad(
     void *textureHandle,
     int textureIndex
 );
+void *CaptureFrameTextureRegion(int x, int y, int width, int height, int halfScale);
+void DrawCapturedTextureQuad(
+    void *textureHandle,
+    int x,
+    int y,
+    int width,
+    int height,
+    const unsigned int *color,
+    int flipY);
 unsigned int CreateTextureFromTplResource(
     TextureManagerKnownFields *textureManager,
     void *resourceData,
@@ -59,6 +77,8 @@ unsigned int CreateTextureFromTplResource(
     unsigned int textureSlot
 );
 int TextureSlot_InitFromTpl(TextureSlotKnownFields *textureSlot);
+int TextureSlot_Release(TextureSlotKnownFields *textureSlot);
+int TextureManager_DeleteTexture(TextureManagerKnownFields *textureManager, int textureSlot);
 int BindTextureFromTextureSet(void *textureHandle, void *outTextureObject, int textureIndex);
 void DrawFilledRect(int x, int y, int z, int width, int height, const unsigned int *color, int flags);
 void DrawLine2D(int x0, int y0, int x1, int y1, const unsigned int *color);
@@ -93,7 +113,29 @@ void DrawTexturedTriangleStrip2D(
     unsigned int vertexCount,
     void *textureHandle,
     int textureIndex);
+void DrawTexturedTriangleList2D(
+    const int (*points)[2],
+    const float (*texcoords)[2],
+    const unsigned int *colors,
+    unsigned int vertexCount,
+    void *textureHandle,
+    int textureIndex);
+void DrawMovieYuvFrame(
+    const unsigned char *planeY,
+    const unsigned char *planeU,
+    const unsigned char *planeV,
+    int width,
+    int height,
+    int frameToken,
+    int x,
+    int y,
+    int drawWidth,
+    int drawHeight);
+void PlayMoviePcm16(const short *samples, int sampleCount, int channelCount, int sampleRate);
 void UiRootManager_LoadResource(int *uiRootManager, void *linkData);
+void UiRootManager_RegisterResource(int *uiRootManager, void *linkData);
+int UiRootHostPointerBits(void *pointer);
+void *UiRootHostPointerFromBits(int bits);
 void UiEffectController_ResetOrStartFade(double duration, int *effectController);
 void UiEffectController_StartMultiTargetFade(double duration, int *effectController, int primaryTarget, int secondaryTargetA, int secondaryTargetB);
 void UiEffectController_StartSingleTargetFade(double duration, int *effectController, int primaryTarget, int secondaryTarget);
@@ -110,6 +152,15 @@ void UiRootSubManager_InitTextureFrameGroups(int *subManager);
 void UiRootSubManager_LoadLinkedObjectGroup(int *subManager, void *linkData);
 void UiRootSubManager_LoadIndexedHiddenGroups(int *subManager, void *linkData, int setupValue);
 void UiRootSubManager_ConfigureIndexedHiddenGroup(int *subManager, int groupIndex, int setupValue);
+void UiRootBootTransition_Update(int *subManager);
+void UiRootBootTransition_AttachPromptHelpersForStart(int *subManager);
+void UiRootBootTransition_ConfigurePromptHelper(int *subManager, int effectSlot, int baseEffectId);
+void UiRootBootTransition_ClearActivePromptHelperText(int *subManager);
+void UiRootBootTransition_SetSelectedOptionHelperText(int *subManager, int selectedOption);
+void UiPromptEffectHelper_DrawByBits(int helperBits);
 void UiRootManager_DrawFrame(int *uiRootManager);
+void UiRootManager_DrawGlobalCzanListOnce(int *uiRootManager, int shouldDraw);
+void UiRootManager_DrawBootCzanGroups(int *uiRootManager);
+void UiRootManager_UpdateGlobalCzanListOnce(int *uiRootManager, int shouldUpdate);
 
 #endif

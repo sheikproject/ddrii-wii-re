@@ -37,6 +37,7 @@ typedef struct HostSelectCommonModelBinding {
     unsigned int debugPrimitiveStart[HOST_SELECT_DEBUG_PRIMITIVE_CAP];
     unsigned int debugPrimitiveVertexCount[HOST_SELECT_DEBUG_PRIMITIVE_CAP];
     unsigned int debugPrimitiveTextureIndex[HOST_SELECT_DEBUG_PRIMITIVE_CAP];
+    unsigned char debugPrimitiveMaterialMode[HOST_SELECT_DEBUG_PRIMITIVE_CAP];
     char objectNames[HOST_SELECT_MAX_OBJECT_NAMES][32];
 } HostSelectCommonModelBinding;
 
@@ -50,7 +51,7 @@ typedef struct HostCSelectModule {
     unsigned int selectCommonLinkSize;
     HostSelectCommonModelBinding visibleModel;
     HostSelectCommonModelBinding cameraModel;
-    int selectCommonModelOwner[0x40];
+    int selectCommon[0xe0];
 } HostCSelectModule;
 
 int CSelect_TickHost(void *cSelect);

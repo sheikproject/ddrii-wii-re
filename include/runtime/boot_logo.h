@@ -42,6 +42,7 @@ extern const int BootLogoStepConfigIndexTable[BOOT_LOGO_CONFIG_COUNT];
 extern const BootLogoConfig BootLogoConfigTable[BOOT_LOGO_CONFIG_COUNT];
 
 void BootLogoModule_Init(void *module);
+int BootLogoModule_OnEnter(void *bootLogoModule, int moduleId);
 int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId);
 void BootLogoModule_Draw(void *bootLogoModule);
 int BootLogoModule_GetFrameTextureIndex(int logoStepIndex, int logoFrameIndex, int widescreenMode);

@@ -1,6 +1,8 @@
 #ifndef DDRII_MODEL_ZMB_ZAB_H
 #define DDRII_MODEL_ZMB_ZAB_H
 
+#include <stdint.h>
+
 typedef struct CtsStageObjKnownFields {
     unsigned char base[0x6c];
     void *vtable;
@@ -25,21 +27,22 @@ int CtsStageObj_Destroy(void *entry, short releaseMode);
 void CtsStageObj_ResetModelBlocks(int *entry);
 void CtsStageObj_LoadModelBlocks(
     int *entry,
-    int primaryModelBlock,
+    intptr_t primaryModelBlock,
     int primaryModelBlockSize,
-    int secondaryTextureBlock,
+    intptr_t secondaryTextureBlock,
     int secondaryTextureBlockSize,
     int continuationCount,
     int fallbackTextureSlot);
 void CtsStageObj_LoadPrimarySecondaryBlocks(
     void *entry,
-    int primaryBlock,
+    intptr_t primaryBlock,
     int primaryBlockSize,
-    int secondaryBlock,
+    intptr_t secondaryBlock,
     int secondaryBlockSize,
     unsigned int continuationCount);
-void CtsStageObj_LoadContinuationBlock(void *entry, int continuationIndex, int continuationBlock);
-void CtsStageObj_StartAnimation(double frameScale, double startFrame, void *entry, int arg3, int arg4, int arg5);
+void CtsStageObj_LoadContinuationBlock(void *entry, int continuationIndex, intptr_t continuationBlock);
+int *CtsStageObj_GetHostModel(int *entry);
+void CtsStageObj_StartAnimation(double startFrame, double speed, void *entry, int arg3, int arg4, int arg5);
 void CtsStageObj_SelectAndApplyModelSlot(
     double x,
     double y,
@@ -66,8 +69,15 @@ void CtsStageObjSlot_SetState(int *slot, int state);
 void CtsStageObjSlot_ResetDescriptorFrames(double frameProgress, int *slot);
 void CtsStageObjDescriptor_ActivateEntry(double blendDuration, int *descriptor, int entryIndex, int entryHandle);
 int CtsStageObj_CopyObjectTransform(void *stageObjOrSlot, void *outMatrix, int objectIndex);
+void CtsStageObj_UpdateAnimationFrame(int *stageObj, int holdFrame);
 void CtsStageObj_ApplyModelTransform(int *stageObj, int arg1, int arg2);
 void CtsStageObj_DrawModelWithFlags(int *stageObj, int arg1, int arg2, unsigned int drawFlags);
+void CtsStageObj_DrawModelWithExternalMatrix(
+    int *stageObj,
+    int arg1,
+    const float *matrix34,
+    int arg2,
+    unsigned int drawFlags);
 void ZmbZabModelEntry_UpdatePresentation(int *entry, int arg1, int arg2, int arg3);
 
 #endif

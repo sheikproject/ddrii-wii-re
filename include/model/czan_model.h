@@ -10,11 +10,13 @@ typedef struct CzanModelSubmittedPrimitiveBuffer {
     float (*vertices)[3];
     float (*texcoords)[2];
     unsigned int *colors;
+    unsigned int *vertexObjectIndex;
     unsigned int vertexCapacity;
     unsigned int vertexCount;
     unsigned int *primitiveStart;
     unsigned int *primitiveVertexCount;
     unsigned int *primitiveTextureIndex;
+    unsigned char *primitiveMaterialMode;
     unsigned int primitiveCapacity;
     unsigned int primitiveCount;
     unsigned int submittedObjectCount;
@@ -25,6 +27,7 @@ typedef struct CzanModelSubmittedPrimitiveBuffer {
 int *CzanModel_Init(int *model);
 int *CzanModel_Destroy(int *model, short releaseMode);
 int CzanModel_SetPrimaryBlock(int *model, int primaryModelBlock, int primaryModelBlockSize);
+void CzanModel_SetHostPrimaryBlock(int *model, void *primaryModelBlock, unsigned int primaryModelBlockSize);
 void CzanModel_AttachTextureSet(int *model, int textureSet);
 void CzanModel_SetContinuationCount(int *model, int continuationCount);
 int CzanModel_LoadContinuationBlock(int *model, void *continuationBlock, int continuationIndex);
@@ -52,15 +55,25 @@ void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
     CzanModelSubmittedPrimitiveBuffer *outBuffer);
 int CzanModel_BuildRuntimeData(int *model, int enabled);
 int CzanModel_BuildRuntimeDataAndUpdateTransforms(int *model);
+int *CzanModelOwner_Init(int *owner);
+void CzanModelOwner_Reset(int *owner);
+void CzanModelOwner_SetBaseTransformVectors(int *owner, const float *translation, const float *upVector, const float *forwardVector);
+void CzanModelOwner_SetProjectionParams(int *owner, double fovDegrees, double aspect, double nearPlane, double farPlane);
+void CzanModelOwner_UpdateModelDrivenMatrix(int *owner, int holdFrame);
+void CzanModelOwner_UpdateCurrentMatrix(int *owner, int holdFrame);
+void CzanModelOwner_ApplyHostProjection(int *owner);
+void CzanModelOwner_ClearHostProjection(void);
 void CzanModelOwner_CreateModelFromPrimaryBlock(int *owner, void *primaryBlock, int primaryBlockSize);
 void CzanModelOwner_BuildRuntimeDataAt80(int *owner);
 void CzanModelOwner_SetContinuationCount(int *owner, int continuationCount);
 void CzanModelOwner_LoadContinuationBlock(int *owner, void *continuationBlock, int continuationIndex);
-void CzanModelOwner_SetAnimationStartFrame(int *owner, double startFrame);
+void CzanModelOwner_SetAnimationSpeed(int *owner, double speed);
+void CzanModelOwner_StartAnimation(int *owner, double startFrame, int animationIndex, int blend, int loop);
 int *CzanModelOwner_GetHostModel(int *owner);
 void *CzanModel_GetHostPrimaryBlock(int *model);
 unsigned int CzanModel_GetHostPrimaryBlockSize(int *model);
 void *CzanModel_GetHostContinuationBlock(int *model, int continuationIndex);
+void CzanModel_StartAnimationChannel(double startFrame, int *model, int animationIndex, int blend, int loop, int channelIndex);
 int CzanModelCollection_LoadFromLinkBlocks(int *collection, void *linkData, int modelCount, unsigned int collectionIndex);
 int CzanModelManager_LoadResource(int *manager, unsigned int bankIndex, void *linkData);
 int CzanModelManager_UnloadBank(int *manager, unsigned int bankIndex);
@@ -94,6 +107,14 @@ void CzanModelLiveObject_Init(int *object);
 void CzanModelManager_SetLiveObjectMatrix(int *manager, int liveObjectHandle, const void *matrix);
 void CzanModelLiveObject_ApplyGlobalScaleToMatrix(int *liveObjectTransform);
 void CzanEffectManager_SetStopTime(int *manager, int effectHandle, int stopTime);
+int CzanEffectManager_StartEffect(
+    int *manager,
+    int effectId,
+    int effectParam,
+    int enabled,
+    const void *transform,
+    int ownerOrArg,
+    int stopTime);
 unsigned char CzanModelOwner_SelectModeSlot(int *owner);
 void CzanModelPositionSet_Clear(int *positionSet);
 void CzanModelPositionSet_LoadFromLinkList(int *positionSet, void **linkDataList, int linkDataCount);
@@ -112,6 +133,7 @@ void CzanModel_UpdateType2WeightedVectors(int *model, int *objectEntry, int *dra
 void CzanModel_UpdateObjectTransforms(double deltaOrScale, int *model);
 void CzanModel_BuildSpecialObjectMatrix(int *model, float *outMatrix, const float *baseMatrix, const float *objectMatrix);
 void CzanModel_DrawVisibleObjects(int *model, int arg1, const void *baseMatrix, int arg2);
+void CzanModel_DrawVisibleObjectsWithMode(int *model, int arg1, const void *baseMatrix, int arg2, int drawMode);
 void CzanModel_DrawType2PartTree(
     int *model,
     int *partIndexSource,

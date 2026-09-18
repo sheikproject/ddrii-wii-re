@@ -17,14 +17,55 @@ typedef struct ModuleControllerKnownFields {
 
 void RuntimeEntry(void);
 int GameMain(void);
+int RuntimeHostPointerBits(void *pointer);
+void *RuntimeHostPointerFromBits(int bits);
+int *GlobalRuntimeContext_Get(void);
+int *GlobalRuntimeContext_GetPointerAt(int byteOffset);
+int GlobalRuntimeContext_SelectRegionVariant(int *globalContext);
+void GlobalRuntimeContext_SetRegionVariantEntry(int *globalContext, int variantIndex, int value);
+void GlobalRuntimeContext_SetFallbackRegionVariant(int *globalContext, int value);
+int RuntimeVideo_GetFramebufferWidth(void);
+int RuntimeVideo_GetFramebufferHeight(void);
+int RuntimeVideo_GetViewportX(void);
+int RuntimeVideo_GetViewportY(void);
+int RuntimeVideo_GetViewportWidth(void);
+int RuntimeVideo_GetViewportHeight(void);
+int Runtime_GetMainLoopFrameCounter(void);
+void GlobalResourceManager260_SetModeTable(int *manager, int modeTable);
+void RuntimeMemory_SetCriticalFlag(int value);
+void RuntimeMemory_ClearCriticalFlag(void);
+void GlobalRuntimeContext_CreateOnce(
+    int arg0,
+    int arg1,
+    int arg2,
+    int arg3,
+    int arg4,
+    int arg5,
+    int arg6,
+    int arg7,
+    int arg8,
+    int arg9);
 int MainLoopManager_Tick(int *mainLoopManager);
 void ModuleController_ApplyPendingModule(int *moduleController);
 void ModuleController_CreatePendingModule(int *moduleController);
 int ModuleController_Update(ModuleControllerKnownFields *moduleController);
+int *BootResourceBundle_Init(int *resourceBundle);
+int *GameMain_GetBootResourceBundle(void);
+int *GameMain_GetTextManager(void);
+int *GameMain_GetUiRootManager(void);
+int *GameMain_GetCharacterAssetManager(void);
+int *GameMain_GetModelEffectManager(void);
+int *GameMain_GetInputOrMenuStateManager(void);
 void BootResourceBundle_StartLoading(int *resourceBundle);
 void BootResourceBundle_ApplyLoadedResources(int *resourceBundle);
 int *BootResourceBundle_Release(int *resourceBundle, short releaseMode);
+int GlobalResourceManager260_UpdateProgress(int *manager);
+int GlobalResourceManager260_GetRecordPayloadSize(int *payload);
+void Runtime_SetSoundArchiveReloadGuard(int enabled);
+void GlobalSubManager274_CopyRgba48(int *manager, unsigned char *outColor);
 
 int CSelect_Init(void *cSelect);
+int CSelect_OnEnter(int *cSelect, int moduleId);
+int CSelect_Tick(int *cSelect);
 
 #endif

@@ -218,12 +218,12 @@
         { "offset": "0x12", "meaning": "source child index when descriptor reuses a previous child texture" },
         { "offset": "0x14", "meaning": "descriptor type: 0 creates texture, 2 dummy, other values reuse previous child texture" },
         { "offset": "0x18", "meaning": "two bytes copied to sprite +0x38/+0x39" },
-        { "offset": "0x1A", "meaning": "behavior flags controlling enabled/draw/animation/group status" },
+        { "offset": "0x1A", "meaning": "behavior flags controlling draw suppression, animation mode/reset, active flag, and group status" },
         { "offset": "0x1C", "meaning": "animation table pointer; initialAnimIndex selects a 0x10-byte entry" }
       ],
       "descriptor_flag_effects": [
-        { "flag": "0x001", "effect": "sets object +0x173 = 1" },
-        { "flag": "0x002", "effect": "sets object +0x174 = 1 and object +0x0B1 = 0" },
+        { "flag": "0x001", "effect": "sets object +0x173 = 1, which suppresses drawing in CzanUiObjectInstance_Draw" },
+        { "flag": "0x002", "effect": "sets object +0x174 = 1 and object +0x0B1 = 0; reset mode switches animation-done checks to +0xB2" },
         { "flag": "0x004", "effect": "starts animation 0 immediately" },
         { "flag": "0x008", "effect": "contributes 1 to object +0x175 mode value" },
         { "flag": "0x010", "effect": "contributes 2 to object +0x175 mode value" },
@@ -316,7 +316,7 @@
         "Unknown/default opcodes return if allowUnknownOpcode is nonzero; otherwise they assert through FUN_801A5710."
       ],
       "opcode_groups": [
-        { "opcodes": "0x00", "meaning": "end/restart/stop command; may reset +0x19C to selected animation entry and set +0xB2" },
+        { "opcodes": "0x00", "meaning": "end/restart/stop command; if object +0x174 is zero it sets +0xB1 and may set +0x173 when mode +0x175 is 1; otherwise it loops to the selected animation entry and sets +0xB2" },
         { "opcodes": "0x01", "meaning": "set object +0x160" },
         { "opcodes": "0x04", "meaning": "set texture frame/index at object +0xA8; may update sprite +0x34 and rebind texture" },
         { "opcodes": "0x05..0x12", "meaning": "position/size/scale commands writing object float fields and attached sprite fields +0x3C..+0xA4" },
@@ -754,7 +754,7 @@
         {
           "function": "CzanUiManager_SetObjectGroupEnabled / 0x80174F04",
           "field": "object +0x173",
-          "meaning": "enabled/visibility flag checked by CzanUiObjectInstance_Draw"
+          "meaning": "draw-suppression flag checked by CzanUiObjectInstance_Draw; 0 draws, nonzero suppresses"
         }
       ]
     },
@@ -764,7 +764,7 @@
       "source_file": "src/select/csel_mode.c",
       "header_file": "include/select/csel_mode.h",
       "field_writes": [
-        { "target": "each child object in group", "offset": "0x173", "value": "enabled" }
+        { "target": "each child object in group", "offset": "0x173", "value": "draw suppression value; 0 draws, nonzero suppresses" }
       ]
     },
     {
@@ -773,7 +773,24 @@
       "source_file": "src/select/csel_mode.c",
       "header_file": "include/select/csel_mode.h",
       "field_writes": [
-        { "target": "one child object", "offset": "0x173", "value": "enabled" }
+        { "target": "one child object", "offset": "0x173", "value": "draw suppression value; 0 draws, nonzero suppresses" }
+      ]
+    },
+    {
+      "address": "0x80175E00",
+      "exported_name": "CzanUiManager_IsObjectGroupAnimationDone",
+      "source_file": "src/select/csel_mode.c",
+      "header_file": "include/select/csel_mode.h",
+      "confirmed_behavior": [
+        "Loops over all children in the object group.",
+        "If child object +0x174 is zero, returns 1 when child +0xB1 is nonzero.",
+        "If child object +0x174 is nonzero, returns 1 when child +0xB2 is nonzero.",
+        "Returns 0 when no child has the selected done byte set."
+      ],
+      "important_fields": [
+        { "target": "child object", "offset": "0x174", "meaning": "animation reset/loop mode selecting which done byte is tested" },
+        { "target": "child object", "offset": "0x0B1", "meaning": "normal animation end byte" },
+        { "target": "child object", "offset": "0x0B2", "meaning": "loop/reset animation end byte" }
       ]
     },
     {
@@ -835,7 +852,7 @@
         { "offset": "0x028", "meaning": "linked sprite/reference state copied to sprite +0x1A8" },
         { "offset": "0x148", "meaning": "texture-frame override" },
         { "offset": "0x16C", "meaning": "current animation index" },
-        { "offset": "0x173", "meaning": "enabled/visibility flag" },
+        { "offset": "0x173", "meaning": "draw-suppression flag; draw path is skipped when nonzero" },
         { "offset": "0x181", "meaning": "draw-list participation flag" },
         { "offset": "0x18C", "meaning": "draw layer/filter" },
         { "offset": "0x198", "meaning": "CAE descriptor" },

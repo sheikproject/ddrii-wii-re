@@ -6,6 +6,10 @@ void Platform_ApplyRenderConfig(unsigned int renderConfigColor) {
     printf("render backend: ApplyRenderConfig color=0x%08X\n", renderConfigColor);
 }
 
+void Platform_SetLogicalProjection(int width, int height) {
+    printf("render backend: SetLogicalProjection %dx%d\n", width, height);
+}
+
 void Platform_BeginFrame(void) {
     puts("render backend: BeginFrame");
 }
@@ -51,6 +55,34 @@ void Platform_DrawTexturedQuad(
            color[1],
            color[2],
            color[3]);
+}
+
+void *Platform_CaptureFrameTextureRegion(int x, int y, int width, int height, int halfScale) {
+    (void)halfScale;
+    printf("render backend: CaptureFrameTextureRegion x=%d y=%d w=%d h=%d\n",
+           x,
+           y,
+           width,
+           height);
+    return 0;
+}
+
+void Platform_DrawCapturedTextureQuad(
+    void *textureHandle,
+    int x,
+    int y,
+    int width,
+    int height,
+    const unsigned int *color,
+    int flipY) {
+    (void)textureHandle;
+    printf("render backend: DrawCapturedTextureQuad x=%d y=%d w=%d h=%d color=0x%08X flipY=%d\n",
+           x,
+           y,
+           width,
+           height,
+           color != 0 ? *color : 0,
+           flipY);
 }
 
 void Platform_DrawFilledRect(int x, int y, int z, int width, int height, const unsigned int *color, int flags) {
@@ -141,6 +173,54 @@ void Platform_DrawTexturedTriangleStrip2D(
            textureIndex);
 }
 
+void Platform_DrawTexturedTriangleList2D(
+    const int (*points)[2],
+    const float (*texcoords)[2],
+    const unsigned int *colors,
+    unsigned int vertexCount,
+    void *textureHandle,
+    int textureIndex) {
+    (void)points;
+    (void)texcoords;
+    (void)colors;
+    (void)textureHandle;
+    printf("render backend: DrawTexturedTriangleList2D vertices=%u texture=%d\n",
+           vertexCount,
+           textureIndex);
+}
+
+void Platform_DrawMovieYuvFrame(
+    const unsigned char *planeY,
+    const unsigned char *planeU,
+    const unsigned char *planeV,
+    int width,
+    int height,
+    int frameToken,
+    int x,
+    int y,
+    int drawWidth,
+    int drawHeight) {
+    (void)planeY;
+    (void)planeU;
+    (void)planeV;
+    printf("render backend: DrawMovieYuvFrame frame=%d src=%dx%d dst=%d,%d %dx%d\n",
+           frameToken,
+           width,
+           height,
+           x,
+           y,
+           drawWidth,
+           drawHeight);
+}
+
+void Platform_PlayMoviePcm16(const short *samples, int sampleCount, int channelCount, int sampleRate) {
+    (void)samples;
+    printf("render backend: PlayMoviePcm16 samples=%d channels=%d rate=%d\n",
+           sampleCount,
+           channelCount,
+           sampleRate);
+}
+
 unsigned int Platform_CreateTextureFromTplResource(
     TextureManagerKnownFields *textureManager,
     void *resourceData,
@@ -176,4 +256,13 @@ int Platform_ShouldQuit(void) {
 
 int Platform_ConsumeConfirmPressed(void) {
     return 0;
+}
+
+void Platform_PollMenuInput(unsigned int *heldMask, unsigned int *triggeredMask) {
+    if (heldMask != 0) {
+        *heldMask = 0;
+    }
+    if (triggeredMask != 0) {
+        *triggeredMask = 0;
+    }
 }

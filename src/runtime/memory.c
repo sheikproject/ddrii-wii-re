@@ -1,6 +1,13 @@
 #include "runtime/memory.h"
 
+#include <malloc.h>
+#include <stdio.h>
+#include <stdint.h>
 #include <string.h>
+#include <windows.h>
+
+static long long gRuntimeBootOffset;
+static int gRuntimeBootOffsetInitialized;
 
 void MemoryPool_Free(int poolIndex, int allocation) {
     /* 0x80144CF0 locks the pool mutex at DAT_802EE174 + poolIndex * 0x34,
@@ -10,11 +17,78 @@ void MemoryPool_Free(int poolIndex, int allocation) {
     (void)allocation;
 }
 
+void RuntimeDebugAssert(const char *file, int line, const char *message) {
+    /* 0x80143A98 is the assert/report target used by recovered runtime classes.
+       The decompile body is empty in release form, so the host logs instead of
+       terminating. */
+    printf("runtime assert: %s:%d: %s\n",
+           file != 0 ? file : "<unknown>",
+           line,
+           message != 0 ? message : "<no message>");
+}
+
+void RuntimeFile_ReleaseOwnedMemory(int *fileRecord) {
+    /* 0x801448E8 releases a zanFile-owned memory record. It only frees records with
+       +0x10 set and ownership mode +0x0C == 1; other owned modes report an error. */
+    if (fileRecord == 0 || fileRecord[4] == 0) {
+        return;
+    }
+
+    if (fileRecord[3] == 1) {
+        if (fileRecord[5] != 0) {
+            void (**vtable)(int *, int) = (void (**)(int *, int))(uintptr_t)(unsigned int)fileRecord[5];
+            if (vtable[1] != 0) {
+                vtable[1](fileRecord, 1);
+            }
+        }
+        return;
+    }
+
+    RuntimeDebugAssert("zanFile.cpp", 0x3eb, "zanFile: Free Memory Error");
+}
+
 unsigned long long Runtime_EnterCriticalSection(void) {
     /* 0x801A9430 captures the current PowerPC MSR and returns it with a masked copy
        of selected state in the high word. MemoryMutex_Lock/Unlock pass this token to
        FUN_801A9470 when leaving the critical section. */
-    return 0;
+    return 0x20000;
+}
+
+unsigned int Runtime_LeaveCriticalSection(unsigned long long token) {
+    /* 0x801A9470 restores the captured MSR token and returns the previous external
+       interrupt enable bit. */
+    return (unsigned int)((token >> 0x0f) & 1U);
+}
+
+long long Runtime_GetTimebase(void) {
+    LARGE_INTEGER counter;
+    LARGE_INTEGER frequency;
+
+    /* 0x801AD410 is the raw timebase read helper. Ghidra shows an empty body because
+       the return value is carried in registers. */
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    if (frequency.QuadPart == 0) {
+        return counter.QuadPart;
+    }
+    return (counter.QuadPart * 1000000LL) / frequency.QuadPart;
+}
+
+long long Runtime_GetBootTime(void) {
+    unsigned long long token;
+    long long timebase;
+
+    /* 0x801AD440 returns FUN_801AD410() plus the 64-bit boot offset stored at
+       DAT_800030D8/DAT_800030DC while bracketing the read with critical-section
+       enter/leave. */
+    if (gRuntimeBootOffsetInitialized == 0) {
+        gRuntimeBootOffset = 0;
+        gRuntimeBootOffsetInitialized = 1;
+    }
+    token = Runtime_EnterCriticalSection();
+    timebase = Runtime_GetTimebase() + gRuntimeBootOffset;
+    Runtime_LeaveCriticalSection(token);
+    return timebase;
 }
 
 int Runtime_GetCurrentThreadContext(void) {
@@ -61,12 +135,20 @@ void *MemoryPool_AllocateAligned(int allocator, int size, int alignment) {
        - negative alignment dispatches to FUN_801DC200(allocator, size, -alignment)
        - non-negative alignment dispatches to FUN_801DC120(allocator, size, alignment)
 
-       The host implementation is only a placeholder until the pool allocator itself
-       is needed outside documentation. */
+       The host implementation uses the CRT aligned allocator while we keep mapping
+       the original pool internals. */
     (void)allocator;
-    (void)size;
-    (void)alignment;
-    return 0;
+    if (size == 0) {
+        size = 1;
+    }
+    size = (size + 3) & ~3;
+    if (alignment < 0) {
+        alignment = -alignment;
+    }
+    if (alignment <= 0) {
+        alignment = 4;
+    }
+    return _aligned_malloc((size_t)size, (size_t)alignment);
 }
 
 void *CopyMemoryOverlapSafe(void *dest, const void *src, unsigned int size) {

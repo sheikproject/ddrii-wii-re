@@ -1,9 +1,13 @@
 #include "runtime/boot_logo.h"
 
+#include "game/cgame.h"
 #include "platform/render_backend.h"
 #include "render/render_engine.h"
 #include "resource/resource_manager.h"
+#include "runtime/memory.h"
+#include "runtime/module_system.h"
 
+#include <stdint.h>
 #include <stdio.h>
 
 const int BootLogoFrameTextureIndexTable0[BOOT_LOGO_FRAME_TEXTURE_TABLE0_COUNT] = {
@@ -58,6 +62,15 @@ static const char *BootLogoLogoPaths[] = {
     "logo/logo_DUT.tpl",
 };
 
+static const int BootLogoRegionToLogoIndex[] = {
+    1, /* resource row 0 -> English */
+    1, /* resource row 1 -> English */
+    1, /* resource row 2 -> English */
+    2, /* resource row 3 -> French */
+    5, /* resource row 4 -> Spanish */
+    1, /* resource row 5 -> English */
+};
+
 static ResourceHandle *gBootLogoLoadedResource;
 
 static int BootLogoModule_ShouldSkip(const BootLogoModuleKnownFields *module,
@@ -69,11 +82,24 @@ static int BootLogoModule_ShouldSkip(const BootLogoModuleKnownFields *module,
     return Platform_ConsumeConfirmPressed();
 }
 
+static int BootLogoModule_ArePendingResourcesReady(void) {
+    int *resourceManager = GlobalRuntimeContext_GetPointerAt(0x260);
+    if (resourceManager == 0) {
+        return 1;
+    }
+
+    return GlobalResourceManager260_UpdateProgress(resourceManager);
+}
+
 const char *BootLogoModule_GetLogoPath(int logoRegionOrLanguageIndex) {
     int count = (int)(sizeof(BootLogoLogoPaths) / sizeof(BootLogoLogoPaths[0]));
+    int regionCount = (int)(sizeof(BootLogoRegionToLogoIndex) / sizeof(BootLogoRegionToLogoIndex[0]));
 
+    if (0 <= logoRegionOrLanguageIndex && logoRegionOrLanguageIndex < regionCount) {
+        logoRegionOrLanguageIndex = BootLogoRegionToLogoIndex[logoRegionOrLanguageIndex];
+    }
     if (logoRegionOrLanguageIndex < 0 || logoRegionOrLanguageIndex >= count) {
-        logoRegionOrLanguageIndex = 0;
+        logoRegionOrLanguageIndex = 1;
     }
     return BootLogoLogoPaths[logoRegionOrLanguageIndex];
 }
@@ -105,17 +131,46 @@ int BootLogoModule_GetFrameTextureIndex(int logoStepIndex, int logoFrameIndex, i
 void BootLogoModule_Init(void *module) {
     BootLogoModuleKnownFields *bootLogoModule = (BootLogoModuleKnownFields *)module;
 
-    bootLogoModule->logoResourceHandle = -1;
+    ClearMemory(bootLogoModule, 0, sizeof(*bootLogoModule));
+    bootLogoModule->logoResourceHandle = 0;
     bootLogoModule->logoTextureHandle = -1;
-    bootLogoModule->logoRegionOrLanguageIndex = 5;
-    bootLogoModule->screenWidth = 640;
-    bootLogoModule->screenHeight = 480;
-    bootLogoModule->state = 3;
-    bootLogoModule->logoStepIndex = 0;
-    bootLogoModule->logoFrameIndex = 0;
-    bootLogoModule->frameAnimTimer = 0.0f;
-    bootLogoModule->stateTimer = 0.0f;
-    bootLogoModule->fadeAlpha = 1.0f;
+}
+
+int BootLogoModule_OnEnter(void *bootLogoModule, int moduleId) {
+    BootLogoModuleKnownFields *module = (BootLogoModuleKnownFields *)bootLogoModule;
+    int *playerDataManager;
+    int *submanager274;
+    int *globalContext;
+    int logoRegionOrLanguageIndex;
+
+    module->logoRegionOrLanguageIndex = 1;
+    module->screenWidth = 640;
+    module->screenHeight = 480;
+    module->renderConfig = 0;
+    module->state = 3;
+    module->logoStepIndex = 0;
+    module->logoFrameIndex = 0;
+    module->frameAnimTimer = 0.0f;
+    module->stateTimer = 0.0f;
+    module->skipLogoOrProgressiveFlag = 0;
+    module->fadeAlpha = 1.0f;
+
+    playerDataManager = GlobalRuntimeContext_GetPointerAt(0x258);
+    if (PlayerDataState_GetCurrentValue(playerDataManager) == 8) {
+        module->skipLogoOrProgressiveFlag = 1;
+    }
+
+    globalContext = GlobalRuntimeContext_Get();
+    if (globalContext != 0) {
+        logoRegionOrLanguageIndex = globalContext[0x8c / 4];
+        if (0 <= logoRegionOrLanguageIndex && logoRegionOrLanguageIndex < 10) {
+            module->logoRegionOrLanguageIndex = logoRegionOrLanguageIndex;
+        }
+    }
+
+    submanager274 = GlobalRuntimeContext_GetPointerAt(0x274);
+    GlobalSubManager274_CopyRgba48(submanager274, (unsigned char *)&module->renderConfig);
+    return moduleId;
 }
 
 int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
@@ -123,7 +178,6 @@ int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
     const BootLogoConfig *config;
 
     if (module->state == 3) {
-        puts("BootLogoModule_Tick: state 3 -> 4");
         module->logoStepIndex = module->skipLogoOrProgressiveFlag == 0 ? 0 : 1;
         module->fadeAlpha = 0.0f;
         module->state = 4;
@@ -133,7 +187,6 @@ int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
         const char *path = BootLogoModule_GetLogoPath(module->logoRegionOrLanguageIndex);
         ResourceHandle *resource = LoadResourceByPath(0, path, 0);
 
-        puts("BootLogoModule_Tick: state 4 -> 5");
         gBootLogoLoadedResource = resource;
         module->logoResourceHandle = resource != 0 && resource->loaded ? 0 : -1;
         module->logoFrameIndex = 0;
@@ -154,13 +207,16 @@ int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
                                                   gBootLogoLoadedResource->size,
                                                   0xFFFFFFFFu);
         }
-        printf("BootLogoModule: textureHandle=%d\n", module->logoTextureHandle);
-        puts("BootLogoModule_Tick: state 5 -> 6");
+        if (module->skipLogoOrProgressiveFlag == 0) {
+            BootResourceBundle_StartLoading(GameMain_GetBootResourceBundle());
+        }
+        else {
+            CGameUiRoot_AdvanceSelectionPanelState(GameMain_GetUiRootManager());
+        }
         module->state = 6;
     }
 
     if (module->state == 6) {
-        puts("BootLogoModule_Tick: state 6 -> 7");
         module->stateTimer = 0.0f;
         module->state = 7;
     }
@@ -182,6 +238,7 @@ int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
 
     if (module->state == 9) {
         int configIndex = BootLogoStepConfigIndexTable[module->logoStepIndex];
+        int resourcesReady;
         config = &BootLogoConfigTable[configIndex];
         module->stateTimer += 1.0f;
         module->frameAnimTimer += 1.0f;
@@ -191,10 +248,11 @@ int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
             module->logoFrameIndex = (module->logoFrameIndex + 1) % config->frameCount;
         }
 
-        if (module->stateTimer >= config->holdTime) {
-            module->state = 10;
-        }
-        else if (BootLogoModule_ShouldSkip(module, config)) {
+        resourcesReady =
+            module->logoStepIndex <= 0 || BootLogoModule_ArePendingResourcesReady();
+        if (((module->stateTimer >= config->holdTime) ||
+             BootLogoModule_ShouldSkip(module, config)) &&
+            resourcesReady) {
             module->state = 10;
         }
     }
@@ -215,6 +273,10 @@ int BootLogoModule_Tick(void *bootLogoModule, int nextModuleId) {
                 module->state = 6;
             }
             else {
+                if (module->skipLogoOrProgressiveFlag == 0) {
+                    BootResourceBundle_ApplyLoadedResources(GameMain_GetBootResourceBundle());
+                    Runtime_SetSoundArchiveReloadGuard(0);
+                }
                 module->state = 12;
             }
         }

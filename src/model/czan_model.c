@@ -1,14 +1,23 @@
 #include "model/czan_model.h"
 
+#include "render/render_engine.h"
+#include "resource/czan_link.h"
 #include "runtime/math.h"
+#include "runtime/module_system.h"
+#include "ui/czan_ui.h"
 
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define CZAN_MODEL_HOST_STATE_CAP 32
 #define CZAN_MODEL_HOST_CONTINUATION_CAP 16
+#define CZAN_MODEL_HOST_DRAW_CACHE_CAP 4
+#define CZAN_MODEL_HOST_DRAW_VERTEX_CAP 32768
+#define CZAN_MODEL_HOST_DRAW_PRIMITIVE_CAP 8192
+#define CZAN_MODEL_HOST_DRAW_BATCH_VERTEX_CAP (CZAN_MODEL_HOST_DRAW_VERTEX_CAP * 3)
 
 typedef struct CzanModelHostState {
     int *model;
@@ -21,10 +30,77 @@ typedef struct CzanModelHostState {
 typedef struct CzanModelOwnerHostState {
     int *owner;
     int *model;
+    int lastAnimationUpdateFrameToken;
 } CzanModelOwnerHostState;
+
+typedef struct CzanModelHostDrawCache {
+    int *model;
+    void *primaryBlock;
+    unsigned int primaryBlockSize;
+    void *zabBlock;
+    unsigned int zabBlockSize;
+    int textureSlot;
+    int drawMode;
+    float animationTick;
+    unsigned int vertexCount;
+    unsigned int primitiveCount;
+    float vertices[CZAN_MODEL_HOST_DRAW_VERTEX_CAP][3];
+    float texcoords[CZAN_MODEL_HOST_DRAW_VERTEX_CAP][2];
+    unsigned int colors[CZAN_MODEL_HOST_DRAW_VERTEX_CAP];
+    unsigned int vertexObjectIndex[CZAN_MODEL_HOST_DRAW_VERTEX_CAP];
+    unsigned int primitiveStart[CZAN_MODEL_HOST_DRAW_PRIMITIVE_CAP];
+    unsigned int primitiveVertexCount[CZAN_MODEL_HOST_DRAW_PRIMITIVE_CAP];
+    unsigned int primitiveTextureIndex[CZAN_MODEL_HOST_DRAW_PRIMITIVE_CAP];
+    unsigned char primitiveMaterialMode[CZAN_MODEL_HOST_DRAW_PRIMITIVE_CAP];
+} CzanModelHostDrawCache;
 
 static CzanModelHostState gCzanModelHostStates[CZAN_MODEL_HOST_STATE_CAP];
 static CzanModelOwnerHostState gCzanModelOwnerHostStates[CZAN_MODEL_HOST_STATE_CAP];
+static CzanModelHostDrawCache gCzanModelHostDrawCaches[CZAN_MODEL_HOST_DRAW_CACHE_CAP];
+static unsigned int gCzanModelHostDrawCacheCursor;
+static int gCzanModelHostBatchPoints[CZAN_MODEL_HOST_DRAW_BATCH_VERTEX_CAP][2];
+static float gCzanModelHostBatchTexcoords[CZAN_MODEL_HOST_DRAW_BATCH_VERTEX_CAP][2];
+static unsigned int gCzanModelHostBatchColors[CZAN_MODEL_HOST_DRAW_BATCH_VERTEX_CAP];
+static int gCzanModelHostProjectionActive;
+static float gCzanModelHostProjectionFovDeg = 45.0f;
+static float gCzanModelHostProjectionAspect = 1.333333373f;
+static float gCzanModelHostProjectionNear = 1.0f;
+static float gCzanModelHostProjectionFar = 10000.0f;
+
+static float CzanModelProjection_ConvertHorizontalFov(float fovDegrees) {
+    /* 0x8015F3F4 stores the projection object's matrix FOV at owner +0xE4.
+       The model data supplies a horizontal FOV in degrees; the game converts it
+       with tan/atan before FUN_801B0C30 builds the perspective matrix. */
+    const float gamePi = 3.141499996f;
+    const float videoScale = 0.75f;
+    float halfRadians;
+    float correctedHalfRadians;
+
+    if (fovDegrees <= 0.00001f) {
+        return 45.0f;
+    }
+
+    halfRadians = (gamePi * (fovDegrees * 0.5f)) / 180.0f;
+    correctedHalfRadians = atanf(tanf(halfRadians) * videoScale);
+    return 2.0f * ((180.0f * correctedHalfRadians) / gamePi);
+}
+
+static int CzanModel_FloatBits(float value) {
+    int bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static void CzanModel_SubmitAnimatedZmbPrimitiveStreamsWithDrawMode(
+    const void *zmbData,
+    unsigned int zmbSize,
+    const void *zabData,
+    unsigned int zabSize,
+    float animationTick,
+    int drawMode,
+    const float *runtimeWorldMatrices,
+    CzanModelSubmittedPrimitiveBuffer *outBuffer);
 
 static CzanModelHostState *CzanModel_GetHostState(int *model, int create) {
     unsigned int i;
@@ -70,6 +146,167 @@ static CzanModelOwnerHostState *CzanModelOwner_GetHostState(int *owner, int crea
     memset(freeSlot, 0, sizeof(*freeSlot));
     freeSlot->owner = owner;
     return freeSlot;
+}
+
+static void CzanModelOwner_StoreVec3(void *dest, float x, float y, float z) {
+    float *vec = (float *)dest;
+
+    if (vec == 0) {
+        return;
+    }
+
+    vec[0] = x;
+    vec[1] = y;
+    vec[2] = z;
+}
+
+static void CzanModelOwner_CopyVec3(void *dest, const void *src) {
+    const float *srcVec = (const float *)src;
+
+    if (dest == 0 || src == 0) {
+        return;
+    }
+
+    CzanModelOwner_StoreVec3(dest, srcVec[0], srcVec[1], srcVec[2]);
+}
+
+static void CzanModelOwner_NormalizeVec3(float *vec) {
+    float lengthSq;
+    float invLength;
+
+    if (vec == 0) {
+        return;
+    }
+
+    lengthSq = vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2];
+    if (lengthSq <= 0.000001f) {
+        return;
+    }
+
+    invLength = 1.0f / sqrtf(lengthSq);
+    vec[0] *= invLength;
+    vec[1] *= invLength;
+    vec[2] *= invLength;
+}
+
+static void CzanModelOwner_CrossVec3(const float *a, const float *b, float *out) {
+    float x;
+    float y;
+    float z;
+
+    if (a == 0 || b == 0 || out == 0) {
+        return;
+    }
+
+    x = a[1] * b[2] - b[1] * a[2];
+    y = -(a[0] * b[2] - b[0] * a[2]);
+    z = -(a[1] * b[0] - b[1] * a[0]);
+    out[0] = x;
+    out[1] = y;
+    out[2] = z;
+}
+
+static void CzanModelOwner_BuildLookAtMatrix(float *matrix34, const float *position, const float *up, const float *target) {
+    float zAxis[3];
+    float xAxis[3];
+    float yAxis[3];
+
+    if (matrix34 == 0 || position == 0 || up == 0 || target == 0) {
+        return;
+    }
+
+    zAxis[0] = position[0] - target[0];
+    zAxis[1] = position[1] - target[1];
+    zAxis[2] = position[2] - target[2];
+    CzanModelOwner_NormalizeVec3(zAxis);
+
+    CzanModelOwner_CrossVec3(up, zAxis, xAxis);
+    CzanModelOwner_NormalizeVec3(xAxis);
+    CzanModelOwner_CrossVec3(zAxis, xAxis, yAxis);
+
+    matrix34[0] = xAxis[0];
+    matrix34[1] = xAxis[1];
+    matrix34[2] = xAxis[2];
+    matrix34[3] = -(position[2] * xAxis[2] + position[0] * xAxis[0] + position[1] * xAxis[1]);
+    matrix34[4] = yAxis[0];
+    matrix34[5] = yAxis[1];
+    matrix34[6] = yAxis[2];
+    matrix34[7] = -(position[2] * yAxis[2] + position[0] * yAxis[0] + position[1] * yAxis[1]);
+    matrix34[8] = zAxis[0];
+    matrix34[9] = zAxis[1];
+    matrix34[10] = zAxis[2];
+    matrix34[11] = -(position[2] * zAxis[2] + position[0] * zAxis[0] + position[1] * zAxis[1]);
+}
+
+static void CzanModelOwner_ResetBaseTransform(int *owner) {
+    unsigned char *bytes;
+
+    if (owner == 0) {
+        return;
+    }
+
+    bytes = (unsigned char *)owner;
+    Matrix34_SetIdentity((float *)(bytes + 0x4c));
+    CzanModelOwner_StoreVec3(bytes + 0x10, 0.0f, 0.0f, 1.0f);
+    CzanModelOwner_StoreVec3(bytes + 0x04, 0.0f, 0.0f, 0.0f);
+    CzanModelOwner_StoreVec3(bytes + 0x1c, 0.0f, 1.0f, 0.0f);
+    *(int *)(void *)(bytes + 0x7c) = 0;
+}
+
+static void CzanModelOwner_SetDefaultProjectionState(int *owner) {
+    unsigned char *bytes;
+
+    if (owner == 0) {
+        return;
+    }
+
+    bytes = (unsigned char *)owner;
+    *(float *)(void *)(bytes + 0xfc) = 1.333333373f;
+    *(float *)(void *)(bytes + 0xf8) = 45.0f;
+    *(float *)(void *)(bytes + 0x100) = 1.0f;
+    *(float *)(void *)(bytes + 0x104) = 10000.0f;
+    *(float *)(void *)(bytes + 0xe4) = 45.0f;
+    *(float *)(void *)(bytes + 0xe8) = 1.333333373f;
+    *(int *)(void *)(bytes + 0xec) = 1;
+    *(int *)(void *)(bytes + 0xf4) = 0;
+}
+
+static void CzanModel_GetObjectProjectionAux(int *model, float *outValues, int objectIndex) {
+    const float *record;
+
+    if (outValues == 0) {
+        return;
+    }
+
+    outValues[0] = 0.0f;
+    outValues[1] = 0.0f;
+    outValues[2] = 0.0f;
+    if (model == 0 || objectIndex < 0 || model[6] == 0 || objectIndex >= model[0x26]) {
+        return;
+    }
+
+    record = (const float *)(uintptr_t)(model[6] + objectIndex * 0x10);
+    outValues[0] = record[1];
+    outValues[1] = record[2];
+    outValues[2] = record[3];
+}
+
+static void CzanModelOwner_DestroyHostModel(int *owner) {
+    CzanModelOwnerHostState *ownerState;
+    int *model;
+
+    if (owner == 0) {
+        return;
+    }
+
+    ownerState = CzanModelOwner_GetHostState(owner, 0);
+    model = ownerState != 0 ? ownerState->model : 0;
+    if (model != 0) {
+        CzanModel_Destroy(model, 1);
+        free(model);
+        ownerState->model = 0;
+    }
+    owner[0x20] = 0;
 }
 
 int *CzanModelOwner_GetHostModel(int *owner) {
@@ -437,9 +674,11 @@ int *CzanModel_Init(int *model) {
     model[0x51] = 0x111;
     model[0x55] = 1;
     model[0x5a] = 1;
+    model[0x67] = CzanModel_FloatBits(1.0f);
     model[0x68] = 1;
     model[0x6b] = 1;
     model[0xa0] = -1;
+    model[0x8d] = -1;
     memset(model + 0xf, 0xff, 4);
     memset(model + 0x10, 0xff, 4);
     return model;
@@ -453,6 +692,18 @@ int *CzanModel_Destroy(int *model, short releaseMode) {
         return 0;
     }
 
+    if (model[6] != 0) {
+        free((void *)(uintptr_t)model[6]);
+        model[6] = 0;
+    }
+    if (model[7] != 0) {
+        free((void *)(uintptr_t)model[7]);
+        model[7] = 0;
+    }
+    if (model[8] != 0) {
+        free((void *)(uintptr_t)model[8]);
+        model[8] = 0;
+    }
     model[0] = 0x802C0720;
     model[0xd] = 0;
     model[0x2d] = 0;
@@ -484,6 +735,19 @@ int CzanModel_SetPrimaryBlock(int *model, int primaryModelBlock, int primaryMode
         }
     }
     return 1;
+}
+
+void CzanModel_SetHostPrimaryBlock(int *model, void *primaryModelBlock, unsigned int primaryModelBlockSize) {
+    CzanModelHostState *state;
+
+    if (model == 0) {
+        return;
+    }
+    state = CzanModel_GetHostState(model, 1);
+    if (state != 0) {
+        state->primaryBlock = primaryModelBlock;
+        state->primaryBlockSize = primaryModelBlockSize;
+    }
 }
 
 void CzanModel_AttachTextureSet(int *model, int textureSet) {
@@ -533,6 +797,13 @@ int CzanModel_LoadContinuationBlock(int *model, void *continuationBlock, int con
         }
     }
     model[3] = (int)(uintptr_t)continuationBlock;
+    if (continuationBlock != 0) {
+        unsigned int continuationSize = HostCzan_GetRegisteredLinkSize(continuationBlock);
+        const unsigned char *zab = (const unsigned char *)continuationBlock;
+        if (continuationSize >= 0x14 && memcmp(zab, "ZAB ", 4) == 0) {
+            *(float *)(void *)((unsigned char *)model + 0x240) = (float)CzanModel_ReadBe32(zab + 0x10);
+        }
+    }
     CzanModel_ParseContinuationAnimationBlock(model, continuationIndex);
     return 1;
 }
@@ -598,8 +869,6 @@ void CzanModel_SetFallbackRenderSlot(int *model, int textureSet, int renderMode,
 
 void CzanModel_ReadZmbObjectLocalMatrix(const void *objectEntry, float *outMatrix34) {
     const unsigned char *entry = (const unsigned char *)objectEntry;
-    float translation[3];
-    unsigned int i;
 
     if (outMatrix34 == 0) {
         return;
@@ -610,14 +879,23 @@ void CzanModel_ReadZmbObjectLocalMatrix(const void *objectEntry, float *outMatri
         return;
     }
 
-    for (i = 0; i < 12; i++) {
-        outMatrix34[i] = CzanModel_ReadBeFloat(entry + 0x30 + i * 4);
-    }
-
-    translation[0] = CzanModel_ReadBeFloat(entry + 0x60);
-    translation[1] = CzanModel_ReadBeFloat(entry + 0x64);
-    translation[2] = CzanModel_ReadBeFloat(entry + 0x68);
-    Matrix34_SetTranslation(outMatrix34, translation);
+    /* DOL 0x8014C6CC seeds model +0x1C by taking the three basis rows from
+       object +0x30/+0x40/+0x50 as columns in the serialized object entry, then
+       writing translation from +0x60/+0x64/+0x68. Reading the 12 floats
+       sequentially transposes the 3x3 basis and produces the inverted
+       select_cmn camera/background. */
+    outMatrix34[0] = CzanModel_ReadBeFloat(entry + 0x30);
+    outMatrix34[1] = CzanModel_ReadBeFloat(entry + 0x40);
+    outMatrix34[2] = CzanModel_ReadBeFloat(entry + 0x50);
+    outMatrix34[3] = CzanModel_ReadBeFloat(entry + 0x60);
+    outMatrix34[4] = CzanModel_ReadBeFloat(entry + 0x34);
+    outMatrix34[5] = CzanModel_ReadBeFloat(entry + 0x44);
+    outMatrix34[6] = CzanModel_ReadBeFloat(entry + 0x54);
+    outMatrix34[7] = CzanModel_ReadBeFloat(entry + 0x64);
+    outMatrix34[8] = CzanModel_ReadBeFloat(entry + 0x38);
+    outMatrix34[9] = CzanModel_ReadBeFloat(entry + 0x48);
+    outMatrix34[10] = CzanModel_ReadBeFloat(entry + 0x58);
+    outMatrix34[11] = CzanModel_ReadBeFloat(entry + 0x68);
 }
 
 void CzanModel_BuildZmbObjectWorldMatrices(
@@ -732,14 +1010,169 @@ static void CzanModel_BuildAnimatedZmbObjectWorldMatrices(
     }
 }
 
+static int CzanModel_UpdateHostRuntimeObjectTransformsFromBlocks(int *model, float animationTick) {
+    const unsigned char *zmb;
+    unsigned int zmbSize;
+    unsigned int objectTableOffset;
+    unsigned int objectCount;
+    unsigned int objectEntryOffset;
+    void *zabBlock;
+    unsigned int zabSize;
+    int activeAnimationIndex;
+    unsigned char *projectionAux;
+    float (*localMatrices)[12];
+    unsigned int i;
+
+    if (model == 0) {
+        return 0;
+    }
+
+    zmb = (const unsigned char *)CzanModel_GetHostPrimaryBlock(model);
+    zmbSize = CzanModel_GetHostPrimaryBlockSize(model);
+    if (zmb == 0 || zmbSize < 0x30 || memcmp(zmb, "ZMB ", 4) != 0) {
+        return 0;
+    }
+
+    objectTableOffset = CzanModel_ReadBe32(zmb + 0x20);
+    if (objectTableOffset > zmbSize || zmbSize - objectTableOffset < 0x0c) {
+        return 0;
+    }
+
+    objectCount = CzanModel_ReadBe32(zmb + objectTableOffset);
+    objectEntryOffset = CzanModel_ReadBe32(zmb + objectTableOffset + 8);
+    if (objectCount == 0 || objectCount > 512 || objectEntryOffset > zmbSize) {
+        return 0;
+    }
+
+    if (model[6] != 0 && model[0x26] != (int)objectCount) {
+        free((void *)(uintptr_t)model[6]);
+        model[6] = 0;
+    }
+    if (model[7] != 0 && model[0x26] != (int)objectCount) {
+        free((void *)(uintptr_t)model[7]);
+        model[7] = 0;
+    }
+    if (model[8] != 0 && model[0x26] != (int)objectCount) {
+        free((void *)(uintptr_t)model[8]);
+        model[8] = 0;
+    }
+    if (model[6] == 0) {
+        void *runtimeProjectionAux = calloc(objectCount, 0x10);
+        if (runtimeProjectionAux == 0) {
+            return 0;
+        }
+        model[6] = (int)(uintptr_t)runtimeProjectionAux;
+    }
+    if (model[7] == 0) {
+        void *runtimeLocalMatrices = calloc(objectCount, 0x30);
+        if (runtimeLocalMatrices == 0) {
+            return 0;
+        }
+        model[7] = (int)(uintptr_t)runtimeLocalMatrices;
+    }
+    if (model[8] == 0) {
+        void *runtimeWorldMatrices = calloc(objectCount, 0x30);
+        if (runtimeWorldMatrices == 0) {
+            return 0;
+        }
+        model[8] = (int)(uintptr_t)runtimeWorldMatrices;
+    }
+    model[0x26] = (int)objectCount;
+
+    localMatrices = (float (*)[12])malloc(sizeof(float) * 12u * objectCount);
+    if (localMatrices == 0) {
+        return 0;
+    }
+
+    for (i = 0; i < objectCount; i++) {
+        unsigned int entryOffset = objectEntryOffset + i * 0xa0u;
+        if (entryOffset + 0xa0u <= zmbSize) {
+            CzanModel_ReadZmbObjectLocalMatrix(zmb + entryOffset, localMatrices[i]);
+        }
+        else {
+            Matrix34_SetIdentity(localMatrices[i]);
+        }
+    }
+
+    activeAnimationIndex = *(int *)(void *)((unsigned char *)model + 0x234);
+    zabBlock = activeAnimationIndex >= 0 ? CzanModel_GetHostContinuationBlock(model, activeAnimationIndex) : 0;
+    zabSize = zabBlock != 0 ? HostCzan_GetRegisteredLinkSize(zabBlock) : 0;
+    if (activeAnimationIndex >= 0 && zabBlock != 0 && zabSize != 0) {
+        CzanModel_ApplyZabToLocalMatrices(
+            zmb,
+            zmbSize,
+            objectEntryOffset,
+            objectCount,
+            (const unsigned char *)zabBlock,
+            zabSize,
+            animationTick,
+            localMatrices);
+    }
+
+    for (i = 0; i < objectCount; i++) {
+        Matrix34_Copy((float *)(uintptr_t)(model[7] + (int)(i * 0x30u)), localMatrices[i]);
+        Matrix34_Copy((float *)(uintptr_t)(model[8] + (int)(i * 0x30u)), localMatrices[i]);
+    }
+
+    for (i = 0; i < objectCount; i++) {
+        unsigned int entryOffset = objectEntryOffset + i * 0xa0u;
+        unsigned int parentIndex;
+
+        if (entryOffset + 0x98u > zmbSize) {
+            continue;
+        }
+
+        parentIndex = CzanModel_ReadBe32(zmb + entryOffset + 0x94);
+        if (parentIndex < i && parentIndex < objectCount) {
+            Matrix34_Multiply(
+                (float *)(uintptr_t)(model[8] + (int)(i * 0x30u)),
+                (const float *)(uintptr_t)(model[8] + (int)(parentIndex * 0x30u)),
+                localMatrices[i]);
+        }
+    }
+
+    projectionAux = (unsigned char *)(uintptr_t)model[6];
+    if (projectionAux != 0) {
+        memset(projectionAux, 0, objectCount * 0x10u);
+        for (i = 0; i < objectCount; i++) {
+            unsigned int entryOffset = objectEntryOffset + i * 0xa0u;
+            unsigned int objectType;
+            unsigned char *record;
+
+            if (entryOffset + 0x7c > zmbSize) {
+                continue;
+            }
+
+            objectType = CzanModel_ReadBe32(zmb + entryOffset + 0x2c);
+            if (objectType != 4) {
+                continue;
+            }
+
+            record = projectionAux + i * 0x10u;
+            *(unsigned int *)(void *)(record + 4) = CzanModel_ReadBe32(zmb + entryOffset + 0x70);
+            *(unsigned int *)(void *)(record + 8) = CzanModel_ReadBe32(zmb + entryOffset + 0x74);
+            *(unsigned int *)(void *)(record + 0x0c) = CzanModel_ReadBe32(zmb + entryOffset + 0x78);
+        }
+    }
+    free(localMatrices);
+    return 1;
+}
+
 void CzanModel_TransformPoint(const float *matrix34, const float *point3, float *outPoint3) {
+    float x;
+    float y;
+    float z;
+
     if (matrix34 == 0 || point3 == 0 || outPoint3 == 0) {
         return;
     }
 
-    outPoint3[0] = matrix34[0] * point3[0] + matrix34[1] * point3[1] + matrix34[2] * point3[2] + matrix34[3];
-    outPoint3[1] = matrix34[4] * point3[0] + matrix34[5] * point3[1] + matrix34[6] * point3[2] + matrix34[7];
-    outPoint3[2] = matrix34[8] * point3[0] + matrix34[9] * point3[1] + matrix34[10] * point3[2] + matrix34[11];
+    x = point3[0];
+    y = point3[1];
+    z = point3[2];
+    outPoint3[0] = matrix34[0] * x + matrix34[1] * y + matrix34[2] * z + matrix34[3];
+    outPoint3[1] = matrix34[4] * x + matrix34[5] * y + matrix34[6] * z + matrix34[7];
+    outPoint3[2] = matrix34[8] * x + matrix34[9] * y + matrix34[10] * z + matrix34[11];
 }
 
 static void CzanModel_ResetSubmittedPrimitiveBuffer(CzanModelSubmittedPrimitiveBuffer *buffer) {
@@ -758,15 +1191,17 @@ static void CzanModel_ResetSubmittedPrimitiveBuffer(CzanModelSubmittedPrimitiveB
     buffer->boundsMax[2] = 0.0f;
 }
 
-static unsigned int CzanModel_GetMaterialTextureIndex(
+static int CzanModel_GetMaterialEntryOffset(
     const unsigned char *zmb,
     unsigned int zmbSize,
-    unsigned int materialIndex) {
+    unsigned int materialIndex,
+    unsigned int *outMaterialOffset) {
     unsigned int materialTableOffset;
     unsigned int materialCount;
+    unsigned int materialVersion;
+    unsigned int materialStride;
     unsigned int materialEntryOffset;
     unsigned int materialOffset;
-    unsigned int textureRecordOffset;
 
     if (zmb == 0 || zmbSize < 0x20) {
         return 0;
@@ -778,13 +1213,32 @@ static unsigned int CzanModel_GetMaterialTextureIndex(
     }
 
     materialCount = CzanModel_ReadBe32(zmb + materialTableOffset);
+    materialVersion = CzanModel_ReadBe32(zmb + materialTableOffset + 4);
     materialEntryOffset = CzanModel_ReadBe32(zmb + materialTableOffset + 8);
     if (materialIndex >= materialCount) {
         return 0;
     }
 
-    materialOffset = materialEntryOffset + materialIndex * 0x50;
-    if (materialOffset + 0x1c > zmbSize) {
+    materialStride = ((materialVersion >> 16) == 1) ? 0x38 : 0x50;
+    materialOffset = materialEntryOffset + materialIndex * materialStride;
+    if (materialOffset + materialStride > zmbSize) {
+        return 0;
+    }
+
+    if (outMaterialOffset != 0) {
+        *outMaterialOffset = materialOffset;
+    }
+    return 1;
+}
+
+static unsigned int CzanModel_GetMaterialTextureIndex(
+    const unsigned char *zmb,
+    unsigned int zmbSize,
+    unsigned int materialIndex) {
+    unsigned int materialOffset;
+    unsigned int textureRecordOffset;
+
+    if (!CzanModel_GetMaterialEntryOffset(zmb, zmbSize, materialIndex, &materialOffset)) {
         return 0;
     }
 
@@ -796,11 +1250,26 @@ static unsigned int CzanModel_GetMaterialTextureIndex(
     return CzanModel_ReadBe32(zmb + textureRecordOffset);
 }
 
+static unsigned char CzanModel_GetMaterialModeByte(
+    const unsigned char *zmb,
+    unsigned int zmbSize,
+    unsigned int materialIndex) {
+    unsigned int materialOffset;
+
+    if (!CzanModel_GetMaterialEntryOffset(zmb, zmbSize, materialIndex, &materialOffset) ||
+        materialOffset + 0x13 > zmbSize) {
+        return 0;
+    }
+
+    return zmb[materialOffset + 0x12];
+}
+
 static void CzanModel_AddSubmittedVertex(
     CzanModelSubmittedPrimitiveBuffer *buffer,
     const float *point,
     const float *texcoord,
-    unsigned int color) {
+    unsigned int color,
+    unsigned int objectIndex) {
     unsigned int axis;
 
     if (buffer == 0 || point == 0 || buffer->vertices == 0 ||
@@ -839,6 +1308,9 @@ static void CzanModel_AddSubmittedVertex(
     if (buffer->colors != 0) {
         buffer->colors[buffer->vertexCount] = color;
     }
+    if (buffer->vertexObjectIndex != 0) {
+        buffer->vertexObjectIndex[buffer->vertexCount] = objectIndex;
+    }
     buffer->vertexCount++;
 }
 
@@ -846,7 +1318,7 @@ void CzanModel_SubmitVisibleZmbPrimitiveStreams(
     const void *zmbData,
     unsigned int zmbSize,
     CzanModelSubmittedPrimitiveBuffer *outBuffer) {
-    CzanModel_SubmitAnimatedZmbPrimitiveStreams(zmbData, zmbSize, 0, 0, 0.0f, outBuffer);
+    CzanModel_SubmitAnimatedZmbPrimitiveStreamsWithDrawMode(zmbData, zmbSize, 0, 0, 0.0f, 0, 0, outBuffer);
 }
 
 void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
@@ -855,6 +1327,26 @@ void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
     const void *zabData,
     unsigned int zabSize,
     float animationTick,
+    CzanModelSubmittedPrimitiveBuffer *outBuffer) {
+    CzanModel_SubmitAnimatedZmbPrimitiveStreamsWithDrawMode(
+        zmbData,
+        zmbSize,
+        zabData,
+        zabSize,
+        animationTick,
+        0,
+        0,
+        outBuffer);
+}
+
+static void CzanModel_SubmitAnimatedZmbPrimitiveStreamsWithDrawMode(
+    const void *zmbData,
+    unsigned int zmbSize,
+    const void *zabData,
+    unsigned int zabSize,
+    float animationTick,
+    int drawMode,
+    const float *runtimeWorldMatrices,
     CzanModelSubmittedPrimitiveBuffer *outBuffer) {
     const unsigned char *zmb = (const unsigned char *)zmbData;
     unsigned int objectTableOffset;
@@ -883,16 +1375,23 @@ void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
         objectCount = 512;
     }
 
-    CzanModel_BuildAnimatedZmbObjectWorldMatrices(
-        zmb,
-        zmbSize,
-        objectEntryOffset,
-        objectCount,
-        zabData,
-        zabSize,
-        animationTick,
-        worldMatrices,
-        512);
+    if (runtimeWorldMatrices != 0) {
+        for (objectIndex = 0; objectIndex < objectCount; objectIndex++) {
+            Matrix34_Copy(worldMatrices[objectIndex], runtimeWorldMatrices + objectIndex * 12u);
+        }
+    }
+    else {
+        CzanModel_BuildAnimatedZmbObjectWorldMatrices(
+            zmb,
+            zmbSize,
+            objectEntryOffset,
+            objectCount,
+            zabData,
+            zabSize,
+            animationTick,
+            worldMatrices,
+            512);
+    }
 
     for (objectIndex = 0; objectIndex < objectCount; objectIndex++) {
         unsigned int entryOffset = objectEntryOffset + objectIndex * 0xa0;
@@ -901,6 +1400,7 @@ void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
         unsigned int submeshCount;
         unsigned int submeshTable;
         unsigned int submeshIndex;
+        unsigned char zdrawTag;
         int submittedObject = 0;
 
         if (entryOffset + 0xa0 > zmbSize ||
@@ -913,9 +1413,14 @@ void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
         objectType = CzanModel_ReadBe32(entry + 0x2c);
         submeshCount = CzanModel_ReadBe16(entry + 0x9a);
         submeshTable = CzanModel_ReadBe32(entry + 0x9c);
+        zdrawTag = entry[0x29];
 
         if (entry[0x28] != 0 || entry[0x2a] != 0 || submeshCount == 0 ||
             submeshTable >= zmbSize || objectType == 2) {
+            continue;
+        }
+        if ((drawMode == 1 && zdrawTag == 1) ||
+            (drawMode != 0 && drawMode != 1 && zdrawTag == 0)) {
             continue;
         }
 
@@ -924,6 +1429,7 @@ void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
             const unsigned char *submesh;
             unsigned int materialIndex;
             unsigned int textureIndex;
+            unsigned char materialMode;
             unsigned int primitiveStride;
             unsigned int primitiveCount;
             unsigned int primitiveTable;
@@ -939,6 +1445,7 @@ void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
             submesh = zmb + submeshOffset;
             materialIndex = CzanModel_ReadBe16(submesh + 2);
             textureIndex = CzanModel_GetMaterialTextureIndex(zmb, zmbSize, materialIndex);
+            materialMode = CzanModel_GetMaterialModeByte(zmb, zmbSize, materialIndex);
             primitiveStride = CzanModel_ReadBe16(submesh + 4) != 0 ? 0x20 : 0x14;
             primitiveCount = CzanModel_ReadBe16(submesh + 0x0a);
             primitiveTable = CzanModel_ReadBe32(submesh + 0x20);
@@ -1012,8 +1519,13 @@ void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
                             color = CzanModel_ReadBe32(zmb + colorOffset);
                         }
                     }
-                    CzanModel_TransformPoint(worldMatrices[objectIndex], localPoint, worldPoint);
-                    CzanModel_AddSubmittedVertex(outBuffer, worldPoint, texcoord, color);
+                    if (outBuffer->vertexObjectIndex != 0) {
+                        CzanModel_AddSubmittedVertex(outBuffer, localPoint, texcoord, color, objectIndex);
+                    }
+                    else {
+                        CzanModel_TransformPoint(worldMatrices[objectIndex], localPoint, worldPoint);
+                        CzanModel_AddSubmittedVertex(outBuffer, worldPoint, texcoord, color, objectIndex);
+                    }
                 }
 
                 if (outBuffer->vertexCount > primitiveStart) {
@@ -1022,6 +1534,9 @@ void CzanModel_SubmitAnimatedZmbPrimitiveStreams(
                     outBuffer->primitiveVertexCount[primitiveOut] = outBuffer->vertexCount - primitiveStart;
                     if (outBuffer->primitiveTextureIndex != 0) {
                         outBuffer->primitiveTextureIndex[primitiveOut] = textureIndex;
+                    }
+                    if (outBuffer->primitiveMaterialMode != 0) {
+                        outBuffer->primitiveMaterialMode[primitiveOut] = materialMode;
                     }
                     outBuffer->primitiveCount++;
                     submittedObject = 1;
@@ -1064,6 +1579,8 @@ int CzanModel_BuildRuntimeData(int *model, int enabled) {
          name prefix table; writes object bytes +0x27/+0x28/+0x29/+0x2A/+0x2B.
        - initializes local transforms in model +0x1C from object +0x30/+0x34/+0x38
          and translation offsets at object +0x60.
+       - for type-4 projection objects, copies object +0x70/+0x74/+0x78 into
+         model +0x18 + objectIndex * 0x10 + 4/8/0xC.
        - relocates object submesh records at object +0x9C and submesh arrays
          +0x20/+0x24/+0x28/+0x2C/+0x30/+0x34.
        - if type-2 objects exist, allocates model +0x34 as objectCount * 0x1C,
@@ -1075,17 +1592,25 @@ int CzanModel_BuildRuntimeData(int *model, int enabled) {
     }
 
     (void)enabled;
-    return 1;
+    return CzanModel_UpdateHostRuntimeObjectTransformsFromBlocks(
+        model,
+        *(float *)(void *)((unsigned char *)model + 0x230));
 }
 
 int CzanModel_SetEnabled(int *model, unsigned int enabled) {
     /* 0x8014E7D0 normalizes any nonzero enabled value to 1, forwards it through
        FUN_8014C6CC, and if that succeeds calls FUN_8015759C(1.0, model). */
+    int built;
+
     if (model == 0) {
         return 0;
     }
 
-    return CzanModel_BuildRuntimeData(model, enabled != 0);
+    built = CzanModel_BuildRuntimeData(model, enabled != 0);
+    if (built != 0) {
+        CzanModel_UpdateObjectTransforms(1.0, model);
+    }
+    return built;
 }
 
 int CzanModel_BuildRuntimeDataAndUpdateTransforms(int *model) {
@@ -1097,6 +1622,259 @@ int CzanModel_BuildRuntimeDataAndUpdateTransforms(int *model) {
 
     CzanModel_UpdateObjectTransforms(0.0, model);
     return 1;
+}
+
+int *CzanModelOwner_Init(int *owner) {
+    /* 0x8015EC08 constructs a CzanModel owner:
+       - clears owner +0x80
+       - initializes owner +0x4C current matrix
+       - initializes the position/up/target vectors used by FUN_8015E7FC
+       - initializes the projection/fade state block at +0x84..+0x104. */
+    if (owner == 0) {
+        return 0;
+    }
+
+    CzanModelOwner_GetHostState(owner, 1);
+    {
+        CzanModelOwnerHostState *ownerState = CzanModelOwner_GetHostState(owner, 0);
+        if (ownerState != 0) {
+            ownerState->lastAnimationUpdateFrameToken = -1;
+        }
+    }
+    owner[0x20] = 0;
+    CzanModelOwner_ResetBaseTransform(owner);
+    CzanModelOwner_SetDefaultProjectionState(owner);
+    return owner;
+}
+
+void CzanModelOwner_Reset(int *owner) {
+    /* 0x8015EDF0 destroys the current owner model and restores the base matrix,
+       vectors, and projection state. */
+    if (owner == 0) {
+        return;
+    }
+
+    CzanModelOwner_DestroyHostModel(owner);
+    {
+        CzanModelOwnerHostState *ownerState = CzanModelOwner_GetHostState(owner, 0);
+        if (ownerState != 0) {
+            ownerState->lastAnimationUpdateFrameToken = -1;
+        }
+    }
+    CzanModelOwner_ResetBaseTransform(owner);
+    CzanModelOwner_SetDefaultProjectionState(owner);
+}
+
+void CzanModelOwner_SetBaseTransformVectors(int *owner, const float *translation, const float *upVector, const float *forwardVector) {
+    /* 0x8015E9DC copies caller-supplied vectors into the owner, unless animation
+       data is active and the matching lock bit in owner +0x7C allows the model to
+       drive that vector instead. */
+    unsigned char *bytes;
+    int hasModel;
+    int flags;
+
+    if (owner == 0) {
+        return;
+    }
+
+    bytes = (unsigned char *)owner;
+    hasModel = CzanModelOwner_GetHostModel(owner) != 0;
+    flags = *(int *)(void *)(bytes + 0x7c);
+    if ((!hasModel || (flags & 1) != 0) && translation != 0) {
+        CzanModelOwner_CopyVec3(bytes + 0x04, translation);
+    }
+    if ((!hasModel || (flags & 4) != 0) && upVector != 0) {
+        CzanModelOwner_CopyVec3(bytes + 0x1c, upVector);
+    }
+    if ((!hasModel || (flags & 2) != 0) && forwardVector != 0) {
+        CzanModelOwner_CopyVec3(bytes + 0x10, forwardVector);
+    }
+}
+
+void CzanModelOwner_SetProjectionParams(int *owner, double fovDegrees, double aspect, double nearPlane, double farPlane) {
+    unsigned char *bytes;
+    float matrixFovDegrees;
+
+    /* 0x8015F080 updates the owner projection defaults before
+       CzanModelOwner_UpdateCurrentMatrix. The original writes owner +0xF8/+0xFC
+       and the near/far defaults at +0x100/+0x104, then lets the projection object
+       at +0x84 rebuild when needed. */
+    if (owner == 0) {
+        return;
+    }
+
+    bytes = (unsigned char *)owner;
+    matrixFovDegrees = CzanModelProjection_ConvertHorizontalFov((float)fovDegrees);
+    *(float *)(void *)(bytes + 0xfc) = (float)aspect;
+    *(float *)(void *)(bytes + 0xf8) = (float)fovDegrees;
+    *(float *)(void *)(bytes + 0xe8) = (float)aspect;
+    *(float *)(void *)(bytes + 0xe4) = matrixFovDegrees;
+    *(int *)(void *)(bytes + 0xec) = 1;
+    *(float *)(void *)(bytes + 0x100) = (float)nearPlane;
+    *(float *)(void *)(bytes + 0x104) = (float)farPlane;
+    *(int *)(void *)(bytes + 0xf4) = 0;
+}
+
+void CzanModelOwner_UpdateModelDrivenMatrix(int *owner, int holdFrame) {
+    /* 0x8015E7FC updates owner +0x4C from the current model animation state.
+
+       The host still has partial CzanModel_UpdateAnimationChannel coverage, but
+       the owner-side vector extraction and look-at matrix rebuild follow the DOL:
+       object 1 supplies position/up/target, and object 2 supplies the target when
+       the model has at least three objects. */
+    unsigned char *bytes;
+    int *model;
+    int objectCount;
+    int flags;
+    float *position;
+    float *up;
+    float *target;
+    const float *object1Matrix;
+    const float *object2Matrix;
+    int object1Transform;
+    int object2Transform;
+
+    if (owner == 0) {
+        return;
+    }
+
+    bytes = (unsigned char *)owner;
+    model = CzanModelOwner_GetHostModel(owner);
+    if (model != 0) {
+        CzanModelOwnerHostState *ownerState = CzanModelOwner_GetHostState(owner, 0);
+        int shouldHoldFrame = holdFrame != 0;
+
+        if (!shouldHoldFrame) {
+            int frameToken = Runtime_GetMainLoopFrameCounter();
+            if (ownerState != 0 && ownerState->lastAnimationUpdateFrameToken == frameToken) {
+                shouldHoldFrame = 1;
+            } else if (ownerState != 0) {
+                ownerState->lastAnimationUpdateFrameToken = frameToken;
+            }
+        }
+        CzanModel_UpdateAnimationChannel(model, shouldHoldFrame, 0);
+    }
+
+    position = (float *)(bytes + 0x04);
+    up = (float *)(bytes + 0x1c);
+    target = (float *)(bytes + 0x10);
+    flags = *(int *)(void *)(bytes + 0x7c);
+
+    objectCount = model != 0 ? model[0x26] : 0;
+    if (objectCount > 1) {
+        object1Transform = CzanModel_GetObjectTransform(model, 1);
+        object1Matrix = (const float *)(uintptr_t)object1Transform;
+        if (object1Matrix != 0) {
+            if ((flags & 1) == 0) {
+                CzanModelOwner_StoreVec3(position, object1Matrix[3], object1Matrix[7], object1Matrix[11]);
+            }
+            if ((flags & 4) == 0) {
+                CzanModelOwner_StoreVec3(up, -object1Matrix[2], -object1Matrix[6], -object1Matrix[10]);
+                CzanModelOwner_NormalizeVec3(up);
+            }
+            if ((flags & 2) == 0) {
+                if (objectCount < 3) {
+                    CzanModelOwner_StoreVec3(
+                        target,
+                        position[0] + object1Matrix[1],
+                        position[1] + object1Matrix[5],
+                        position[2] + object1Matrix[9]);
+                } else {
+                    object2Transform = CzanModel_GetObjectTransform(model, 2);
+                    object2Matrix = (const float *)(uintptr_t)object2Transform;
+                    if (object2Matrix != 0) {
+                        CzanModelOwner_StoreVec3(target, object2Matrix[3], object2Matrix[7], object2Matrix[11]);
+                    }
+                }
+            }
+        }
+    }
+
+    CzanModelOwner_BuildLookAtMatrix((float *)(bytes + 0x4c), position, up, target);
+}
+
+void CzanModelOwner_UpdateCurrentMatrix(int *owner, int holdFrame) {
+    /* 0x8015EEB4 is the public owner update used by select_cmn. Its first step is
+       FUN_8015E7FC, which refreshes owner +0x4C. It then reads
+       FUN_8015D59C(model, object 1) from model +0x18 and updates the projection
+       fields at owner +0xF8/+0xFC/+0x100/+0x104 before marking owner +0xF4 valid. */
+    unsigned char *bytes;
+    int *model;
+    float projectionAux[3];
+    float nearPlane;
+    float farPlane;
+    float fovRadians;
+    float fovDegrees;
+    float matrixFovDegrees;
+
+    if (owner == 0) {
+        return;
+    }
+
+    CzanModelOwner_UpdateModelDrivenMatrix(owner, holdFrame);
+    bytes = (unsigned char *)owner;
+    model = CzanModelOwner_GetHostModel(owner);
+    if (model != 0) {
+        CzanModel_GetObjectProjectionAux(model, projectionAux, 1);
+        nearPlane = projectionAux[1] > 0.00001f ? projectionAux[1] : *(float *)(void *)(bytes + 0x100);
+        farPlane = projectionAux[2] > 0.00001f ? projectionAux[2] : *(float *)(void *)(bytes + 0x104);
+
+        *(int *)(void *)(bytes + 0xf4) = 0;
+        fovRadians = projectionAux[0];
+        if (fovRadians > 0.00001f) {
+            fovDegrees = (180.0f * fovRadians) / 3.141592741f;
+            matrixFovDegrees = CzanModelProjection_ConvertHorizontalFov(fovDegrees);
+            *(float *)(void *)(bytes + 0xe4) = matrixFovDegrees;
+            *(float *)(void *)(bytes + 0xe8) = *(float *)(void *)(bytes + 0xfc);
+            *(int *)(void *)(bytes + 0xec) = 1;
+            *(int *)(void *)(bytes + 0x84) = 0;
+            *(float *)(void *)(bytes + 0xf8) = fovDegrees;
+        } else {
+            *(float *)(void *)(bytes + 0xe4) = *(float *)(void *)(bytes + 0xf8);
+            *(float *)(void *)(bytes + 0xe8) = *(float *)(void *)(bytes + 0xfc);
+            *(int *)(void *)(bytes + 0xec) = 1;
+            *(int *)(void *)(bytes + 0x84) = 0;
+        }
+        *(float *)(void *)(bytes + 0x100) = nearPlane;
+        *(float *)(void *)(bytes + 0x104) = farPlane;
+        *(int *)(void *)(bytes + 0xf4) = 1;
+    }
+}
+
+void CzanModelOwner_ApplyHostProjection(int *owner) {
+    unsigned char *bytes;
+    float fovDeg;
+    float aspect;
+
+    if (owner == 0) {
+        gCzanModelHostProjectionActive = 0;
+        return;
+    }
+
+    bytes = (unsigned char *)owner;
+    fovDeg = *(float *)(void *)(bytes + 0xe4);
+    aspect = *(float *)(void *)(bytes + 0xe8);
+    if (fovDeg <= 0.00001f) {
+        fovDeg = *(float *)(void *)(bytes + 0xf8);
+    }
+    if (aspect <= 0.00001f) {
+        aspect = *(float *)(void *)(bytes + 0xfc);
+    }
+    if (fovDeg <= 0.00001f) {
+        fovDeg = 45.0f;
+    }
+    if (aspect <= 0.00001f) {
+        aspect = 1.333333373f;
+    }
+    gCzanModelHostProjectionActive = 1;
+    gCzanModelHostProjectionFovDeg = fovDeg;
+    gCzanModelHostProjectionAspect = aspect;
+    gCzanModelHostProjectionNear = *(float *)(void *)(bytes + 0x100);
+    gCzanModelHostProjectionFar = *(float *)(void *)(bytes + 0x104);
+}
+
+void CzanModelOwner_ClearHostProjection(void) {
+    gCzanModelHostProjectionActive = 0;
 }
 
 void CzanModelOwner_CreateModelFromPrimaryBlock(int *owner, void *primaryBlock, int primaryBlockSize) {
@@ -1115,13 +1893,7 @@ void CzanModelOwner_CreateModelFromPrimaryBlock(int *owner, void *primaryBlock, 
     if (ownerState == 0) {
         return;
     }
-    model = ownerState->model;
-    if (model != 0) {
-        CzanModel_Destroy(model, 1);
-        free(model);
-        ownerState->model = 0;
-        owner[0x20] = 0;
-    }
+    CzanModelOwner_DestroyHostModel(owner);
 
     model = (int *)calloc(1, 0x2d0);
     if (model == 0) {
@@ -1178,16 +1950,73 @@ void CzanModelOwner_LoadContinuationBlock(int *owner, void *continuationBlock, i
     CzanModel_LoadContinuationBlock(model, continuationBlock, continuationIndex);
 }
 
-void CzanModelOwner_SetAnimationStartFrame(int *owner, double startFrame) {
-    /* 0x8015EBF4 checks owner +0x80 and writes the frame value to model +0x250.
-       select_cmn calls this with 1.0 after attaching the ten continuation blocks. */
+void CzanModelOwner_SetAnimationSpeed(int *owner, double speed) {
+    /* 0x8015EBF4 checks owner +0x80 and writes channel 0 playback speed at
+       model +0x250. The active animation frame lives separately at model +0x230. */
     int *model;
 
     model = CzanModelOwner_GetHostModel(owner);
     if (model == 0) {
         return;
     }
-    *(float *)(void *)((unsigned char *)model + 0x250) = (float)startFrame;
+    *(float *)(void *)((unsigned char *)model + 0x250) = (float)speed;
+}
+
+void CzanModel_StartAnimationChannel(double startFrame, int *model, int animationIndex, int blend, int loop, int channelIndex) {
+    unsigned char *channel;
+    void *zabBlock;
+    unsigned int zabSize;
+    int animationRecord;
+    int objectCount;
+    float duration;
+
+    if (model == 0 || channelIndex < 0 || channelIndex >= 2) {
+        return;
+    }
+
+    channel = (unsigned char *)model + 0x230 + channelIndex * 0x24;
+    duration = 0.0f;
+    animationRecord = 0;
+    objectCount = model[0x98 / 4];
+    if (model[0x14 / 4] != 0 && animationIndex >= 0 && objectCount > 0) {
+        animationRecord = model[0x14 / 4] + animationIndex * objectCount * 0x74;
+        duration = *(float *)(void *)((unsigned char *)(uintptr_t)animationRecord + 0x34);
+    }
+    zabBlock = animationIndex >= 0 ? CzanModel_GetHostContinuationBlock(model, animationIndex) : 0;
+    zabSize = zabBlock != 0 ? HostCzan_GetRegisteredLinkSize(zabBlock) : 0;
+    if (duration <= 0.0f && zabBlock != 0 && zabSize >= 0x14 && memcmp(zabBlock, "ZAB ", 4) == 0) {
+        duration = (float)CzanModel_ReadBe32((const unsigned char *)zabBlock + 0x10);
+    }
+
+    *(float *)(void *)(channel + 0x00) = (float)startFrame;
+    *(int *)(void *)(channel + 0x04) = animationIndex;
+    *(int *)(void *)(channel + 0x0c) = animationRecord;
+    *(float *)(void *)(channel + 0x10) = duration;
+    channel[0x08] = loop != 0;
+    channel[0x14] = 0;
+    channel[0x15] = 0;
+    *(int *)(void *)(channel + 0x18) = blend != 0;
+    *(float *)(void *)(channel + 0x1c) = 0.0f;
+
+    CzanModel_UpdateHostRuntimeObjectTransformsFromBlocks(model, (float)startFrame);
+    CzanModel_UpdateObjectTransforms(0.0, model);
+}
+
+void CzanModelOwner_StartAnimation(int *owner, double startFrame, int animationIndex, int blend, int loop) {
+    int *model;
+
+    model = CzanModelOwner_GetHostModel(owner);
+    if (model == 0) {
+        return;
+    }
+
+    {
+        CzanModelOwnerHostState *ownerState = CzanModelOwner_GetHostState(owner, 0);
+        if (ownerState != 0) {
+            ownerState->lastAnimationUpdateFrameToken = -1;
+        }
+    }
+    CzanModel_StartAnimationChannel(startFrame, model, animationIndex, blend, loop, 0);
 }
 
 int CzanModelCollection_LoadFromLinkBlocks(int *collection, void *linkData, int modelCount, unsigned int collectionIndex) {
@@ -1196,26 +2025,113 @@ int CzanModelCollection_LoadFromLinkBlocks(int *collection, void *linkData, int 
        block index is its texture/TPL block. The original allocates modelCount
        CzanModel objects, creates texture slots for each odd block, attaches the
        matching texture set to each model, then builds runtime data immediately. */
-    (void)linkData;
-    (void)collectionIndex;
+    unsigned int linkSize;
+    unsigned int blockCount;
+    int modelIndex;
+
     if (collection == 0) {
         return -1;
     }
 
-    (void)modelCount;
-    return -1;
+    linkSize = HostCzan_GetRegisteredLinkSize(linkData);
+    if (!CzanLinkResource_IsValid(linkData, linkSize)) {
+        return -1;
+    }
+
+    blockCount = CzanLinkResource_GetBlockCount(linkData, linkSize);
+    if (modelCount < 0) {
+        modelCount = 0;
+    }
+    if ((unsigned int)(modelCount * 2) > blockCount) {
+        modelCount = (int)(blockCount / 2);
+    }
+
+    collection[0] = modelCount;
+    collection[1] = (int)collectionIndex;
+    for (modelIndex = 0; modelIndex < modelCount && modelIndex < 0x20; modelIndex++) {
+        CzanLinkBlock modelBlock;
+        CzanLinkBlock textureBlock;
+        int *model = (int *)calloc(1, 0x2d0);
+        int textureSlot = -1;
+
+        if (model == 0) {
+            break;
+        }
+        CzanModel_Init(model);
+
+        if (CzanLinkResource_GetBlock(linkData, linkSize, (unsigned int)(modelIndex * 2), &modelBlock)) {
+            HostCzan_RegisterLinkSize(modelBlock.data, modelBlock.size);
+            CzanModel_SetPrimaryBlock(model, (int)(uintptr_t)modelBlock.data, (int)modelBlock.size);
+            CzanModel_SetHostPrimaryBlock(model, (void *)modelBlock.data, modelBlock.size);
+        }
+        if (CzanLinkResource_GetBlock(linkData, linkSize, (unsigned int)(modelIndex * 2 + 1), &textureBlock)) {
+            HostCzan_RegisterLinkSize(textureBlock.data, textureBlock.size);
+            textureSlot = (int)CreateTextureFromTplResource(
+                (TextureManagerKnownFields *)GlobalRuntimeContext_GetPointerAt(0x26c),
+                (void *)textureBlock.data,
+                (int)textureBlock.size,
+                0xffffffffu);
+            CzanModel_AttachTextureSet(model, textureSlot);
+        }
+
+        CzanModel_BuildRuntimeDataAndUpdateTransforms(model);
+        collection[2 + modelIndex] = (int)(uintptr_t)model;
+    }
+    return modelIndex;
 }
 
 int CzanModelManager_LoadResource(int *manager, unsigned int bankIndex, void *linkData) {
     /* 0x8017872C loads one manager bank. Block 0 is metadata/header, block 1 is an
        optional TPL texture resource, and block 2 is an optional CzanModel
        collection loaded through CzanModelCollection_LoadFromLinkBlocks. */
-    (void)bankIndex;
-    (void)linkData;
+    unsigned int linkSize;
+    CzanLinkBlock block;
+    int *bank;
+    int modelCount = 0;
+
     if (manager == 0) {
         return 0;
     }
 
+    linkSize = HostCzan_GetRegisteredLinkSize(linkData);
+    if (!CzanLinkResource_IsValid(linkData, linkSize)) {
+        return 0;
+    }
+
+    bankIndex &= 0xffu;
+    bank = (int *)((unsigned char *)manager + bankIndex * 0x10);
+
+    if (CzanLinkResource_GetBlock(linkData, linkSize, 0, &block)) {
+        HostCzan_RegisterLinkSize(block.data, block.size);
+        *(int *)((unsigned char *)bank + 0x124) = (int)(uintptr_t)block.data;
+        *(int *)((unsigned char *)bank + 0x128) = (int)(uintptr_t)(block.data + 0x10);
+        if (block.size >= 0x18) {
+            modelCount = (int)CzanModel_ReadBe16(block.data + 0x16);
+        }
+    }
+    if (CzanLinkResource_GetBlock(linkData, linkSize, 1, &block)) {
+        int textureSlot;
+        HostCzan_RegisterLinkSize(block.data, block.size);
+        textureSlot = (int)CreateTextureFromTplResource(
+            (TextureManagerKnownFields *)GlobalRuntimeContext_GetPointerAt(0x26c),
+            (void *)block.data,
+            (int)block.size,
+            0xffffffffu);
+        *(int *)((unsigned char *)bank + 0x12c) = textureSlot;
+        manager[0x18 / 4] = textureSlot;
+    }
+    else {
+        manager[0x18 / 4] = -1;
+    }
+
+    if (CzanLinkResource_GetBlock(linkData, linkSize, 2, &block)) {
+        HostCzan_RegisterLinkSize(block.data, block.size);
+        CzanModelCollection_LoadFromLinkBlocks(
+            (int *)((unsigned char *)manager + 0xac),
+            (void *)block.data,
+            modelCount,
+            bankIndex);
+    }
     return 1;
 }
 
@@ -1424,12 +2340,15 @@ void CzanModelManager_InitBank5LiveObjectsForMode(int *owner) {
 }
 
 void CzanModelOwner_CopyCurrentModelMatrix(int *owner, void *outMatrix) {
-    /* 0x8015EAD0 copies the current model-owner matrix from owner +0x278 +0x4C.
+    /* 0x8015EAD0 copies the current model-owner matrix from owner +0x4C.
 
-       In the active controller path, owner is controller +0x54 and the copied matrix
-       is then pushed into CzanModelManager_UpdateCurrentModeMatrices. */
-    (void)owner;
-    (void)outMatrix;
+       Select-common updates copy this into selectCommon +0x18 before drawing the
+       two CtsStageObj layers. */
+    if (owner == 0 || outMatrix == 0) {
+        return;
+    }
+
+    Matrix34_Copy((float *)outMatrix, (const float *)((const unsigned char *)owner + 0x4c));
 }
 
 int CtsStageObjDescriptor_GetModelTransform(int descriptor) {
@@ -1465,6 +2384,39 @@ void CzanEffectManager_SetStopTime(int *manager, int effectHandle, int stopTime)
     (void)manager;
     (void)effectHandle;
     (void)stopTime;
+}
+
+int CzanEffectManager_StartEffect(
+    int *manager,
+    int effectId,
+    int effectParam,
+    int enabled,
+    const void *transform,
+    int ownerOrArg,
+    int stopTime) {
+    static int nextHostEffectHandle;
+    int handle;
+
+    /* 0x8016B270 starts/spawns an effect through the global manager at
+       DAT_802E71B8 +0x268. The known callers pass an effect id, an auxiliary
+       parameter resolved by FUN_800F3158/FUN_800F3068, an enabled/immediate flag,
+       a stack transform initialized by FUN_80166D54, an owner/arg, and -1 stop time.
+
+       The real effect-pool allocator is still unmapped; the host returns stable
+       synthetic handles so higher-level state machines can preserve ownership flow. */
+    (void)manager;
+    (void)effectParam;
+    (void)enabled;
+    (void)transform;
+    (void)ownerOrArg;
+    (void)stopTime;
+
+    if (effectId < 0) {
+        return -1;
+    }
+    handle = nextHostEffectHandle++;
+    printf("CzanEffectManager: start effect id=%d handle=%d\n", effectId, handle);
+    return handle;
 }
 
 void CzanModelOwner_LoadStageResourceGroup(int *owner, void *linkData) {
@@ -1778,13 +2730,74 @@ int CzanModel_EvaluateScaleKeys(double frame, double duration, float *outVec3, c
 void CzanModel_UpdateAnimationChannel(int *model, int holdFrame, int channelIndex) {
     /* 0x8015627C updates one animation channel at model +0x230 + channel*0x24.
        Channel 0 drives the main transform update. The original advances the
-       channel timer, handles loop/end flags, updates animation blending through
+       channel timer in ZAB frame units, handles loop/end flags, updates animation blending through
        FUN_801564BC/FUN_8015601C, and calls CzanModel_UpdateObjectTransforms for
        channel 0. */
-    (void)holdFrame;
-    (void)channelIndex;
+    unsigned char *channel;
+    float frame;
+    float speed;
+    float frameScale;
+    float duration;
+    float delta;
+
     if (model == 0) {
         return;
+    }
+
+    channel = (unsigned char *)model + 0x230 + channelIndex * 0x24;
+    frame = *(float *)(void *)(channel + 0x00);
+    speed = *(float *)(void *)(channel + 0x20);
+    frameScale = *(float *)(void *)((unsigned char *)model + 0x19c);
+    duration = *(float *)(void *)(channel + 0x10);
+    delta = 0.0f;
+
+    if (frameScale == 0.0f) {
+        frameScale = 1.0f;
+    }
+
+    if (!holdFrame && duration > 0.0f) {
+        delta = speed * frameScale;
+        frame += delta;
+        if (speed < 0.0f) {
+            if (frame > 0.0f) {
+                channel[0x15] = 0;
+            }
+            else {
+                if (channel[0x08] == 1) {
+                    while (frame <= 0.0f) {
+                        frame += duration;
+                    }
+                }
+                else {
+                    frame = 0.0f;
+                }
+                channel[0x14] = 1;
+                channel[0x15] = 1;
+            }
+        }
+        else if (frame < duration) {
+            channel[0x15] = 0;
+        }
+        else {
+            if (channel[0x08] == 1) {
+                while (frame >= duration) {
+                    frame -= duration;
+                }
+            }
+            else {
+                frame = duration;
+            }
+            channel[0x14] = 1;
+            channel[0x15] = 1;
+        }
+        *(float *)(void *)(channel + 0x00) = frame;
+    }
+
+    if (channelIndex == 0) {
+        CzanModel_UpdateHostRuntimeObjectTransformsFromBlocks(
+            model,
+            *(float *)(void *)((unsigned char *)model + 0x230));
+        CzanModel_UpdateObjectTransforms(delta, model);
     }
 }
 
@@ -1885,9 +2898,386 @@ void CzanModel_UpdateObjectTransforms(double deltaOrScale, int *model) {
        alternate transform arrays, updates type-2 weighted vectors through
        CzanModel_UpdateType2WeightedVectors, updates object animation data through
        CzanModel_UpdateObjectAnimation, then finalizes through FUN_801576FC. */
+    const unsigned char *zmb;
+    unsigned int zmbSize;
+    unsigned int objectTableOffset;
+    unsigned int objectCount;
+    unsigned int objectEntryOffset;
+    unsigned int objectIndex;
+
     (void)deltaOrScale;
-    if (model == 0 || model[1] == 0) {
+    if (model == 0 || model[1] == 0 || model[7] == 0 || model[8] == 0) {
         return;
+    }
+
+    zmb = (const unsigned char *)CzanModel_GetHostPrimaryBlock(model);
+    zmbSize = CzanModel_GetHostPrimaryBlockSize(model);
+    if (zmb == 0 || zmbSize < 0x30 || memcmp(zmb, "ZMB ", 4) != 0) {
+        return;
+    }
+
+    objectTableOffset = CzanModel_ReadBe32(zmb + 0x20);
+    if (objectTableOffset > zmbSize || zmbSize - objectTableOffset < 0x0c) {
+        return;
+    }
+
+    objectCount = CzanModel_ReadBe32(zmb + objectTableOffset);
+    objectEntryOffset = CzanModel_ReadBe32(zmb + objectTableOffset + 8);
+    if (objectCount == 0 || objectEntryOffset > zmbSize) {
+        return;
+    }
+    if (objectCount > (unsigned int)model[0x26]) {
+        objectCount = (unsigned int)model[0x26];
+    }
+
+    for (objectIndex = 0; objectIndex < objectCount; objectIndex++) {
+        unsigned int entryOffset = objectEntryOffset + objectIndex * 0xa0u;
+        unsigned int parentIndex;
+        float *localMatrix;
+        float *worldMatrix;
+
+        if (entryOffset + 0x98u > zmbSize) {
+            break;
+        }
+
+        localMatrix = (float *)(uintptr_t)(model[7] + (int)(objectIndex * 0x30u));
+        worldMatrix = (float *)(uintptr_t)(model[8] + (int)(objectIndex * 0x30u));
+        parentIndex = CzanModel_ReadBe32(zmb + entryOffset + 0x94);
+        if ((int)parentIndex < 0 || parentIndex >= objectIndex || parentIndex >= objectCount) {
+            Matrix34_Copy(worldMatrix, localMatrix);
+        }
+        else {
+            const float *parentWorld = (const float *)(uintptr_t)(model[8] + (int)(parentIndex * 0x30u));
+            Matrix34_Multiply(worldMatrix, parentWorld, localMatrix);
+        }
+    }
+
+    model[0x164 / 4] = 0;
+}
+
+static CzanModelHostDrawCache *CzanModel_GetHostDrawCache(int *model) {
+    unsigned int i;
+    CzanModelHostDrawCache *freeCache = 0;
+
+    if (model == 0) {
+        return 0;
+    }
+    for (i = 0; i < CZAN_MODEL_HOST_DRAW_CACHE_CAP; i++) {
+        if (gCzanModelHostDrawCaches[i].model == model) {
+            return &gCzanModelHostDrawCaches[i];
+        }
+        if (freeCache == 0 && gCzanModelHostDrawCaches[i].model == 0) {
+            freeCache = &gCzanModelHostDrawCaches[i];
+        }
+    }
+    if (freeCache == 0) {
+        freeCache = &gCzanModelHostDrawCaches[
+            gCzanModelHostDrawCacheCursor++ % CZAN_MODEL_HOST_DRAW_CACHE_CAP];
+    }
+    memset(freeCache, 0, sizeof(*freeCache));
+    freeCache->model = model;
+    return freeCache;
+}
+
+static int CzanModel_ProjectHostPoint(float x, float y, float z, int *outX, int *outY) {
+    float depth;
+    float screenCenterX;
+    float screenCenterY;
+    float fovDeg;
+    float aspect;
+    float f;
+    float focalX;
+    float focalY;
+
+    if (outX == 0 || outY == 0) {
+        return 0;
+    }
+
+    depth = -z;
+    if (depth < 1.0f) {
+        depth = z;
+    }
+    if (depth < 1.0f) {
+        return 0;
+    }
+
+    screenCenterX = (float)RuntimeVideo_GetFramebufferWidth() * 0.5f;
+    screenCenterY = (float)RuntimeVideo_GetFramebufferHeight() * 0.5f;
+    fovDeg = gCzanModelHostProjectionActive ? gCzanModelHostProjectionFovDeg : 45.0f;
+    aspect = gCzanModelHostProjectionActive ? gCzanModelHostProjectionAspect : 1.333333373f;
+    if (fovDeg <= 0.00001f) {
+        fovDeg = 45.0f;
+    }
+    if (aspect <= 0.00001f) {
+        aspect = 1.333333373f;
+    }
+    f = 1.0f / tanf((fovDeg * 3.141592741f) / 360.0f);
+    focalX = ((float)RuntimeVideo_GetFramebufferWidth() * 0.5f) * (f / aspect);
+    focalY = ((float)RuntimeVideo_GetFramebufferHeight() * 0.5f) * f;
+
+    *outX = (int)(screenCenterX + (x * focalX) / depth);
+    *outY = (int)(screenCenterY - (y * focalY) / depth);
+    return 1;
+}
+
+static void CzanModel_RebuildHostDrawCache(CzanModelHostDrawCache *cache, int *model, int drawMode) {
+    CzanModelSubmittedPrimitiveBuffer primitiveBuffer;
+    void *primaryBlock;
+    unsigned int primaryBlockSize;
+    void *zabBlock;
+    unsigned int zabBlockSize;
+    int activeAnimationIndex;
+    int textureSlot;
+    float animationTick;
+
+    if (cache == 0 || model == 0) {
+        return;
+    }
+
+    primaryBlock = CzanModel_GetHostPrimaryBlock(model);
+    primaryBlockSize = CzanModel_GetHostPrimaryBlockSize(model);
+    activeAnimationIndex = *(int *)(void *)((unsigned char *)model + 0x234);
+    zabBlock = activeAnimationIndex >= 0 ? CzanModel_GetHostContinuationBlock(model, activeAnimationIndex) : 0;
+    zabBlockSize = zabBlock != 0 ? HostCzan_GetRegisteredLinkSize(zabBlock) : 0;
+    textureSlot = model[0x15];
+    animationTick = *(float *)(void *)((unsigned char *)model + 0x230);
+
+    if (cache->primaryBlock == primaryBlock &&
+        cache->primaryBlockSize == primaryBlockSize &&
+        cache->zabBlock == zabBlock &&
+        cache->zabBlockSize == zabBlockSize &&
+        cache->textureSlot == textureSlot &&
+        cache->drawMode == drawMode) {
+        return;
+    }
+
+    cache->primaryBlock = primaryBlock;
+    cache->primaryBlockSize = primaryBlockSize;
+    cache->zabBlock = zabBlock;
+    cache->zabBlockSize = zabBlockSize;
+    cache->textureSlot = textureSlot;
+    cache->drawMode = drawMode;
+    cache->animationTick = animationTick;
+    cache->vertexCount = 0;
+    cache->primitiveCount = 0;
+    if (primaryBlock == 0 || primaryBlockSize == 0) {
+        return;
+    }
+
+    primitiveBuffer.vertices = cache->vertices;
+    primitiveBuffer.texcoords = cache->texcoords;
+    primitiveBuffer.colors = cache->colors;
+    primitiveBuffer.vertexObjectIndex = cache->vertexObjectIndex;
+    primitiveBuffer.vertexCapacity = CZAN_MODEL_HOST_DRAW_VERTEX_CAP;
+    primitiveBuffer.vertexCount = 0;
+    primitiveBuffer.primitiveStart = cache->primitiveStart;
+    primitiveBuffer.primitiveVertexCount = cache->primitiveVertexCount;
+    primitiveBuffer.primitiveTextureIndex = cache->primitiveTextureIndex;
+    primitiveBuffer.primitiveMaterialMode = cache->primitiveMaterialMode;
+    primitiveBuffer.primitiveCapacity = CZAN_MODEL_HOST_DRAW_PRIMITIVE_CAP;
+    primitiveBuffer.primitiveCount = 0;
+    primitiveBuffer.submittedObjectCount = 0;
+
+    CzanModel_SubmitAnimatedZmbPrimitiveStreamsWithDrawMode(
+        primaryBlock,
+        primaryBlockSize,
+        zabBlock,
+        zabBlockSize,
+        animationTick,
+        drawMode,
+        model[8] != 0 ? (const float *)(uintptr_t)model[8] : 0,
+        &primitiveBuffer);
+    cache->vertexCount = primitiveBuffer.vertexCount;
+    cache->primitiveCount = primitiveBuffer.primitiveCount;
+}
+
+static void CzanModel_FlushHostTriangleBatch(
+    unsigned int *batchVertexCount,
+    void *textureHandle,
+    int textureIndex) {
+    if (batchVertexCount == 0 || *batchVertexCount == 0) {
+        return;
+    }
+
+    DrawTexturedTriangleList2D(
+        gCzanModelHostBatchPoints,
+        gCzanModelHostBatchTexcoords,
+        gCzanModelHostBatchColors,
+        *batchVertexCount,
+        textureHandle,
+        textureIndex);
+    *batchVertexCount = 0;
+}
+
+static void CzanModel_DrawHostPrimitiveStreams(int *model, const float *baseMatrix, int drawMode) {
+    CzanModelHostDrawCache *cache;
+    int pass;
+
+    cache = CzanModel_GetHostDrawCache(model);
+    CzanModel_RebuildHostDrawCache(cache, model, drawMode);
+    if (cache == 0 || cache->vertexCount == 0 || cache->primitiveCount == 0) {
+        return;
+    }
+
+    for (pass = 0; pass < 2; pass++) {
+        unsigned int primitiveIndex;
+        int batchTextureIndex = -0x7fffffff;
+        void *batchTextureHandle = 0;
+        unsigned int batchVertexCount = 0;
+
+        for (primitiveIndex = 0; primitiveIndex < cache->primitiveCount; primitiveIndex++) {
+            unsigned int start = cache->primitiveStart[primitiveIndex];
+            unsigned int count = cache->primitiveVertexCount[primitiveIndex];
+            int textureIndex = (int)cache->primitiveTextureIndex[primitiveIndex];
+            int materialBlendPass = (cache->primitiveMaterialMode[primitiveIndex] & 0x7fu) != 0;
+            int textureWidth = 0;
+            int textureHeight = 0;
+            int normalizeTexcoords = 0;
+            unsigned int localIndex;
+            unsigned int triangleIndex;
+            int projectedOk = 1;
+            int points[2048][2];
+            float texcoords[2048][2];
+            unsigned int colors[2048];
+
+            if (materialBlendPass != pass) {
+                continue;
+            }
+            if (start >= cache->vertexCount) {
+                continue;
+            }
+            if (start + count > cache->vertexCount) {
+                count = cache->vertexCount - start;
+            }
+            if (count < 3) {
+                continue;
+            }
+            if (count > 2048) {
+                count = 2048;
+            }
+
+            if (textureIndex != batchTextureIndex) {
+                CzanModel_FlushHostTriangleBatch(
+                    &batchVertexCount,
+                    batchTextureHandle,
+                    batchTextureIndex);
+                batchTextureIndex = textureIndex;
+                batchTextureHandle = cache->textureSlot >= 0 ? (void *)(intptr_t)cache->textureSlot : 0;
+            }
+
+            if (cache->textureSlot >= 0) {
+                (void)GetTextureDimensions(
+                    (void *)(intptr_t)cache->textureSlot,
+                    textureIndex,
+                    &textureWidth,
+                    &textureHeight);
+            }
+
+            for (localIndex = 0; localIndex < count; localIndex++) {
+                unsigned int vertexIndex = start + localIndex;
+                float point[3];
+                float u;
+                float v;
+
+                point[0] = cache->vertices[vertexIndex][0];
+                point[1] = cache->vertices[vertexIndex][1];
+                point[2] = cache->vertices[vertexIndex][2];
+                if (model != 0 && model[8] != 0) {
+                    unsigned int objectIndex = cache->vertexObjectIndex[vertexIndex];
+                    if (objectIndex < (unsigned int)model[0x26]) {
+                        CzanModel_TransformPoint(
+                            (const float *)(uintptr_t)(model[8] + (int)(objectIndex * 0x30u)),
+                            point,
+                            point);
+                    }
+                }
+                if (baseMatrix != 0) {
+                    CzanModel_TransformPoint(baseMatrix, point, point);
+                }
+                if (!CzanModel_ProjectHostPoint(
+                        point[0],
+                        point[1],
+                        point[2],
+                        &points[localIndex][0],
+                        &points[localIndex][1])) {
+                    projectedOk = 0;
+                    break;
+                }
+
+                u = cache->texcoords[vertexIndex][0];
+                v = cache->texcoords[vertexIndex][1];
+                if (fabsf(u) > 1.25f || fabsf(v) > 1.25f) {
+                    normalizeTexcoords = 1;
+                }
+                texcoords[localIndex][0] = u;
+                texcoords[localIndex][1] = v;
+                colors[localIndex] = cache->colors[vertexIndex];
+            }
+
+            if (!projectedOk) {
+                continue;
+            }
+
+            if (normalizeTexcoords && textureWidth > 0 && textureHeight > 0) {
+                for (localIndex = 0; localIndex < count; localIndex++) {
+                    texcoords[localIndex][0] /= (float)textureWidth;
+                    texcoords[localIndex][1] /= (float)textureHeight;
+                }
+            }
+
+            for (triangleIndex = 2; triangleIndex < count; triangleIndex++) {
+                unsigned int src0;
+                unsigned int src1;
+                unsigned int src2;
+                unsigned int out;
+
+                if (batchVertexCount + 3 > CZAN_MODEL_HOST_DRAW_BATCH_VERTEX_CAP) {
+                    CzanModel_FlushHostTriangleBatch(
+                        &batchVertexCount,
+                        batchTextureHandle,
+                        batchTextureIndex);
+                }
+
+                if ((triangleIndex & 1u) == 0) {
+                    src0 = triangleIndex - 2;
+                    src1 = triangleIndex - 1;
+                }
+                else {
+                    src0 = triangleIndex - 1;
+                    src1 = triangleIndex - 2;
+                }
+                src2 = triangleIndex;
+                out = batchVertexCount;
+
+                gCzanModelHostBatchPoints[out][0] = points[src0][0];
+                gCzanModelHostBatchPoints[out][1] = points[src0][1];
+                gCzanModelHostBatchTexcoords[out][0] = texcoords[src0][0];
+                gCzanModelHostBatchTexcoords[out][1] = texcoords[src0][1];
+                gCzanModelHostBatchColors[out] = colors[src0];
+                out++;
+
+                gCzanModelHostBatchPoints[out][0] = points[src1][0];
+                gCzanModelHostBatchPoints[out][1] = points[src1][1];
+                gCzanModelHostBatchTexcoords[out][0] = texcoords[src1][0];
+                gCzanModelHostBatchTexcoords[out][1] = texcoords[src1][1];
+                gCzanModelHostBatchColors[out] = colors[src1];
+                out++;
+
+                gCzanModelHostBatchPoints[out][0] = points[src2][0];
+                gCzanModelHostBatchPoints[out][1] = points[src2][1];
+                gCzanModelHostBatchTexcoords[out][0] = texcoords[src2][0];
+                gCzanModelHostBatchTexcoords[out][1] = texcoords[src2][1];
+                gCzanModelHostBatchColors[out] = colors[src2];
+                out++;
+
+                batchVertexCount = out;
+            }
+        }
+
+        CzanModel_FlushHostTriangleBatch(
+            &batchVertexCount,
+            batchTextureHandle,
+            batchTextureIndex);
     }
 }
 
@@ -1928,12 +3318,30 @@ void CzanModel_DrawVisibleObjects(int *model, int arg1, const void *baseMatrix, 
        This is the CzanModel visible-object draw traversal. The part-tree walkers
        then dispatch to the actual leaf draw routines at FUN_8015BD68/FUN_8015BEFC
        and FUN_801595BC/FUN_80159730. */
-    (void)arg1;
-    (void)baseMatrix;
-    (void)arg2;
     if (model == 0) {
         return;
     }
+    model[0x150 / 4] = 0;
+    model[0x128 / 4] = arg2;
+    model[0x15c / 4] = arg1;
+    CzanModel_DrawHostPrimitiveStreams(model, (const float *)baseMatrix, 0);
+}
+
+void CzanModel_DrawVisibleObjectsWithMode(int *model, int arg1, const void *baseMatrix, int arg2, int drawMode) {
+    /* 0x8014ED4C is the mode-filtered companion to CzanModel_DrawVisibleObjects.
+       CtsStageObj_DrawModelWithFlags maps draw flags to drawMode 0/1/2, then this
+       path applies the same visible-object traversal with byte +0x29 filtering:
+       mode 0 draws the normal set, mode 1 draws entries tagged 1, and mode 2 draws
+       entries tagged 0. The host submitters are still shared with the normal path,
+       so route through the common traversal until the mode-specific leaves are
+       fully ported. */
+    if (model == 0) {
+        return;
+    }
+    model[0x150 / 4] = 0;
+    model[0x128 / 4] = arg2;
+    model[0x15c / 4] = arg1;
+    CzanModel_DrawHostPrimitiveStreams(model, (const float *)baseMatrix, drawMode);
 }
 
 void CzanModel_DrawType2PartTree(

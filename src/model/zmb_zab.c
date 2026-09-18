@@ -1,7 +1,60 @@
 #include "model/zmb_zab.h"
 
+#include "model/czan_model.h"
+#include "render/render_engine.h"
+#include "runtime/module_system.h"
+
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+
+#define CTS_STAGE_OBJ_HOST_STATE_CAP 32
+
+typedef struct CtsStageObjHostState {
+    int *entry;
+    int *model;
+    float animationFrame;
+    float animationStep;
+    int animationActive;
+    int lastAdvanceFrameToken;
+} CtsStageObjHostState;
+
+static CtsStageObjHostState gCtsStageObjHostStates[CTS_STAGE_OBJ_HOST_STATE_CAP];
+
+static int CtsStageObj_FloatBits(float value) {
+    int bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static CtsStageObjHostState *CtsStageObj_GetHostState(int *entry, int create) {
+    unsigned int i;
+    CtsStageObjHostState *freeSlot = 0;
+
+    if (entry == 0) {
+        return 0;
+    }
+    for (i = 0; i < CTS_STAGE_OBJ_HOST_STATE_CAP; i++) {
+        if (gCtsStageObjHostStates[i].entry == entry) {
+            return &gCtsStageObjHostStates[i];
+        }
+        if (freeSlot == 0 && gCtsStageObjHostStates[i].entry == 0) {
+            freeSlot = &gCtsStageObjHostStates[i];
+        }
+    }
+    if (!create || freeSlot == 0) {
+        return 0;
+    }
+    memset(freeSlot, 0, sizeof(*freeSlot));
+    freeSlot->entry = entry;
+    return freeSlot;
+}
+
+int *CtsStageObj_GetHostModel(int *entry) {
+    CtsStageObjHostState *state = CtsStageObj_GetHostState(entry, 0);
+    return state != 0 ? state->model : 0;
+}
 
 int ZmbZabModelEntry_Init(void *entry) {
     CtsStageObjKnownFields *stageObj = (CtsStageObjKnownFields *)entry;
@@ -61,8 +114,9 @@ int *CtsStageObj_InitBase(int *entry) {
     entry[2] = -1;
     entry[3] = 0;
     entry[4] = 0;
-    entry[5] = 0;
-    entry[6] = 0;
+    entry[5] = CtsStageObj_FloatBits(1.0f);
+    entry[6] = CtsStageObj_FloatBits(1.0f);
+    Matrix34_SetIdentity((float *)(entry + 7));
     memset(entry + 0x13, 0, 0x18);
     entry[0x19] = 0;
     entry[0x1a] = 0;
@@ -102,13 +156,27 @@ void CtsStageObj_ResetModelBlocks(int *entry) {
         return;
     }
 
+    {
+        CtsStageObjHostState *state = CtsStageObj_GetHostState(entry, 0);
+        if (state != 0 && state->model != 0) {
+            CzanModel_Destroy(state->model, 1);
+            free(state->model);
+            state->model = 0;
+            state->animationFrame = 0.0f;
+            state->animationStep = 0.0f;
+            state->animationActive = 0;
+            state->lastAdvanceFrameToken = -1;
+        }
+    }
+
     entry[0] = 0;
     entry[1] = -1;
     entry[2] = -1;
     entry[3] = 0;
     entry[4] = 0;
-    entry[5] = 0;
-    entry[6] = 0;
+    entry[5] = CtsStageObj_FloatBits(1.0f);
+    entry[6] = CtsStageObj_FloatBits(1.0f);
+    Matrix34_SetIdentity((float *)(entry + 7));
     memset(entry + 0x13, 0, 0x18);
     entry[0x19] = 0;
     entry[0x1a] = 0;
@@ -116,9 +184,9 @@ void CtsStageObj_ResetModelBlocks(int *entry) {
 
 void CtsStageObj_LoadModelBlocks(
     int *entry,
-    int primaryModelBlock,
+    intptr_t primaryModelBlock,
     int primaryModelBlockSize,
-    int secondaryTextureBlock,
+    intptr_t secondaryTextureBlock,
     int secondaryTextureBlockSize,
     int continuationCount,
     int fallbackTextureSlot) {
@@ -138,20 +206,66 @@ void CtsStageObj_LoadModelBlocks(
        - writes model +0x148 = 1 and model +0x1A0 = 2
        - allocates entry[4] as continuationCount * 4 bytes and clears it
        - stores FUN_8014E8E8(model, DAT_80271640) at entry[2] */
-    (void)entry;
-    (void)primaryModelBlock;
-    (void)primaryModelBlockSize;
-    (void)secondaryTextureBlock;
-    (void)secondaryTextureBlockSize;
-    (void)continuationCount;
-    (void)fallbackTextureSlot;
+    CtsStageObjHostState *state;
+    int *model;
+    int textureSlot;
+
+    if (entry == 0 || primaryModelBlock == 0 || primaryModelBlockSize <= 0) {
+        return;
+    }
+
+    CtsStageObj_ResetModelBlocks(entry);
+    state = CtsStageObj_GetHostState(entry, 1);
+    if (state == 0) {
+        return;
+    }
+
+    textureSlot = fallbackTextureSlot;
+    if (secondaryTextureBlock != 0 && secondaryTextureBlockSize > 0) {
+        textureSlot = (int)CreateTextureFromTplResource(
+            (TextureManagerKnownFields *)GlobalRuntimeContext_GetPointerAt(0x26c),
+            (void *)(uintptr_t)secondaryTextureBlock,
+            secondaryTextureBlockSize,
+            0xffffffffu);
+        entry[1] = textureSlot;
+    }
+
+    model = (int *)calloc(1, 0x2d0);
+    if (model == 0) {
+        return;
+    }
+    CzanModel_Init(model);
+    if (continuationCount > 0) {
+        CzanModel_SetContinuationCount(model, continuationCount);
+    }
+    CzanModel_SetPrimaryBlock(model, (int)(uintptr_t)primaryModelBlock, primaryModelBlockSize);
+    CzanModel_SetHostPrimaryBlock(
+        model,
+        (void *)(uintptr_t)primaryModelBlock,
+        (unsigned int)primaryModelBlockSize);
+    if (textureSlot != -1) {
+        CzanModel_AttachTextureSet(model, textureSlot);
+    }
+    CzanModel_SetEnabled(model, 1);
+
+    state->model = model;
+    state->animationFrame = 0.0f;
+    state->animationStep = 0.0f;
+    state->animationActive = 0;
+    state->lastAdvanceFrameToken = -1;
+    entry[0] = (int)(uintptr_t)model;
+    entry[2] = -1;
+    entry[3] = continuationCount;
+    entry[5] = CtsStageObj_FloatBits(1.0f);
+    entry[6] = CtsStageObj_FloatBits(1.0f);
+    Matrix34_SetIdentity((float *)(entry + 7));
 }
 
 void CtsStageObj_LoadPrimarySecondaryBlocks(
     void *entry,
-    int primaryBlock,
+    intptr_t primaryBlock,
     int primaryBlockSize,
-    int secondaryBlock,
+    intptr_t secondaryBlock,
     int secondaryBlockSize,
     unsigned int continuationCount) {
     /* Vtable +0x10 / 0x80059058 forwards to FUN_80058EA8. It is called by
@@ -167,33 +281,75 @@ void CtsStageObj_LoadPrimarySecondaryBlocks(
         -1);
 }
 
-void CtsStageObj_LoadContinuationBlock(void *entry, int continuationIndex, int continuationBlock) {
+void CtsStageObj_LoadContinuationBlock(void *entry, int continuationIndex, intptr_t continuationBlock) {
     CtsStageObjKnownFields *stageObj = (CtsStageObjKnownFields *)entry;
 
     /* Vtable +0x20 / 0x80059158 loads one continuation block when
        continuationIndex < entry[3]. The original calls FUN_8014C68C(*entry, block,
        index), then caches *(entryObject +0x240) into the pointer table at entry[4]. */
-    (void)continuationBlock;
     if (stageObj == 0) {
         return;
     }
-    (void)continuationIndex;
+    {
+        int *model = CtsStageObj_GetHostModel((int *)entry);
+        if (model != 0 && continuationBlock != 0) {
+            CzanModel_LoadContinuationBlock(model, (void *)(uintptr_t)continuationBlock, continuationIndex);
+        }
+    }
 }
 
-void CtsStageObj_StartAnimation(double frameScale, double startFrame, void *entry, int arg3, int arg4, int arg5) {
+void CtsStageObj_StartAnimation(double startFrame, double speed, void *entry, int arg3, int arg4, int arg5) {
     CtsStageObjKnownFields *stageObj = (CtsStageObjKnownFields *)entry;
 
-    /* Vtable +0x24 / 0x800591BC stores (int)startFrame at entry[6], writes
-       startFrame * entry[5] to the underlying model object +0x250, then calls
-       FUN_8015C548(*entry). */
-    (void)frameScale;
-    (void)arg3;
-    (void)arg4;
-    (void)arg5;
+    /* Vtable +0x24 / 0x800591BC prepares channel 0 for the underlying model.
+       The speed lives at model +0x250; the current frame and active animation id
+       are set by FUN_8015C548 / CzanModel_StartAnimationChannel. */
     if (stageObj == 0) {
         return;
     }
-    (void)startFrame;
+    {
+        int *model = CtsStageObj_GetHostModel((int *)entry);
+        CtsStageObjHostState *state = CtsStageObj_GetHostState((int *)entry, 0);
+        if (model != 0) {
+            float frame = (float)startFrame;
+            ((int *)entry)[6] = CtsStageObj_FloatBits(frame);
+            *(float *)(void *)((unsigned char *)model + 0x250) = speed;
+            CzanModel_StartAnimationChannel(frame, model, arg3, arg4, arg5, 0);
+            if (state != 0) {
+                state->animationFrame = frame;
+                state->animationStep = (float)speed;
+                state->animationActive = (float)speed != 0.0f;
+                state->lastAdvanceFrameToken = -1;
+            }
+        }
+    }
+}
+
+static void CtsStageObj_AdvanceHostAnimationFrame(int *stageObj) {
+    CtsStageObj_UpdateAnimationFrame(stageObj, 0);
+}
+
+void CtsStageObj_UpdateAnimationFrame(int *stageObj, int holdFrame) {
+    CtsStageObjHostState *state;
+    int frameToken;
+
+    if (stageObj == 0) {
+        return;
+    }
+
+    state = CtsStageObj_GetHostState(stageObj, 0);
+    if (state == 0 || state->model == 0 || !state->animationActive) {
+        return;
+    }
+
+    frameToken = Runtime_GetMainLoopFrameCounter();
+    if (state->lastAdvanceFrameToken == frameToken) {
+        return;
+    }
+    state->lastAdvanceFrameToken = frameToken;
+
+    CzanModel_UpdateAnimationChannel(state->model, holdFrame != 0, 0);
+    state->animationFrame = *(float *)(void *)((unsigned char *)state->model + 0x230);
 }
 
 void CtsStageObj_SelectAndApplyModelSlot(
@@ -491,12 +647,33 @@ int CtsStageObj_CopyObjectTransform(void *stageObjOrSlot, void *outMatrix, int o
        - returns 0 when only the base transform was copied
 
        This provides the matrix later passed into CzanModelManager_SetLiveObjectMatrix. */
+    int *stageObj;
+    int objectTransform;
+    const float *baseTransform;
+
     if (stageObjOrSlot == 0) {
         return 0;
     }
-    (void)outMatrix;
-    (void)objectIndex;
-    return 0;
+
+    stageObj = (int *)stageObjOrSlot;
+    objectTransform = 0;
+    baseTransform = (const float *)(stageObj + 7);
+
+    if (objectIndex >= 0 && stageObj[0] != 0) {
+        objectTransform = CzanModel_GetObjectTransform((int *)(intptr_t)stageObj[0], objectIndex);
+    }
+
+    if (objectTransform == 0) {
+        if (outMatrix != 0) {
+            Matrix34_Copy((float *)outMatrix, baseTransform);
+        }
+        return 0;
+    }
+
+    if (outMatrix != 0) {
+        Matrix34_Multiply((float *)outMatrix, baseTransform, (const float *)(intptr_t)objectTransform);
+    }
+    return 1;
 }
 
 void CtsStageObj_ApplyModelTransform(int *stageObj, int arg1, int arg2) {
@@ -511,8 +688,8 @@ void CtsStageObj_ApplyModelTransform(int *stageObj, int arg1, int arg2) {
         return;
     }
 
-    (void)arg1;
-    (void)arg2;
+    CtsStageObj_AdvanceHostAnimationFrame(stageObj);
+    CzanModel_DrawVisibleObjects((int *)(intptr_t)stageObj[0], arg1, stageObj + 7, arg2);
 }
 
 void CtsStageObj_DrawModelWithFlags(int *stageObj, int arg1, int arg2, unsigned int drawFlags) {
@@ -533,9 +710,44 @@ void CtsStageObj_DrawModelWithFlags(int *stageObj, int arg1, int arg2, unsigned 
         return;
     }
 
-    (void)arg1;
-    (void)arg2;
-    (void)drawFlags;
+    CtsStageObj_AdvanceHostAnimationFrame(stageObj);
+    CzanModel_DrawVisibleObjectsWithMode(
+        (int *)(intptr_t)stageObj[0],
+        arg1,
+        stageObj + 7,
+        arg2,
+        (drawFlags & 1u) != 0 ? 1 : ((drawFlags & 2u) != 0 ? 2 : 0));
+}
+
+void CtsStageObj_DrawModelWithExternalMatrix(
+    int *stageObj,
+    int arg1,
+    const float *matrix34,
+    int arg2,
+    unsigned int drawFlags) {
+    float composedMatrix[12];
+    const float *stageMatrix;
+    const float *drawMatrix;
+
+    if (stageObj == 0 || stageObj[0] == 0) {
+        return;
+    }
+
+    CtsStageObj_AdvanceHostAnimationFrame(stageObj);
+    CtsStageObj_CopyObjectTransform(stageObj, composedMatrix, stageObj[2]);
+    stageMatrix = composedMatrix;
+    drawMatrix = stageMatrix;
+    if (matrix34 != 0) {
+        Matrix34_Multiply(composedMatrix, matrix34, stageMatrix);
+        drawMatrix = composedMatrix;
+    }
+
+    CzanModel_DrawVisibleObjectsWithMode(
+        (int *)(intptr_t)stageObj[0],
+        arg1,
+        drawMatrix,
+        arg2,
+        (drawFlags & 1u) != 0 ? 1 : ((drawFlags & 2u) != 0 ? 2 : 0));
 }
 
 void ZmbZabModelEntry_UpdatePresentation(int *entry, int arg1, int arg2, int arg3) {
@@ -551,10 +763,9 @@ void ZmbZabModelEntry_UpdatePresentation(int *entry, int arg1, int arg2, int arg
        This is a higher-level presentation/update method for ZMB/ZAB entries. The
        important remaining target is FUN_8014ED4C, because FUN_800594DC only maps
        flag bits into the CzanModel draw mode. */
-    (void)arg1;
-    (void)arg2;
-    (void)arg3;
     if (entry == 0) {
         return;
     }
+
+    CtsStageObj_DrawModelWithFlags(entry, arg1, arg2, (unsigned int)arg3);
 }

@@ -2,6 +2,7 @@
 
 #include "game/cgame.h"
 #include "render/render_engine.h"
+#include "platform/render_backend.h"
 #include "model/czan_model.h"
 #include "model/zmb_zab.h"
 #include "resource/czan_link.h"
@@ -114,8 +115,8 @@ void CSelectCommon_Init(int *selectCommon) {
     *(int *)(void *)(bytes + 0x370) = 0;
 }
 
-#define HOST_CZAN_MAX_GROUPS 64
-#define HOST_CZAN_MAX_OBJECTS 512
+#define HOST_CZAN_MAX_GROUPS 512
+#define HOST_CZAN_MAX_OBJECTS 4096
 #define HOST_CZAN_MAX_LINK_SIZES 128
 #define HOST_CZAN_TEXTURE_SLOTS 512
 
@@ -141,7 +142,12 @@ typedef struct HostCzanObject {
     int animationWaitTicks;
     int animationDoneB1;
     int animationDoneB2;
+    int animationPlaying171;  /* +0x171: set by 0x80172CC8 when the started anim has frames */
+    int presented0b0;         /* +0xB0: cleared on start, set once the script ran a frame */
     float animationStartFrame;
+    float animationClockB4;   /* +0xB4: animation time in frames, advanced by fps/60 */
+    int textureFrameSet148;   /* +0x148 != -2: frame chosen by code, overrides opcode 04 */
+    int textureFrame148;
     int linkedHandle188;
     int extensionHelperBits;
     int extensionHelperReleaseFlag;
@@ -187,6 +193,7 @@ typedef struct HostCzanObject {
     int width;
     int height;
     unsigned char color[4];
+    unsigned char blockColor[4];  /* 0x80172F30 colour block, multiplied into the draw colour */
     const unsigned char *metadata;
     unsigned int metadataSize;
     unsigned int descriptorOffset;
@@ -265,7 +272,7 @@ static int UiManagerHostPointerBits(void *pointer) {
             return i;
         }
     }
-    return (int)(uintptr_t)pointer;
+    return HostPointer_ToBits32(pointer, "uimanager");
 }
 
 static void *UiManagerHostPointerFromBits(int bits) {
@@ -413,6 +420,91 @@ static void HostCzan_UpdateObjectPosition(HostCzanObject *object) {
     object->y = object->localOffsetY + object->positionOffsetY;
 }
 
+static void HostCzan_ProjectCorner(const HostCzanObject *object, float drawX, float drawY,
+                                   float lx, float ly, float *outX, float *outY) {
+    /* The DOL draws Czan sprites in 3D through a perspective camera 888.9 units in
+       front of the 640x480 screen plane (0x80170FA4). Corners are rotated X (opcode
+       0x11), then Y (0x12), then Z (0x10), placed at the object's z (opcodes 0x05 +
+       0x0C) and projected about the screen centre. Screen y points down, so the
+       y-up rotations are written with ly negated. */
+    const float degrees = 3.14159265358979323846f / 180.0f;
+    const float eyeDistance = 888.9f;
+    float ax = object->rotationX * degrees;
+    float ay = object->rotationY * degrees;
+    float az = object->rotationZ * degrees;
+    float y1 = ly * cosf(ax);
+    float z1 = -ly * sinf(ax);
+    float x2 = lx * cosf(ay) + z1 * sinf(ay);
+    float z2 = -lx * sinf(ay) + z1 * cosf(ay);
+    float x3 = x2 * cosf(az) - y1 * sinf(az);
+    float y3 = x2 * sinf(az) + y1 * cosf(az);
+    float z = object->depth + object->localOffsetZ + z2;
+    float scale = eyeDistance - z > 1.0f ? eyeDistance / (eyeDistance - z) : eyeDistance;
+
+    *outX = 320.0f + (drawX + x3 - 320.0f) * scale;
+    *outY = 240.0f + (drawY + y3 - 240.0f) * scale;
+}
+
+static void HostCzan_ResolveLinkedTransform(const HostCzanObject *object, float *x, float *y,
+                                            float *scaleX, float *scaleY, float *alpha) {
+    /* Sprite +0x1B0 parent chain with +0x1B4 inherit flags: 0x4 = the parent's
+       scale (also applied to the child's offset), 0x10 = the parent's alpha, and the
+       parent position always. The mode-select floor reflections (anchors with scale
+       y -1 and low alpha, link 0x1F) depend on this. */
+    int depth;
+
+    *x = object->x;
+    *y = object->y;
+    *scaleX = 1.0f;
+    *scaleY = 1.0f;
+    *alpha = 1.0f;
+    for (depth = 0; depth < 16 && object->linkedHandle188 != 0; depth++) {
+        int referenceGroup = (object->linkedHandle188 >> 16) & 0xffff;
+        int referenceChild = (object->linkedHandle188 >> 8) & 0xff;
+        int mode = object->linkedHandle188 & 0xff;
+        int referenceIndex = HostCzan_FindObjectIndexByGroupChild(referenceGroup, referenceChild);
+        const HostCzanObject *reference;
+
+        if (referenceIndex < 0) {
+            break;
+        }
+        reference = &gHostCzanObjects[referenceIndex];
+        if ((mode & 0x04) != 0) {
+            *x *= reference->scaleX;
+            *y *= reference->scaleY;
+            *scaleX *= reference->scaleX;
+            *scaleY *= reference->scaleY;
+        }
+        if ((mode & 0x10) != 0) {
+            *alpha *= (float)reference->color[3] / 255.0f;
+        }
+        *x += reference->x;
+        *y += reference->y;
+        object = reference;
+    }
+}
+
+static void HostCzan_GetObjectLinkedPosition(const HostCzanObject *object, float *x, float *y) {
+    /* Sprite +0x1B0 parent links chain: a reference object can itself be linked
+       (prompt indicator -> panel child -> window), so the parent transform is
+       resolved through the whole chain, not just one level. */
+    int depth;
+
+    *x = object->x;
+    *y = object->y;
+    for (depth = 0; depth < 16 && object->linkedHandle188 != 0; depth++) {
+        int referenceGroup = (object->linkedHandle188 >> 16) & 0xffff;
+        int referenceChild = (object->linkedHandle188 >> 8) & 0xff;
+        int referenceIndex = HostCzan_FindObjectIndexByGroupChild(referenceGroup, referenceChild);
+        if (referenceIndex < 0) {
+            break;
+        }
+        object = &gHostCzanObjects[referenceIndex];
+        *x += object->x;
+        *y += object->y;
+    }
+}
+
 static void HostCzan_UpdateObjectScale(HostCzanObject *object) {
     if (object == 0) {
         return;
@@ -422,6 +514,8 @@ static void HostCzan_UpdateObjectScale(HostCzanObject *object) {
     object->scaleZ = object->baseScaleZ;
 }
 
+static int HostCzan_ShouldSkipObject(const HostCzanObject *object);
+static int HostCzan_GetObjectReferenceEdge(const HostCzanObject *object);
 static unsigned short ReadBe16(const unsigned char *p);
 static unsigned int ReadBe32(const unsigned char *p);
 static unsigned int HostCzan_GetAnimationCommandOffset(const HostCzanObject *object, int animationIndex);
@@ -524,7 +618,11 @@ static void HostCzan_ApplyAnimationValue(HostCzanObject *object, int opcode, flo
             object->referenceEdge160 = (int)value;
             break;
         case 0x04:
-            object->textureIndex = (int)value;
+            /* Opcode 04 writes the animation frame +0xA8; it is only shown while
+               +0x148 is -2 (auto), see 0x80175448. */
+            if (!object->textureFrameSet148) {
+                object->textureIndex = (int)value;
+            }
             break;
         case 0x05:
             object->depth = value;
@@ -651,7 +749,45 @@ static void HostCzan_ApplyAnimationValue(HostCzanObject *object, int opcode, flo
     }
 }
 
-static void HostCzan_DrawObject(HostCzanObject *object) {
+static int HostCzan_GetMaskClipRect(const HostCzanObject *object, float *x, float *y, float *w, float *h) {
+    /* Host stand-in for the Czan alpha masks: the mode-select silhouettes
+       ('cha_sil*') are masked by hidden 'white_window_al' siblings shaped like the
+       button window, so clip them to the window (child 0) rectangle. */
+    int index;
+    const HostCzanObject *window;
+    float wx;
+    float wy;
+    float sx;
+    float sy;
+    float alpha;
+
+    if (strncmp(object->name, "cha_sil", 7) != 0) {
+        return 0;
+    }
+    index = HostCzan_FindObjectIndexByGroupChild(object->groupHandle, 0);
+    if (index < 0) {
+        return 0;
+    }
+    window = &gHostCzanObjects[index];
+    HostCzan_ResolveLinkedTransform(window, &wx, &wy, &sx, &sy, &alpha);
+    sx *= window->scaleX;
+    sy *= window->scaleY;
+    *x = wx - window->baseX * sx;
+    *y = wy - window->baseY * sy;
+    *w = (float)window->width * sx;
+    *h = (float)window->height * sy;
+    if (*w < 0.0f) {
+        *x += *w;
+        *w = -*w;
+    }
+    if (*h < 0.0f) {
+        *y += *h;
+        *h = -*h;
+    }
+    return 1;
+}
+
+static void HostCzan_DrawObjectUnclipped(HostCzanObject *object) {
     RenderQuad quad;
     unsigned int dummyColor;
     float width;
@@ -664,6 +800,9 @@ static void HostCzan_DrawObject(HostCzanObject *object) {
     int drawHeight;
     int useCustomQuad;
     int useRotationZ;
+    unsigned char drawColor[4];
+    HostCzanObject linkedView;
+    int channel;
 
     if (object == 0 ||
         HostCzan_ShouldSkipObject(object) ||
@@ -673,6 +812,23 @@ static void HostCzan_DrawObject(HostCzanObject *object) {
         object->width <= 0 ||
         object->height <= 0) {
         return;
+    }
+    if (object->linkedHandle188 != 0) {
+        float inheritedScaleX;
+        float inheritedScaleY;
+        float inheritedAlpha;
+
+        linkedView = *object;
+        HostCzan_ResolveLinkedTransform(object, &linkedView.x, &linkedView.y,
+                                        &inheritedScaleX, &inheritedScaleY, &inheritedAlpha);
+        linkedView.scaleX *= inheritedScaleX;
+        linkedView.scaleY *= inheritedScaleY;
+        linkedView.color[3] = (unsigned char)((float)linkedView.color[3] * inheritedAlpha + 0.5f);
+        linkedView.linkedHandle188 = 0;
+        object = &linkedView;
+    }
+    for (channel = 0; channel < 4; channel++) {
+        drawColor[channel] = (unsigned char)((object->color[channel] * object->blockColor[channel] + 127) / 255);
     }
 
     width = (float)object->width * object->scaleX;
@@ -688,17 +844,7 @@ static void HostCzan_DrawObject(HostCzanObject *object) {
         return;
     }
 
-    drawX = object->x;
-    drawY = object->y;
-    if (object->linkedHandle188 != 0) {
-        int referenceGroup = (object->linkedHandle188 >> 16) & 0xffff;
-        int referenceChild = (object->linkedHandle188 >> 8) & 0xff;
-        int referenceIndex = HostCzan_FindObjectIndexByGroupChild(referenceGroup, referenceChild);
-        if (referenceIndex >= 0) {
-            drawX += gHostCzanObjects[referenceIndex].x;
-            drawY += gHostCzanObjects[referenceIndex].y;
-        }
-    }
+    HostCzan_GetObjectLinkedPosition(object, &drawX, &drawY);
 
     quad.x = drawX - object->baseX * object->scaleX;
     quad.y = drawY - object->baseY * object->scaleY;
@@ -710,6 +856,10 @@ static void HostCzan_DrawObject(HostCzanObject *object) {
     if (object->textureSlot >= 0) {
         useCustomQuad =
             useRotationZ ||
+            object->rotationX != 0.0f ||
+            object->rotationY != 0.0f ||
+            object->depth + object->localOffsetZ > 0.5f ||
+            object->depth + object->localOffsetZ < -0.5f ||
             object->uvBaseX != 0.0f ||
             object->uvBaseY != 0.0f ||
             object->uvOffsetX != 0.0f ||
@@ -737,26 +887,22 @@ static void HostCzan_DrawObject(HostCzanObject *object) {
             float lx3 = -object->baseX * object->scaleX + object->cornerOffsetBottomLeftX * object->scaleX;
             float ly3 = ((float)object->height - object->baseY) * object->scaleY +
                         object->cornerOffsetBottomLeftY * object->scaleY;
-            float radians = object->rotationZ * (3.14159265358979323846f / 180.0f);
-            float c = useRotationZ ? cosf(radians) : 1.0f;
-            float s = useRotationZ ? sinf(radians) : 0.0f;
-            float x0 = drawX + lx0 * c - ly0 * s;
-            float y0 = drawY + lx0 * s + ly0 * c;
-            float x1 = drawX + lx1 * c - ly1 * s;
-            float y1 = drawY + lx1 * s + ly1 * c;
-            float x2 = drawX + lx2 * c - ly2 * s;
-            float y2 = drawY + lx2 * s + ly2 * c;
-            float x3 = drawX + lx3 * c - ly3 * s;
-            float y3 = drawY + lx3 * s + ly3 * c;
+            float x0, y0, x1, y1, x2, y2, x3, y3;
             float u0 = object->uvBaseX + object->uvOffsetX;
             float v0 = object->uvBaseY + object->uvOffsetY;
             float u1 = u0 + object->uvSpanX;
             float v1 = v0 + object->uvSpanY;
-            unsigned int packedColor =
-                ((unsigned int)object->color[0] << 24) |
-                ((unsigned int)object->color[1] << 16) |
-                ((unsigned int)object->color[2] << 8) |
-                (unsigned int)object->color[3];
+            unsigned int packedColor;
+
+            HostCzan_ProjectCorner(object, drawX, drawY, lx0, ly0, &x0, &y0);
+            HostCzan_ProjectCorner(object, drawX, drawY, lx1, ly1, &x1, &y1);
+            HostCzan_ProjectCorner(object, drawX, drawY, lx2, ly2, &x2, &y2);
+            HostCzan_ProjectCorner(object, drawX, drawY, lx3, ly3, &x3, &y3);
+            packedColor =
+                ((unsigned int)drawColor[0] << 24) |
+                ((unsigned int)drawColor[1] << 16) |
+                ((unsigned int)drawColor[2] << 8) |
+                (unsigned int)drawColor[3];
 
             DrawTexturedTriangle2D(
                 (int)(x0 + 0.5f), (int)(y0 + 0.5f), u0, v0,
@@ -778,7 +924,7 @@ static void HostCzan_DrawObject(HostCzanObject *object) {
                 &quad,
                 drawWidth,
                 drawHeight,
-                object->color,
+                drawColor,
                 (void *)(long)object->textureSlot,
                 object->textureIndex);
         }
@@ -788,9 +934,21 @@ static void HostCzan_DrawObject(HostCzanObject *object) {
         DrawFilledRect((int)quad.x, (int)quad.y, 0, drawWidth, drawHeight, &dummyColor, 0);
     }
 
-    if (object->extensionHelperBits != 0) {
-        UiPromptEffectHelper_DrawByBits(object->extensionHelperBits);
+}
+
+static void HostCzan_DrawObject(HostCzanObject *object) {
+    float clipX;
+    float clipY;
+    float clipW;
+    float clipH;
+
+    if (object != 0 && HostCzan_GetMaskClipRect(object, &clipX, &clipY, &clipW, &clipH)) {
+        Platform_SetLogicalScissor(1, clipX, clipY, clipW, clipH);
+        HostCzan_DrawObjectUnclipped(object);
+        Platform_SetLogicalScissor(0, 0.0f, 0.0f, 0.0f, 0.0f);
+        return;
     }
+    HostCzan_DrawObjectUnclipped(object);
 }
 
 static int HostCzan_IsWindowLikeObject(const HostCzanObject *object) {
@@ -808,8 +966,7 @@ static int HostCzan_ShouldSkipObject(const HostCzanObject *object) {
         return 1;
     }
 
-    return strncmp(object->name, "cha_sil", 7) == 0 ||
-           strncmp(object->name, "@dummy", 6) == 0;
+    return strncmp(object->name, "@dummy", 6) == 0;
 }
 
 static int HostCzan_IsObjectDrawableForRetailList(const HostCzanObject *object) {
@@ -823,7 +980,8 @@ static int HostCzan_IsObjectDrawableForRetailList(const HostCzanObject *object) 
         object->width <= 0 ||
         object->height <= 0 ||
         object->color[3] == 0 ||
-        object->currentAnimation < 0) {
+        object->currentAnimation < 0 ||
+        object->presented0b0 == 0) {
         return 0;
     }
 
@@ -847,8 +1005,11 @@ static int HostCzan_CompareObjectDrawOrder(int leftIndex, int rightIndex) {
     const HostCzanObject *left = &gHostCzanObjects[leftIndex];
     const HostCzanObject *right = &gHostCzanObjects[rightIndex];
 
-    if (left->drawPriority168 != right->drawPriority168) {
-        return left->drawPriority168 < right->drawPriority168 ? -1 : 1;
+    int leftKey = HostCzan_GetObjectReferenceEdge(left);
+    int rightKey = HostCzan_GetObjectReferenceEdge(right);
+
+    if (leftKey != rightKey) {
+        return leftKey < rightKey ? -1 : 1;
     }
     if (left->depth != right->depth) {
         return left->depth < right->depth ? -1 : 1;
@@ -1047,8 +1208,91 @@ static unsigned int HostCzan_GetAnimationCommandOffset(const HostCzanObject *obj
     return ReadBe32(entry + 0x0C);
 }
 
+static float HostCzan_GetAnimationTickStep(const HostCzanObject *object) {
+    /* 0x801717C8..0x80171828: objects have +0x180 = 1 (set by the constructor
+       0x801713B4), so the per-frame step is the animation entry's rate (+0x04,
+       30 for the UI CAE files) / (refresh 60 / (frame skip + 1)). */
+    const unsigned char *descriptor;
+    unsigned int animationTableOffset;
+    unsigned int rate;
+
+    if (object == 0 || object->metadata == 0 || object->currentAnimation < 0 ||
+        object->descriptorOffset + 0x20u > object->metadataSize) {
+        return 1.0f;
+    }
+    descriptor = object->metadata + object->descriptorOffset;
+    animationTableOffset = ReadBe32(descriptor + 0x1C) + (unsigned int)object->currentAnimation * 0x10u;
+    if (animationTableOffset + 0x10u > object->metadataSize) {
+        return 1.0f;
+    }
+    rate = ReadBe32(object->metadata + animationTableOffset + 0x04);
+    return rate != 0 ? (float)rate / 60.0f : 1.0f;
+}
+
+static void HostCzan_StartAnimationState(HostCzanObject *object, int animationIndex) {
+    /* 0x80172CC8 (frame 0): clear presented/done, select the animation and mark it
+       playing only when it has frames (+0x171). */
+    object->presented0b0 = 0;
+    object->animationDoneB1 = 0;
+    object->animationDoneB2 = 0;
+    object->currentAnimation = animationIndex;
+    object->animationCommandOffset = HostCzan_GetAnimationCommandOffset(object, animationIndex);
+    object->animationWaitTicks = 0;
+    object->animationClockB4 = 0.0f;
+    object->animationPlaying171 =
+        HostCzan_GetObjectAnimationDuration(object, animationIndex, 0.0) != 0.0 ||
+        object->animationCommandOffset != 0;
+}
+
+static void HostCzan_ApplyCreateFlags(HostCzanObject *object, unsigned int flags, int animationIndex,
+                                      unsigned int descriptorFlags) {
+    /* 0x80173414: creation flag switch, then per-descriptor flag 0x04 (start anim 0).
+       The object constructor (~0x80171290) leaves +0xB0 = 0, +0xB1 = 1 (done) and
+       +0xB2 = 0, so a never-started group reads as idle/finished. */
+    object->animationPlaying171 = 0;
+    object->presented0b0 = 0;
+    object->animationDoneB1 = 1;
+    object->animationDoneB2 = 0;
+    switch (flags) {
+        case 1:
+        case 2:
+            HostCzan_StartAnimationState(object, animationIndex);
+            HostCzan_RunAnimationScript(object, 1);
+            object->animationCommandOffset = HostCzan_GetAnimationCommandOffset(object, animationIndex);
+            object->animationWaitTicks = 0;
+            object->animationPlaying171 = 0;
+            object->animationDoneB1 = 1;
+            object->animationDoneB2 = 0;
+            if (flags == 2) {
+                object->presented0b0 = 0;
+            }
+            break;
+        case 3:
+        case 4:
+            HostCzan_PreplayInitialAnimation(object);
+            if (flags == 4) {
+                object->presented0b0 = 0;
+            }
+            break;
+        default:
+            break;
+    }
+    if ((descriptorFlags & 0x004u) != 0) {
+        HostCzan_StartAnimationState(object, 0);
+    }
+}
+
 static void HostCzan_RunAnimationScript(HostCzanObject *object, int allowUnknownOpcode) {
+    /* 0x80171B98: one animation tick. Execute commands until a wait is pending or the
+       frame is ended, then count the wait down once. Wait opcodes decide visibility:
+         0x15 N  wait N frames, presented (+0xB0 = 1), end the frame
+         0x16 N  wait N frames, NOT presented (+0xB0 = 0)
+       so an object is only drawn once its script reaches a 0x15 wait (dummy anchors
+       only ever use 0x16 and are never drawn). End opcode 0 (0x80171C00): reset mode
+       +0x174 == 0 finishes (hides the object when +0x175 == 1), 1 restarts in the same
+       tick, other values restart and end the tick. */
     int guard;
+    int endFrame = 0;
 
     if (object == 0 ||
         object->metadata == 0 ||
@@ -1058,12 +1302,11 @@ static void HostCzan_RunAnimationScript(HostCzanObject *object, int allowUnknown
         return;
     }
 
-    if (object->animationWaitTicks > 0) {
-        object->animationWaitTicks--;
-        return;
-    }
-
-    for (guard = 0; guard < 32 && object->animationCommandOffset + 4 <= object->metadataSize; guard++) {
+    for (guard = 0;
+         guard < 256 && !endFrame && object->animationWaitTicks == 0 &&
+         object->animationCommandOffset != 0 &&
+         object->animationCommandOffset + 4 <= object->metadataSize;
+         guard++) {
         unsigned int offset = object->animationCommandOffset;
         int opcode = (int)ReadBeFloat(object->metadata + offset);
         int valueCount;
@@ -1077,13 +1320,15 @@ static void HostCzan_RunAnimationScript(HostCzanObject *object, int allowUnknown
                 }
                 object->animationDoneB1 = 1;
                 object->animationCommandOffset = 0;
+                return;
             }
-            else {
-                object->animationCommandOffset =
-                    HostCzan_GetAnimationCommandOffset(object, object->currentAnimation);
-                object->animationDoneB2 = 1;
+            object->animationCommandOffset =
+                HostCzan_GetAnimationCommandOffset(object, object->currentAnimation);
+            object->animationDoneB2 = 1;
+            if (object->animationReset174 != 1) {
+                endFrame = 1;
             }
-            return;
+            continue;
         }
 
         valueCount = HostCzan_CommandValueCount(opcode);
@@ -1095,11 +1340,14 @@ static void HostCzan_RunAnimationScript(HostCzanObject *object, int allowUnknown
         value = valueCount > 0 ? ReadBeFloat(object->metadata + offset) : 0.0f;
         switch (opcode) {
             case 0x15:
+                object->animationWaitTicks = (int)value;
+                object->presented0b0 = 1;
+                endFrame = 1;
+                break;
             case 0x16:
                 object->animationWaitTicks = (int)value;
-                offset += (unsigned int)valueCount * 4u;
-                object->animationCommandOffset = offset;
-                return;
+                object->presented0b0 = 0;
+                break;
             case 0x1E:
                 object->spriteRenderMode = (int)value;
                 break;
@@ -1114,6 +1362,10 @@ static void HostCzan_RunAnimationScript(HostCzanObject *object, int allowUnknown
 
         offset += (unsigned int)valueCount * 4u;
         object->animationCommandOffset = offset;
+    }
+
+    if (object->animationDoneB1 == 0 && object->animationWaitTicks > 0) {
+        object->animationWaitTicks--;
     }
 }
 
@@ -1194,13 +1446,49 @@ static void CSelMode_LogCaeDescriptors(const CzanLinkBlock *objectBlock, unsigne
     }
 }
 
+/* 0x80272358, dumped from main.dol (SHA-256 6cdc2392...). */
 const CSelModeChoice CSelMode_ChoiceTable[5] = {
-    { 0x02, 0x01, 0x01, -1 },
-    { 0x02, 0x02, 0x07, -1 },
-    { 0x1B, 0x03, 0x05, -1 },
-    { 0x15, 0x06, 0x00, -1 },
-    { -1, -1, -1, -1 },
+    { 0x02, 0x01, 0x01, 0x00 },
+    { 0x02, 0x02, 0x07, 0x00 },
+    { 0x1B, 0x03, 0x05, 0x00 },
+    { 0x15, 0x06, 0x00, 0x00 },
+    { 0x0C, 0x01, 0x00, 0x00 },
 };
+
+/* 0x80272348: CSelMode navigation table, 4 bytes per selected index:
+   [0] right (mask 8), [1] left (mask 4), [2] up (mask 1), [3] down (mask 2).
+   CSelMode_Update (0x8006EAC8) indexes it as table[selected * 4 + dir] with no
+   bounds check, so index 4 reads the first word of the choice table that follows
+   in .data (00 00 00 02). Those 4 bytes are included to match that behavior. */
+static const signed char kCSelModeNavTable[5][4] = {
+    { 2, 2, 3, 1 },
+    { 3, 3, 0, 2 },
+    { 0, 0, 1, 3 },
+    { 1, 1, 2, 0 },
+    { 0, 0, 0, 2 },
+};
+
+int CSelMode_NavigateSelection(int selectedModeIndex, int leftPressed, int rightPressed,
+                               int upPressed, int downPressed) {
+    if (selectedModeIndex < 0 || selectedModeIndex > 4) {
+        return selectedModeIndex;
+    }
+    /* Neighbour table 0x80272348 is [up(8), down(4), left(1), right(2)]. Priority
+       order matches 0x8006ED34..0x8006EDC8: left, right, up, down. */
+    if (leftPressed) {
+        return kCSelModeNavTable[selectedModeIndex][2];
+    }
+    if (rightPressed) {
+        return kCSelModeNavTable[selectedModeIndex][3];
+    }
+    if (upPressed) {
+        return kCSelModeNavTable[selectedModeIndex][0];
+    }
+    if (downPressed) {
+        return kCSelModeNavTable[selectedModeIndex][1];
+    }
+    return selectedModeIndex;
+}
 
 int CSelMode_ModeIdToSelectedIndex(int modeId) {
     switch (modeId) {
@@ -1225,15 +1513,8 @@ const CSelModeChoice *CSelMode_GetChoice(int selectedModeIndex) {
 }
 
 int CSelMode_MoveSelection(int selectedModeIndex, int direction) {
-    selectedModeIndex += direction;
-
-    if (selectedModeIndex < 0) {
-        return 4;
-    }
-    if (selectedModeIndex >= 5) {
-        return 0;
-    }
-    return selectedModeIndex;
+    /* Console host helper: right/left go through the original navigation table. */
+    return CSelMode_NavigateSelection(selectedModeIndex, direction < 0, direction > 0, 0, 0);
 }
 
 int CSelMode_Init(void *cselMode) {
@@ -1357,35 +1638,54 @@ void CSelMode_OnEnter(void *cselMode, void *linkData) {
         }
     }
 
-    for (entryIndex = 0; entryIndex < 6; entryIndex++) {
-        CSelModeEntry_PlayObject(bytes + 0x1b0, 0, entryIndex, *(int *)(bytes + 0x134), 0);
-    }
-
-    for (entryIndex = 0; entryIndex < 4; entryIndex++) {
+    /* 0x8006E718..0x8006E98C */
+    {
+        int *pointerManager = GameMain_GetPointerManager();
+        int *parentSelectData = (int *)RuntimeHostPointerFromBits(*(int *)(void *)(bytes + 0x10));
         int childIndex;
-        unsigned char *entryA = bytes + 0x160 + (entryIndex + 6) * CSEL_MODE_ENTRY_SIZE;
-        unsigned char *entryB = bytes + 0x160 + (entryIndex + 10) * CSEL_MODE_ENTRY_SIZE;
 
-        for (childIndex = 1; childIndex < 5; childIndex++) {
-            CSelModeEntry_SetObjectEnabled(entryA, 0, childIndex, 1);
-            CSelModeEntry_SetObjectEnabled(entryB, 0, childIndex, 1);
+        /* 0x8006F2A0: parent game mode 1/2/3/6 -> selection 0..3. */
+        *(int *)(void *)(bytes + 0x134) =
+            parentSelectData != 0 ? CSelMode_ModeIdToSelectedIndex(parentSelectData[0]) : 0;
+        *(int *)(void *)(bytes + 0x13c) = HostPointer_ToBits32(pointerManager, "cselmode pointer");
+        for (entryIndex = 0; entryIndex < 7; entryIndex++) {
+            ((int *)(void *)(bytes + 0x144))[entryIndex] = -1;   /* cue handles */
         }
-        CSelModeEntry_SetObjectEnabled(entryA, 0, entryIndex + 1, 0);
-        CSelModeEntry_SetObjectEnabled(entryB, 0, entryIndex + 1, 0);
-        CSelModeEntry_PlayObject(entryA, 0, 0, entryIndex, 0);
-        CSelModeEntry_PlayObject(entryA, 0, 5, entryIndex, 0);
-        CSelModeEntry_PlayObject(entryA, 0, 6, entryIndex, 0);
-        CSelModeEntry_PlayObject(entryB, 0, 0, entryIndex, 0);
-        CSelModeEntry_PlayObject(entryB, 0, 5, entryIndex, 0);
-        CSelModeEntry_PlayObject(entryB, 0, 6, entryIndex, 0);
-    }
 
-    for (entryIndex = 0; entryIndex < CSEL_MODE_ENTRY_COUNT; entryIndex++) {
-        unsigned char *entry = bytes + 0x160 + entryIndex * CSEL_MODE_ENTRY_SIZE;
-        if (entryIndex != 1) {
-            CSelModeEntry_SetObjectFlags(entry, 0, 0x40);
-            CSelModeEntry_ActivateObject(entry, 0);
+        for (entryIndex = 0; entryIndex < 6; entryIndex++) {
+            CSelModeEntry_PlayObject(bytes + 0x1b0, 0, entryIndex, *(int *)(void *)(bytes + 0x134), 0);
         }
+
+        /* Mode buttons 6..9: triplet {0, mode, pointer region of child 0};
+           mirrors 10..13: {0, mode, -1}. Only child mode+1 of children 1..4 shows;
+           children 0/5/6 take texture frame = mode. */
+        for (entryIndex = 0; entryIndex < 8; entryIndex++) {
+            int mode = entryIndex & 3;
+            unsigned char *entry = bytes + 0x160 + (entryIndex + 6) * CSEL_MODE_ENTRY_SIZE;
+            int triplet[3];
+
+            triplet[0] = 0;
+            triplet[1] = mode;
+            triplet[2] = entryIndex < 4 ?
+                PointerManager_RegisterRegion(pointerManager, CSelModeEntry_GetObjectHandle(entry, 0), 0) :
+                -1;
+            CSelModeEntry_SetTransformTriplet(entry, triplet);
+            for (childIndex = 1; childIndex <= 4; childIndex++) {
+                CSelModeEntry_SetObjectEnabled(entry, 0, childIndex, 1);
+            }
+            CSelModeEntry_SetObjectEnabled(entry, 0, mode + 1, 0);
+            CSelModeEntry_PlayObject(entry, 0, 0, mode, 0);
+            CSelModeEntry_PlayObject(entry, 0, 5, mode, 0);
+            CSelModeEntry_PlayObject(entry, 0, 6, mode, 0);
+        }
+
+        for (entryIndex = 0; entryIndex < CSEL_MODE_ENTRY_COUNT; entryIndex++) {
+            if (entryIndex != 1) {
+                CSelModeEntry_SetObjectFlags(bytes + 0x160 + entryIndex * CSEL_MODE_ENTRY_SIZE, 0, 0x40);
+            }
+        }
+        PointerManager_SetSingleMode(pointerManager, 1);
+        *(int *)(void *)(bytes + 0x130) = CSEL_MODE_STATE_ENTER_ANIM;
     }
 
     if (CSelMode_IsVerbose()) {
@@ -1404,179 +1704,220 @@ void CSelMode_OnEnter(void *cselMode, void *linkData) {
     }
 }
 
+static unsigned char *CSelMode_GetEntry(unsigned char *bytes, int entryIndex) {
+    return bytes + 0x160 + entryIndex * CSEL_MODE_ENTRY_SIZE;
+}
+
+static int CSelMode_GetEntryMode(unsigned char *bytes, int entryIndex) {
+    /* 0x80110C10: entry +0x48 (mode index from the OnEnter triplet). */
+    return ((CSelModeEntryKnownFields *)(void *)CSelMode_GetEntry(bytes, entryIndex))->transformOrState1;
+}
+
 int CSelMode_Update(void) {
+    /* 0x8006EAC8 (skip-frame argument 0). Returns 1 while mode select stays, else
+       the next CSelect state from the choice table at 0x80272358. */
     unsigned char *bytes = gHostCSelModeActiveMode;
-    int modeState;
-    int entryIndex;
-    CSelModeEntryKnownFields *entry0;
     int *inputManager;
-    int rightPressed;
-    int leftPressed;
+    int *pointerManager;
     int upPressed;
     int downPressed;
+    int leftPressed;
+    int rightPressed;
     int confirmPressed;
     int backPressed;
-    int selectedModeIndex;
+    int previousSelection;
+    int selectionChanged = 0;
+    int entryIndex;
+    int *selection;
+    int *state;
 
-    /* 0x80064E74 is the CSelMode update loop. This host path implements the
-       recovered startup/input/commit branches. It returns the next CSelect state
-       through the recovered CSelMode choice table after modeState reaches 6. */
     if (bytes == 0 || gHostCSelModeActiveEntries == 0) {
         return 1;
     }
-
+    selection = (int *)(void *)(bytes + 0x134);
+    state = (int *)(void *)(bytes + 0x130);
+    previousSelection = *selection;
+    pointerManager = (int *)RuntimeHostPointerFromBits(*(int *)(void *)(bytes + 0x13c));
     inputManager = GameMain_GetInputOrMenuStateManager();
-    rightPressed = (int)InputOrMenuStateManager_TestTriggeredMask(inputManager, 4, 8);
-    leftPressed = (int)InputOrMenuStateManager_TestTriggeredMask(inputManager, 4, 4);
-    upPressed = (int)InputOrMenuStateManager_TestTriggeredMask(inputManager, 4, 1);
-    downPressed = (int)InputOrMenuStateManager_TestTriggeredMask(inputManager, 4, 2);
+    upPressed = (int)InputOrMenuStateManager_TestRepeatMask(inputManager, 4, 8);
+    downPressed = (int)InputOrMenuStateManager_TestRepeatMask(inputManager, 4, 4);
+    leftPressed = (int)InputOrMenuStateManager_TestRepeatMask(inputManager, 4, 1);
+    rightPressed = (int)InputOrMenuStateManager_TestRepeatMask(inputManager, 4, 2);
     confirmPressed = (int)InputOrMenuStateManager_IsConfirmPressed(inputManager, 4);
     backPressed = (int)InputOrMenuStateManager_IsBackPressed(inputManager, 4);
-    selectedModeIndex = *(int *)(void *)(bytes + 0x134);
 
-    modeState = *(int *)(void *)(bytes + 0x130);
-    if (modeState == CSEL_MODE_STATE_ENTER_ANIM) {
-        CSelModeEntry_StartObjectAnimation(0.0, bytes + 0x160, 0, 0, 0, 0);
-        CSelModeEntry_StartObjectAnimation(0.0, bytes + 0x1b0, 0, 0, 0, 0);
-        for (entryIndex = 6; entryIndex < CSEL_MODE_ENTRY_COUNT; entryIndex++) {
-            CSelModeEntry_StartObjectAnimation(
-                0.0,
-                bytes + 0x160 + entryIndex * CSEL_MODE_ENTRY_SIZE,
-                0,
-                0,
-                0,
-                0);
-        }
-        *(int *)(void *)(bytes + 0x130) = CSEL_MODE_STATE_WAIT_ENTER_ANIM;
+    /* 0x8010EEC4: D-pad use holds the pointer back for 1.5 s. */
+    if (upPressed || downPressed || leftPressed || rightPressed) {
+        PointerManager_SetCooldown(pointerManager, 4);
     }
-    else if (modeState == CSEL_MODE_STATE_WAIT_ENTER_ANIM) {
-        entry0 = (CSelModeEntryKnownFields *)(void *)(bytes + 0x160);
-        if (entry0->objectHandleCount > 0 &&
-            entry0->objectHandles[0] >= 0 &&
-            CzanUiManager_IsObjectGroupAnimationDone(0, entry0->objectHandles[0]) != 0) {
-            *(int *)(void *)(bytes + 0x130) = CSEL_MODE_STATE_INPUT;
-        }
-    }
-    else if (modeState == CSEL_MODE_STATE_INPUT) {
-        int newSelection = selectedModeIndex;
-        int selectionStep = 0;
 
-        if (rightPressed || downPressed) {
-            newSelection = CSelMode_MoveSelection(selectedModeIndex, 1);
-            selectionStep = 1;
-        }
-        else if (leftPressed || upPressed) {
-            newSelection = CSelMode_MoveSelection(selectedModeIndex, -1);
-            selectionStep = -1;
-        }
+    switch (*state) {
+        case CSEL_MODE_STATE_ENTER_ANIM:
+            CSelModeEntry_StartObjectAnimation(0.0, CSelMode_GetEntry(bytes, 0), 0, 0, 0, 0);
+            CSelModeEntry_StartObjectAnimation(0.0, CSelMode_GetEntry(bytes, 1), 0, 0, 0, 0);
+            for (entryIndex = 6; entryIndex <= 13; entryIndex++) {
+                CSelModeEntry_StartObjectAnimation(0.0, CSelMode_GetEntry(bytes, entryIndex), 0, 0, 0, 0);
+            }
+            CGameUiRoot_SetMenuPresentationMode(GameMain_GetUiRootManager(), 0, 1, 0x19, 0);
+            *(int *)(void *)(bytes + 0x144) =
+                CharacterAssetManager_PlayCue(GameMain_GetCharacterAssetManager(), 0x258);
+            *state = CSEL_MODE_STATE_WAIT_ENTER_ANIM;
+            break;
+        case CSEL_MODE_STATE_WAIT_ENTER_ANIM:
+            if (CSelModeEntry_IsObjectAnimationDone(CSelMode_GetEntry(bytes, 0), 0) != 0) {
+                /* 0x287: mode-select voice call. */
+                *(int *)(void *)(bytes + 0x158) =
+                    CharacterAssetManager_PlayCue(GameMain_GetCharacterAssetManager(), 0x287);
+                *state = CSEL_MODE_STATE_INPUT;
+            }
+            break;
+        case CSEL_MODE_STATE_INPUT:
+            if (getenv("DDRII_TRACE_CSELMODE") != 0) {
+                static int dumped;
+                if (!dumped) {
+                    dumped = 1;
+                    CzanUiManager_DebugDumpGroup(CSelModeEntry_GetObjectHandle(CSelMode_GetEntry(bytes, 7), 0), "button7");
+                    {
+                        int groups[0x50];
+                        int count = UiRootManager_GetPresentationGroups(GameMain_GetUiRootManager(), groups, 0x50);
+                        int k;
+                        for (k = 0; k < count && k < 0x28; k++) {
+                            CzanUiManager_DebugDumpGroup(groups[k], "present");
+                        }
+                    }
+                }
+            }
+            /* Pointer over one of the four mode buttons selects it (0x8010EC54). */
+            for (entryIndex = 6; entryIndex <= 9; entryIndex++) {
+                CSelModeEntryKnownFields *entry =
+                    (CSelModeEntryKnownFields *)(void *)CSelMode_GetEntry(bytes, entryIndex);
 
-        if (newSelection != selectedModeIndex) {
-            int oldEntry = selectedModeIndex + 6;
-            int newEntry = newSelection + 6;
+                if (PointerManager_HitTestRegion(pointerManager, 0, entry->transformOrState2) != 0) {
+                    *selection = entry->transformOrState1;
+                    /* 0x8010F0A4 rumble for the hovering remotes when it changed. */
+                    break;
+                }
+            }
+            /* Neighbour table 0x80272348: [up, down, left, right]. */
+            if (leftPressed) {
+                *selection = kCSelModeNavTable[*selection][2];
+            }
+            else if (rightPressed) {
+                *selection = kCSelModeNavTable[*selection][3];
+            }
+            else if (upPressed) {
+                *selection = kCSelModeNavTable[*selection][0];
+            }
+            else if (downPressed) {
+                *selection = kCSelModeNavTable[*selection][1];
+            }
 
-            *(int *)(void *)(bytes + 0x134) = newSelection;
-            if (oldEntry >= 6 && oldEntry < CSEL_MODE_ENTRY_COUNT) {
-                CSelModeEntry_StartObjectAnimation(
-                    0.0,
-                    bytes + 0x160 + oldEntry * CSEL_MODE_ENTRY_SIZE,
-                    0,
-                    0,
-                    0,
-                    0);
-            }
-            if (newEntry >= 6 && newEntry < CSEL_MODE_ENTRY_COUNT) {
-                CSelModeEntry_StartObjectAnimation(
-                    0.0,
-                    bytes + 0x160 + newEntry * CSEL_MODE_ENTRY_SIZE,
-                    0,
-                    2,
-                    0,
-                    0);
-            }
-            CSelModeEntry_PlayObject(bytes + 0x1b0, 0, 0, newSelection, 0);
-            CSelModeEntry_PlayObject(bytes + 0x1b0, 0, 1, newSelection, 0);
-            CSelModeEntry_PlayObject(bytes + 0x1b0, 0, 2, newSelection, 0);
-            CSelModeEntry_PlayObject(bytes + 0x1b0, 0, 3, newSelection, 0);
-            CSelModeEntry_PlayObject(bytes + 0x1b0, 0, 4, newSelection, 0);
-            CSelModeEntry_PlayObject(bytes + 0x1b0, 0, 5, newSelection, 0);
-            if (selectionStep > 0) {
-                CSelectCommon_AdvanceBackgroundForward(CSelMode_GetSelectCommon(), 1);
-            }
-            else if (selectionStep < 0) {
-                CSelectCommon_AdvanceBackgroundBackward(CSelMode_GetSelectCommon(), 1);
-            }
-            selectedModeIndex = newSelection;
-        }
+            /* Buttons 6..13: anim 2 (highlight) on the selected mode, else anim 0. */
+            for (entryIndex = 6; entryIndex <= 13; entryIndex++) {
+                unsigned char *entry = CSelMode_GetEntry(bytes, entryIndex);
+                int target = CSelMode_GetEntryMode(bytes, entryIndex) == *selection ? 2 : 0;
 
-        if (backPressed) {
-            *(int *)(void *)(bytes + 0x134) = 4;
-            *(int *)(void *)(bytes + 0x130) = CSEL_MODE_STATE_LEAVE_ANIM;
-        }
-        else if (confirmPressed) {
-            int selectedEntry = selectedModeIndex + 6;
-            int mirrorEntry = selectedModeIndex + 10;
-
-            if (selectedEntry >= 6 && selectedEntry < CSEL_MODE_ENTRY_COUNT) {
-                CSelModeEntry_StartObjectAnimation(
-                    0.0,
-                    bytes + 0x160 + selectedEntry * CSEL_MODE_ENTRY_SIZE,
-                    0,
-                    1,
-                    0,
-                    0);
+                if (CSelModeEntry_GetCachedAnimationId(entry, 0) != target) {
+                    CSelModeEntry_StartObjectAnimation(0.0, entry, 0, target, 0, 0);
+                    if (target == 2) {
+                        selectionChanged = 1;
+                    }
+                }
             }
-            if (mirrorEntry >= 10 && mirrorEntry < CSEL_MODE_ENTRY_COUNT) {
-                CSelModeEntry_StartObjectAnimation(
-                    0.0,
-                    bytes + 0x160 + mirrorEntry * CSEL_MODE_ENTRY_SIZE,
-                    0,
-                    1,
-                    0,
-                    0);
+            if (selectionChanged && *selection != 4) {
+                /* Description panels: entries 2..5, only selection+2 shown. */
+                CSelModeEntry_StartObjectAnimation(0.0, CSelMode_GetEntry(bytes, *selection + 2), 0, 0, 0, 0);
+                for (entryIndex = 2; entryIndex <= 5; entryIndex++) {
+                    CSelModeEntry_SetObjectEnabled(CSelMode_GetEntry(bytes, entryIndex), 0, -1, 1);
+                }
+                CSelModeEntry_SetObjectEnabled(CSelMode_GetEntry(bytes, *selection + 2), 0, -1, 0);
             }
-            *(int *)(void *)(bytes + 0x130) = CSEL_MODE_STATE_LEAVE_ANIM;
-        }
-    }
-    else if (modeState == CSEL_MODE_STATE_LEAVE_ANIM) {
-        CSelModeEntry_StartObjectAnimation(0.0, bytes + 0x160, 0, 1, 0, 0);
-        CSelModeEntry_StartObjectAnimation(0.0, bytes + 0x1b0, 0, 1, 0, 0);
-        if (*(int *)(void *)(bytes + 0x134) != 4) {
-            CSelectCommon_AdvanceBackgroundForward(CSelMode_GetSelectCommon(), 0);
-        }
-        *(int *)(void *)(bytes + 0x130) = CSEL_MODE_STATE_WAIT_LEAVE_ANIM;
-    }
-    else if (modeState == CSEL_MODE_STATE_WAIT_LEAVE_ANIM) {
-        entry0 = (CSelModeEntryKnownFields *)(void *)(bytes + 0x160);
-        if (entry0->objectHandleCount == 0 ||
-            entry0->objectHandles[0] < 0 ||
-            CzanUiManager_IsObjectGroupAnimationDone(0, entry0->objectHandles[0]) != 0) {
-            *(int *)(void *)(bytes + 0x130) = CSEL_MODE_STATE_COMMIT;
-        }
+            if (selectionChanged) {
+                for (entryIndex = 0; entryIndex < 6; entryIndex++) {
+                    CSelModeEntry_PlayObject(CSelMode_GetEntry(bytes, 1), 0, entryIndex, *selection, 0);
+                }
+                CSelModeEntry_StartObjectAnimation(0.0, CSelMode_GetEntry(bytes, 1), 0, 2, 0, 0);
+            }
+            if (*selection != previousSelection) {
+                /* 0x8006EF8C: restart the mode voice (0x800CC9A4, not ported) and play
+                   the cursor cue 0x24E. */
+                *(int *)(void *)(bytes + 0x154) =
+                    CharacterAssetManager_PlayCue(GameMain_GetCharacterAssetManager(), 0x24e);
+            }
+            if (confirmPressed || backPressed) {
+                RuntimeDebugReport("CSelMode: %s on mode %d\n", confirmPressed ? "confirm" : "back", *selection);
+            }
+            if (confirmPressed) {
+                CSelModeEntry_StartObjectAnimation(0.0, CSelMode_GetEntry(bytes, *selection + 6), 0, 1, 0, 0);
+                CSelModeEntry_StartObjectAnimation(0.0, CSelMode_GetEntry(bytes, *selection + 10), 0, 1, 0, 0);
+                *(int *)(void *)(bytes + 0x14c) =
+                    CharacterAssetManager_PlayCue(GameMain_GetCharacterAssetManager(), 0x265);
+                *state = CSEL_MODE_STATE_LEAVE_ANIM;
+            }
+            else if (backPressed) {
+                *selection = 4;
+                *(int *)(void *)(bytes + 0x150) =
+                    CharacterAssetManager_PlayCue(GameMain_GetCharacterAssetManager(), 0x253);
+                *state = CSEL_MODE_STATE_LEAVE_ANIM;
+            }
+            break;
+        case CSEL_MODE_STATE_LEAVE_ANIM:
+            CSelModeEntry_StartObjectAnimation(0.0, CSelMode_GetEntry(bytes, 0), 0, 1, 0, 0);
+            CSelModeEntry_StartObjectAnimation(0.0, CSelMode_GetEntry(bytes, 1), 0, 1, 0, 0);
+            *(int *)(void *)(bytes + 0x148) =
+                CharacterAssetManager_PlayCue(GameMain_GetCharacterAssetManager(), 0x257);
+            if (*selection != 4) {
+                CSelectCommon_AdvanceBackgroundForward(CSelMode_GetSelectCommon(), 0);
+            }
+            CGameUiRoot_SetMenuPresentationMode(GameMain_GetUiRootManager(), 0, 0, 0, 0);
+            *state = CSEL_MODE_STATE_WAIT_LEAVE_ANIM;
+            break;
+        case CSEL_MODE_STATE_WAIT_LEAVE_ANIM:
+            /* Also waits for the voice cue +0x158 to finish (0x80024598); the host
+               has no cue playback state yet, so it counts as finished. */
+            if (CSelModeEntry_IsObjectAnimationDone(CSelMode_GetEntry(bytes, 0), 0) != 0) {
+                *state = CSEL_MODE_STATE_COMMIT;
+            }
+            break;
+        default:
+            break;
     }
 
     for (entryIndex = 0; entryIndex < CSEL_MODE_ENTRY_COUNT; entryIndex++) {
-        CSelModeEntry_ActivateObject(
-            bytes + 0x160 + entryIndex * CSEL_MODE_ENTRY_SIZE,
-            0);
+        CSelModeEntry_ActivateObject(CSelMode_GetEntry(bytes, entryIndex), 0);
     }
 
-    CzanUiManager_UpdateObjectList(0);
-    if (*(int *)(void *)(bytes + 0x130) == CSEL_MODE_STATE_COMMIT) {
-        int selectedIndex = *(int *)(void *)(bytes + 0x134);
-        const CSelModeChoice *choice = CSelMode_GetChoice(selectedIndex);
+    if (*state == CSEL_MODE_STATE_COMMIT) {
+        /* 0x8006F180: game mode words from the choice of button selection+6 (the
+           back choice 4 reads button 10), next state from choice selection. The
+           0x8011FE9C.. setup of gManager_802E70D0 +0x2F1C is not ported yet. */
+        const CSelModeChoice *choice = CSelMode_GetChoice(CSelMode_GetEntryMode(bytes, *selection + 6));
         int *parentSelectData = (int *)RuntimeHostPointerFromBits(*(int *)(void *)(bytes + 0x10));
 
-        if (choice == 0) {
-            choice = CSelMode_GetChoice(4);
-        }
         if (parentSelectData != 0 && choice != 0) {
             parentSelectData[0] = choice->gameModeId;
             parentSelectData[1] = choice->gameModeSubId;
             parentSelectData[2] = choice->gameModeExtraId;
         }
+        choice = CSelMode_GetChoice(*selection != 4 ? CSelMode_GetEntryMode(bytes, *selection + 6) : 4);
         return choice != 0 ? choice->nextSelectState : 1;
     }
     return 1;
+}
+
+void CSelMode_Release(void) {
+    /* Destructor part: drop the four mode-button pointer regions. */
+    unsigned char *bytes = gHostCSelModeActiveMode;
+    int entryIndex;
+
+    if (bytes == 0) {
+        return;
+    }
+    for (entryIndex = 6; entryIndex <= 9; entryIndex++) {
+        CSelModeEntryKnownFields *entry = (CSelModeEntryKnownFields *)(void *)CSelMode_GetEntry(bytes, entryIndex);
+        PointerManager_UnregisterRegion(GameMain_GetPointerManager(), entry->transformOrState2);
+        entry->transformOrState2 = -1;
+    }
 }
 
 void CSelMode_SetInitialSelectedMode(void *cselMode) {
@@ -2066,7 +2407,9 @@ void CSelectCommon_DrawHostBackground(int *selectCommon) {
         int *surface = (int *)(void *)((unsigned char *)selectCommon + 0x234);
         int surfaceWidth = *(unsigned short *)(void *)((unsigned char *)surface + 0x10);
         int surfaceHeight = *(unsigned short *)(void *)((unsigned char *)surface + 0x12);
-        float reflectionWidthScale = *(float *)(void *)((unsigned char *)selectCommon + 0x224);
+        /* Host-only reflection pass (not yet matched to the DOL). It used to read
+           +0x224 as a width scale, but +0x224 is the camera aspect. */
+        float reflectionWidthScale = 1.0f;
         int reflectionDrawWidth;
         void *reflectionTexture;
 
@@ -2198,7 +2541,14 @@ void CSelectCommon_LoadResource(int *selectCommon, void *linkData) {
     }
 
     CzanModelOwner_SetAnimationSpeed(modelOwner, 0.0);
-    *(float *)(void *)((unsigned char *)selectCommon + 0x224) = 1.0f;
+    /* 0x800983E8: +0x224 is owner +0xFC, the camera projection aspect.
+       16:9 when the widescreen flag (global context +0x258 -> +0x4C) is set,
+       otherwise 4:3 (FLOAT_802E8840 / FLOAT_802E8844). */
+    {
+        int *videoSettings = GlobalRuntimeContext_GetPointerAt(0x258);
+        *(float *)(void *)((unsigned char *)selectCommon + 0x224) =
+            (videoSettings != 0 && videoSettings[0x4c / 4] != 0) ? 1.7777778f : 1.3333334f;
+    }
     CzanModelOwner_UpdateCurrentMatrix(modelOwner, 0);
     CzanTextureSurface_AllocateHost(
         (int *)(void *)((unsigned char *)selectCommon + 0x234),
@@ -2888,6 +3238,7 @@ int CzanUiManager_CreateObjectGroup(
         object->descriptorType = (int)descriptorType;
         object->suppressDraw173 = (descriptorFlags & 0x001u) != 0;
         object->drawEnabled = 1;
+        object->blockColor[0] = object->blockColor[1] = object->blockColor[2] = object->blockColor[3] = 0xff;
         object->activeByte17d = (descriptorFlags & 0x040u) == 0;
         object->textureSlot = -1;
         object->textureIndex = 0;
@@ -2969,28 +3320,7 @@ int CzanUiManager_CreateObjectGroup(
 
         object->currentAnimation = initialAnimIndex;
         object->animationCommandOffset = HostCzan_GetAnimationCommandOffset(object, initialAnimIndex);
-        switch (flags & 0xffu) {
-            case 1:
-            case 2:
-                HostCzan_RunAnimationScript(object, 1);
-                object->animationCommandOffset = HostCzan_GetAnimationCommandOffset(object, initialAnimIndex);
-                object->animationWaitTicks = 0;
-                object->animationDoneB1 = 1;
-                object->animationDoneB2 = 0;
-                if ((flags & 0xffu) == 2) {
-                    object->animationDoneB1 = 0;
-                }
-                break;
-            case 3:
-            case 4:
-                HostCzan_PreplayInitialAnimation(object);
-                if ((flags & 0xffu) == 4) {
-                    object->animationDoneB1 = 0;
-                }
-                break;
-            default:
-                break;
-        }
+        HostCzan_ApplyCreateFlags(object, flags & 0xffu, initialAnimIndex, descriptorFlags);
         activeCount += object->activeByte17d != 0;
     }
 
@@ -3095,32 +3425,17 @@ int CzanUiManager_CloneObjectGroup(
         cloneObject = &gHostCzanObjects[objectIndex];
         *cloneObject = gHostCzanObjects[i];
         cloneObject->groupHandle = groupHandle;
+        cloneObject->textureFrameSet148 = 0;
         if (initialAnimIndex >= 0) {
             cloneObject->currentAnimation = initialAnimIndex;
             cloneObject->animationCommandOffset = HostCzan_GetAnimationCommandOffset(cloneObject, initialAnimIndex);
-            switch (cloneFlags & 0xffu) {
-                case 1:
-                case 2:
-                    HostCzan_RunAnimationScript(cloneObject, 1);
-                    cloneObject->animationCommandOffset =
-                        HostCzan_GetAnimationCommandOffset(cloneObject, initialAnimIndex);
-                    cloneObject->animationWaitTicks = 0;
-                    cloneObject->animationDoneB1 = 1;
-                    cloneObject->animationDoneB2 = 0;
-                    if ((cloneFlags & 0xffu) == 2) {
-                        cloneObject->animationDoneB1 = 0;
-                    }
-                    break;
-                case 3:
-                case 4:
-                    HostCzan_PreplayInitialAnimation(cloneObject);
-                    if ((cloneFlags & 0xffu) == 4) {
-                        cloneObject->animationDoneB1 = 0;
-                    }
-                    break;
-                default:
-                    break;
-            }
+            /* 0x80173B9C clone path mirrors the create flag switch. */
+            /* 0x80174158..: the clone reads the descriptor flags like the create path
+               (0x8017399C), including 0x04 = start animation 0. */
+            HostCzan_ApplyCreateFlags(cloneObject, cloneFlags & 0xffu, initialAnimIndex,
+                                      cloneObject->metadata != 0 &&
+                                      cloneObject->descriptorOffset + 0x20u <= cloneObject->metadataSize ?
+                                      ReadBe16(cloneObject->metadata + cloneObject->descriptorOffset + 0x1A) : 0u);
         }
 
         if (cloneGroup->firstObjectIndex < 0) {
@@ -3176,6 +3491,7 @@ void CzanUiManager_StartObjectGroupAnimation(double startFrame, int uiManager, i
                 gHostCzanObjects[i].currentAnimation == animationIndex &&
                 gHostCzanObjects[i].animationStartFrame == (float)startFrame &&
                 gHostCzanObjects[i].animationCommandOffset != 0 &&
+                gHostCzanObjects[i].animationPlaying171 != 0 &&
                 gHostCzanObjects[i].animationDoneB1 == 0 &&
                 gHostCzanObjects[i].animationDoneB2 == 0;
 
@@ -3183,12 +3499,7 @@ void CzanUiManager_StartObjectGroupAnimation(double startFrame, int uiManager, i
                 continue;
             }
 
-            gHostCzanObjects[i].currentAnimation = animationIndex;
-            gHostCzanObjects[i].animationCommandOffset =
-                HostCzan_GetAnimationCommandOffset(&gHostCzanObjects[i], animationIndex);
-            gHostCzanObjects[i].animationWaitTicks = 0;
-            gHostCzanObjects[i].animationDoneB1 = 0;
-            gHostCzanObjects[i].animationDoneB2 = 0;
+            HostCzan_StartAnimationState(&gHostCzanObjects[i], animationIndex);
             gHostCzanObjects[i].animationStartFrame = (float)startFrame;
         }
     }
@@ -3376,6 +3687,8 @@ void CzanUiManager_SetObjectTextureFrame(
         if (gHostCzanObjects[i].used &&
             gHostCzanObjects[i].groupHandle == objectGroupHandle &&
             gHostCzanObjects[i].childIndex == childObjectIndex) {
+            gHostCzanObjects[i].textureFrameSet148 = textureFrameOrAuto != -2;
+            gHostCzanObjects[i].textureFrame148 = textureFrameOrAuto;
             if (textureFrameOrAuto == -2) {
                 return;
             }
@@ -3882,9 +4195,194 @@ void CzanUiManager_UpdateObjectList(int uiManager) {
     for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
         if (gHostCzanObjects[i].used) {
             gHostCzanObjects[i].listedForDraw = 0;
-            HostCzan_RunAnimationScript(&gHostCzanObjects[i], 1);
+            if (gHostCzanObjects[i].animationPlaying171 && gHostCzanObjects[i].animationDoneB1 == 0) {
+                /* 0x80171678: run one script tick per whole frame the clock crosses. */
+                HostCzanObject *object = &gHostCzanObjects[i];
+                float previous = object->animationClockB4;
+                int ticks;
+
+                object->animationClockB4 += HostCzan_GetAnimationTickStep(object);
+                ticks = (int)object->animationClockB4 - (int)previous;
+                while (ticks-- > 0 && object->animationDoneB1 == 0) {
+                    HostCzan_RunAnimationScript(object, 1);
+                }
+            }
             if (HostCzan_IsObjectDrawableForRetailList(&gHostCzanObjects[i])) {
                 gHostCzanObjects[i].listedForDraw = 1;
+            }
+        }
+    }
+}
+
+void CzanUiManager_SetObjectGroupColorBlocks(int uiManager, int objectGroupHandle, const unsigned char *rgba) {
+    /* 0x80175B00 -> 0x80172F30(child, -1 = all corners, r, g, b, a) for each child. */
+    int i;
+
+    (void)uiManager;
+    if (rgba == 0) {
+        return;
+    }
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        if (gHostCzanObjects[i].used && gHostCzanObjects[i].groupHandle == objectGroupHandle) {
+            memcpy(gHostCzanObjects[i].blockColor, rgba, 4);
+        }
+    }
+}
+
+void CzanUiManager_SeekObjectGroupAnimationToEnd(int uiManager, int objectGroupHandle) {
+    /* 0x80175F58 (animation length) + 0x8017501C(length) -> 0x80172E44 for each child:
+       jump the running animation to its last frame. */
+    int i;
+
+    (void)uiManager;
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        HostCzanObject *object = &gHostCzanObjects[i];
+        int frames;
+        int guard;
+
+        if (!object->used || object->groupHandle != objectGroupHandle || !object->animationPlaying171) {
+            continue;
+        }
+        frames = (int)HostCzan_GetObjectAnimationDuration(object, object->currentAnimation, 0.0);
+        for (guard = 0; guard <= frames + 1 && object->animationDoneB1 == 0; guard++) {
+            HostCzan_RunAnimationScript(object, 1);
+        }
+    }
+}
+
+void CzanUiManager_DebugDumpGroup(int objectGroupHandle, const char *tag) {
+    /* Host debug aid: one line per child object of a group. */
+    int i;
+
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        const HostCzanObject *o = &gHostCzanObjects[i];
+
+        if (!o->used || o->groupHandle != objectGroupHandle) {
+            continue;
+        }
+        RuntimeDebugReport(
+            "  [%s] g%d c%d '%s' listed=%d play=%d b0=%d en=%d s172=%d s173=%d anim=%d mode=%d wait=%d doneB1=%d doneB2=%d "
+            "dur=%.0f rgba=%02x%02x%02x%02x xy=(%.0f,%.0f) wh=%dx%d tex=%d prio=%d z=%.1f+%.1f sc=%.2f,%.2f "
+            "uv=%.2f,%.2f+%.2f,%.2f rmode=%d dtype=%d dflags=0x%x key=%d\n",
+            tag, objectGroupHandle, o->childIndex, o->name, o->listedForDraw, o->animationPlaying171,
+            o->presented0b0, o->drawEnabled,
+            o->drawState172, o->suppressDraw173, o->currentAnimation, o->animationMode175,
+            o->animationWaitTicks, o->animationDoneB1, o->animationDoneB2,
+            HostCzan_GetObjectAnimationDuration(o, o->currentAnimation, 0.0),
+            o->color[0], o->color[1], o->color[2], o->color[3], o->x, o->y, o->width, o->height,
+            o->textureSlot, o->drawPriority168, o->depth, o->localOffsetZ, o->scaleX, o->scaleY,
+            o->uvBaseX + o->uvOffsetX, o->uvBaseY + o->uvOffsetY, o->uvSpanX, o->uvSpanY, o->spriteRenderMode, o->descriptorType,
+            o->metadata != 0 ? (unsigned int)ReadBe16(o->metadata + o->descriptorOffset + 0x1a) : 0u,
+            HostCzan_GetObjectReferenceEdge(o));
+    }
+}
+
+void CzanUiManager_SetObjectGroupVertexAlpha(int uiManager, int objectGroupHandle, unsigned char alpha) {
+    /* 0x8017539C writes the four corner alpha bytes (+0x137/+0x13B/+0x13F/+0x143)
+       of every child; the host keeps one multiplier in blockColor[3]. */
+    int i;
+
+    (void)uiManager;
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        if (gHostCzanObjects[i].used && gHostCzanObjects[i].groupHandle == objectGroupHandle) {
+            gHostCzanObjects[i].blockColor[3] = alpha;
+        }
+    }
+}
+
+int CzanUiManager_IsChildObjectHidden(int uiManager, int objectGroupHandle, int childObjectIndex) {
+    /* 0x80175DE0 returns child +0x173. */
+    int index = HostCzan_FindObjectIndexByGroupChild(objectGroupHandle, childObjectIndex);
+
+    (void)uiManager;
+    return index >= 0 ? gHostCzanObjects[index].suppressDraw173 : 1;
+}
+
+int CzanUiManager_HitTestChildObject(int uiManager, int objectGroupHandle, int childObjectIndex, float x, float y) {
+    /* 0x8017620C -> 0x801709D0: point inside the child's screen quad. The host quad
+       matches HostCzan_DrawObject (linked position, base, scale, rotation z). */
+    const HostCzanObject *object;
+    float drawX;
+    float drawY;
+    float lx;
+    float ly;
+    float radians;
+    float c;
+    float sn;
+    float rx;
+    float ry;
+    float w;
+    float h;
+    int index = HostCzan_FindObjectIndexByGroupChild(objectGroupHandle, childObjectIndex);
+
+    (void)uiManager;
+    if (index < 0) {
+        return 0;
+    }
+    object = &gHostCzanObjects[index];
+    HostCzan_GetObjectLinkedPosition(object, &drawX, &drawY);
+    lx = x - drawX;
+    ly = y - drawY;
+    radians = -object->rotationZ * (3.14159265358979323846f / 180.0f);
+    c = cosf(radians);
+    sn = sinf(radians);
+    rx = lx * c - ly * sn;
+    ry = lx * sn + ly * c;
+    w = (float)object->width * object->scaleX;
+    h = (float)object->height * object->scaleY;
+    rx += object->baseX * object->scaleX;
+    ry += object->baseY * object->scaleY;
+    if (w < 0.0f) {
+        rx = -rx;
+        w = -w;
+    }
+    if (h < 0.0f) {
+        ry = -ry;
+        h = -h;
+    }
+    return rx >= 0.0f && ry >= 0.0f && rx <= w && ry <= h;
+}
+
+int CzanUiManager_GetChildObjectScreenTransform(
+    int uiManager, int objectGroupHandle, int childObjectIndex,
+    float *x, float *y, float *scaleX, float *scaleY, unsigned char *rgba) {
+    /* Host stand-in for the sprite world matrix the text callback uses (0x801708F0):
+       linked position, inherited x/y scale and colour with inherited alpha. */
+    const HostCzanObject *object;
+    float inheritedAlpha;
+    int index = HostCzan_FindObjectIndexByGroupChild(objectGroupHandle, childObjectIndex);
+
+    (void)uiManager;
+    if (index < 0) {
+        return 0;
+    }
+    object = &gHostCzanObjects[index];
+    HostCzan_ResolveLinkedTransform(object, x, y, scaleX, scaleY, &inheritedAlpha);
+    *scaleX *= object->scaleX;
+    *scaleY *= object->scaleY;
+    rgba[0] = object->color[0];
+    rgba[1] = object->color[1];
+    rgba[2] = object->color[2];
+    rgba[3] = (unsigned char)((float)object->color[3] * inheritedAlpha + 0.5f);
+    return 1;
+}
+
+static void HostCzan_DrawExtensionHelpers(const int *objectGroupHandles, int objectGroupCount) {
+    /* Object extension slots (text helpers) run from the object update in the DOL
+       (0x80171B30), even for unpresented anchor dummies; the host draws them after
+       the scoped object pass so the text sits on top of its panel. */
+    int i;
+    int j;
+
+    for (i = 0; i < HOST_CZAN_MAX_OBJECTS; i++) {
+        if (!gHostCzanObjects[i].used ||
+            gHostCzanObjects[i].extensionHelperBits == 0) {
+            continue;
+        }
+        for (j = 0; j < objectGroupCount; j++) {
+            if (objectGroupHandles[j] >= 0 && gHostCzanObjects[i].groupHandle == objectGroupHandles[j]) {
+                UiPromptEffectHelper_DrawByBits(gHostCzanObjects[i].extensionHelperBits);
+                break;
             }
         }
     }
@@ -3929,9 +4427,31 @@ void CzanUiManager_DrawObjectGroupsReverse(int uiManager, const int *objectGroup
     }
 
     HostCzan_SortObjectIndexesForRetailList(objectIndexes, objectCount);
+    {
+        /* Debug aid: DDRII_TRACE_DRAW=n lists the objects of the n-th scoped draw. */
+        static int drawCall;
+        static int traceAt = -2;
+        const char *value;
+
+        if (traceAt == -2) {
+            value = getenv("DDRII_TRACE_DRAW");
+            traceAt = value != 0 ? atoi(value) : -1;
+        }
+        if (++drawCall == traceAt) {
+            for (i = objectCount - 1; i >= 0; i--) {
+                const HostCzanObject *o = &gHostCzanObjects[objectIndexes[i]];
+
+                RuntimeDebugReport("DRAW g%d c%d '%s' xy=(%.0f,%.0f) wh=%dx%d rgba=%02x%02x%02x%02x key=%d tex=%d ext=%d\n",
+                                   o->groupHandle, o->childIndex, o->name, o->x, o->y, o->width, o->height,
+                                   o->color[0], o->color[1], o->color[2], o->color[3],
+                                   HostCzan_GetObjectReferenceEdge(o), o->textureSlot, o->extensionHelperBits);
+            }
+        }
+    }
     for (i = objectCount - 1; i >= 0; i--) {
         HostCzan_DrawObject(&gHostCzanObjects[objectIndexes[i]]);
     }
+    HostCzan_DrawExtensionHelpers(objectGroupHandles, objectGroupCount);
 }
 
 void CSelMode_DrawHostUi(void) {

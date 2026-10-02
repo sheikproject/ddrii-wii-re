@@ -98,6 +98,7 @@ void TextManager_LoadResource(int *manager, void *textLinkData);
 void TextManager_SelectBank(int *manager, int bankIndex);
 const char *TextManager_GetText(int *manager, int textIndex);
 void FontManager_LoadResource(void *fontLinkData);
+int FontManager_GetTextureSlot(void);
 void UiRootManager_Init(int *uiRootManager);
 int *ModelEffectManager_Init(int *manager);
 void BootTempManager_Init(int *bootTempManager);

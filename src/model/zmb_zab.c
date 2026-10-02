@@ -3,6 +3,7 @@
 #include "model/czan_model.h"
 #include "render/render_engine.h"
 #include "runtime/module_system.h"
+#include "runtime/math.h"
 
 #include <stdint.h>
 #include <stdlib.h>

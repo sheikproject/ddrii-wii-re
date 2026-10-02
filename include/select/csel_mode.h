@@ -82,8 +82,20 @@ void CzanUiManager_ApplyChildObjectQuadUv(int uiManager, int objectGroupHandle, 
 void CSelMode_SetHostLinkResourceSize(unsigned int resourceSize);
 void CSelMode_DrawHostUi(void);
 void CzanUiManager_DrawObjectGroupsReverse(int uiManager, const int *objectGroupHandles, int objectGroupCount);
+void CzanUiManager_SetObjectGroupVertexAlpha(int uiManager, int objectGroupHandle, unsigned char alpha);
+int CzanUiManager_IsChildObjectHidden(int uiManager, int objectGroupHandle, int childObjectIndex);
+int CzanUiManager_GetChildObjectScreenTransform(
+    int uiManager, int objectGroupHandle, int childObjectIndex,
+    float *x, float *y, float *scaleX, float *scaleY, unsigned char *rgba);
+int CzanUiManager_HitTestChildObject(int uiManager, int objectGroupHandle, int childObjectIndex, float x, float y);
+void CzanUiManager_DebugDumpGroup(int objectGroupHandle, const char *tag);
+void CzanUiManager_SetObjectGroupColorBlocks(int uiManager, int objectGroupHandle, const unsigned char *rgba);
+void CzanUiManager_SeekObjectGroupAnimationToEnd(int uiManager, int objectGroupHandle);
 int CSelMode_ModeIdToSelectedIndex(int modeId);
 const CSelModeChoice *CSelMode_GetChoice(int selectedModeIndex);
+void CSelMode_Release(void);
 int CSelMode_MoveSelection(int selectedModeIndex, int direction);
+int CSelMode_NavigateSelection(int selectedModeIndex, int leftPressed, int rightPressed,
+                               int upPressed, int downPressed);
 
 #endif

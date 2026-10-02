@@ -408,6 +408,42 @@ static int CzanModel_FindZmbObjectIndexByName(
     return -1;
 }
 
+/* Like CzanModel_FindZmbObjectIndexByName, but returns the (occurrence+1)-th
+   object with that name. select_cmn has two objects and two channels both
+   named "b03_en00"; a plain first-match bound both channels to the first one. */
+static int CzanModel_FindZmbObjectIndexByNameNth(
+    const unsigned char *zmb,
+    unsigned int zmbSize,
+    unsigned int objectEntryOffset,
+    unsigned int objectCount,
+    const char *name,
+    int occurrence) {
+    unsigned int i;
+    int firstMatch = -1;
+
+    if (zmb == 0 || name == 0 || name[0] == '\0') {
+        return -1;
+    }
+    for (i = 0; i < objectCount; i++) {
+        unsigned int entryOffset = objectEntryOffset + i * 0xa0;
+        char objectName[32];
+
+        if (entryOffset >= zmbSize) {
+            break;
+        }
+        CzanModel_CopyName(objectName, sizeof(objectName), zmb + entryOffset, zmbSize - entryOffset);
+        if (strcmp(objectName, name) == 0) {
+            if (firstMatch < 0) {
+                firstMatch = (int)i;
+            }
+            if (occurrence-- == 0) {
+                return (int)i;
+            }
+        }
+    }
+    return firstMatch;
+}
+
 static float CzanModel_ClampFloat(float value, float minValue, float maxValue) {
     if (value < minValue) {
         return minValue;
@@ -435,6 +471,33 @@ static void CzanModel_NormalizeQuat(float *x, float *y, float *z, float *w) {
     *y *= invLength;
     *z *= invLength;
     *w *= invLength;
+}
+
+/* 0x801B1450, C_QUATSlerp(p, q, r, t): shortest path, falls back to a linear
+   blend when the quaternions are nearly parallel (cos > 0.99999). */
+static void CzanModel_QuatSlerp(const float *p, const float *q, float *r, float t) {
+    float cosom = p[0] * q[0] + p[1] * q[1] + p[2] * q[2] + p[3] * q[3];
+    float tq = 1.0f;
+    float tp;
+    int i;
+
+    if (cosom < 0.0f) {
+        cosom = -cosom;
+        tq = -1.0f;
+    }
+    if (cosom <= 0.99999f) {
+        float omega = acosf(cosom);
+        float sinom = 1.0f / sinf(omega);
+        tp = sinf((1.0f - t) * omega) * sinom;
+        tq *= sinf(t * omega) * sinom;
+    }
+    else {
+        tp = 1.0f - t;
+        tq *= t;
+    }
+    for (i = 0; i < 4; i++) {
+        r[i] = tp * p[i] + tq * q[i];
+    }
 }
 
 static void CzanModel_QuatToMatrix34(float x, float y, float z, float w, float *matrix34) {
@@ -548,7 +611,10 @@ static void CzanModel_ApplyZabToLocalMatrices(
     channelCount = CzanModel_ReadBe32(zab + 0x0c);
     durationTicks = CzanModel_ReadBe32(zab + 0x10);
     if (durationTicks != 0) {
-        while (animationTick >= (float)durationTicks) {
+        /* A non-looping channel holds at exactly frame == duration; wrapping it
+           to 0 made the select background camera snap back at the end of every
+           transition. Looping channels never reach == duration (0x8015627C). */
+        while (animationTick > (float)durationTicks) {
             animationTick -= (float)durationTicks;
         }
         while (animationTick < 0.0f) {
@@ -575,7 +641,17 @@ static void CzanModel_ApplyZabToLocalMatrices(
         }
 
         CzanModel_CopyName(channelName, sizeof(channelName), zab + channelOffset, zabSize - channelOffset);
-        objectIndex = CzanModel_FindZmbObjectIndexByName(zmb, zmbSize, objectEntryOffset, objectCount, channelName);
+        {
+            int occurrence = 0;
+            unsigned int previous;
+            for (previous = 0; previous < channelIndex; previous++) {
+                if (strncmp((const char *)zab + 0x30 + previous * 0x40, channelName, sizeof(channelName)) == 0) {
+                    occurrence++;
+                }
+            }
+            objectIndex = CzanModel_FindZmbObjectIndexByNameNth(
+                zmb, zmbSize, objectEntryOffset, objectCount, channelName, occurrence);
+        }
         if (objectIndex < 0) {
             continue;
         }
@@ -612,11 +688,17 @@ static void CzanModel_ApplyZabToLocalMatrices(
                      CzanModel_FindKeySegment(zab, zabSize, keyOffset, keyCount, 0x14, animationTick, &key0, &key1, &t)) {
                 unsigned int offset0 = keyOffset + key0 * 0x14;
                 unsigned int offset1 = keyOffset + key1 * 0x14;
-                float x = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 4), CzanModel_ReadBeFloat(zab + offset1 + 4), t);
-                float y = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 8), CzanModel_ReadBeFloat(zab + offset1 + 8), t);
-                float z = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 0x0c), CzanModel_ReadBeFloat(zab + offset1 + 0x0c), t);
-                float w = CzanModel_LerpFloat(CzanModel_ReadBeFloat(zab + offset0 + 0x10), CzanModel_ReadBeFloat(zab + offset1 + 0x10), t);
-                CzanModel_QuatToMatrix34(x, y, z, w, animatedRotation);
+                float q0[4];
+                float q1[4];
+                float q[4];
+                int k;
+                for (k = 0; k < 4; k++) {
+                    q0[k] = CzanModel_ReadBeFloat(zab + offset0 + 4 + k * 4);
+                    q1[k] = CzanModel_ReadBeFloat(zab + offset1 + 4 + k * 4);
+                }
+                /* FUN_80145FDC -> C_QUATSlerp (0x801B1450), not a component lerp. */
+                CzanModel_QuatSlerp(q0, q1, q, t);
+                CzanModel_QuatToMatrix34(q[0], q[1], q[2], q[3], animatedRotation);
                 hasRotation = 1;
             }
             else if (keyType == 2 &&

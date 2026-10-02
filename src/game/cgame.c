@@ -409,7 +409,7 @@ void PlayerDataManager_ResetSubBlock2F1C(int *subBlock) {
     *((unsigned char *)subBlock + 0x1d) = 0;
     quotient = randomValue / 0xff;
     *(int *)(void *)((unsigned char *)subBlock + 0x20) = -1;
-    *((signed char *)subBlock + 0x19) = (signed char)(randomValue + quotient);
+    *((signed char *)subBlock + 0x19) = (signed char)(randomValue - quotient * 0xff); /* rand() % 255 (mulhw/srawi/mulli 0xFF/subf at 0x80120728) */
 }
 
 void PlayerDataManager_ResetSubBlock2F40(int *subBlock) {
@@ -597,10 +597,33 @@ static int GlobalCueManager_PlayCue(double startTime, int *cueManager, int cueId
         -1);
 }
 
-unsigned int InputOrMenuStateManager_TestHeldMask(int *manager, int controllerIndex, unsigned int mask) {
+int CharacterAssetManager_PlayCue(int *helper, int cueId) {
+    int handle;
+
+    /* 0x800CC894: helper is gManager_802E70C4 (the host's characterAssetManager,
+       which also owns the save-data flow at +0x24). Plays cueId through
+       GlobalCueManager_PlayCue(1.0f, gManager_802E70A4, cueId, 0, 0), then clears
+       the helper timer at +0x0C. Returns the cue handle (negative when none). */
+    handle = GlobalCueManager_PlayCue(1.0, 0, cueId, 0, 0);
+    if (helper != 0) {
+        *(float *)(void *)(helper + 3) = 0.0f;
+    }
+    return handle;
+}
+
+void CharacterAssetManager_SetCueMode(int *helper, int mode) {
+    /* 0x800CC72C: helper +0x08 = mode, +0x0C = 0.0f. */
+    if (helper == 0) {
+        return;
+    }
+    helper[2] = mode;
+    *(float *)(void *)(helper + 3) = 0.0f;
+}
+
+unsigned int InputOrMenuStateManager_TestPressedMask(int *manager, int controllerIndex, unsigned int mask) {
     unsigned int activeMask;
 
-    /* 0x8002AE28 tests held/current input bits at controller record +0x08. */
+    /* 0x8002AE28 tests buttons newly pressed this frame (record +0x08). */
     if (manager == 0 || controllerIndex < 0) {
         return 0;
     }
@@ -612,7 +635,7 @@ unsigned int InputOrMenuStateManager_TestHeldMask(int *manager, int controllerIn
 unsigned int InputOrMenuStateManager_TestActiveMask(int *manager, int controllerIndex, unsigned int mask) {
     unsigned int activeMask;
 
-    /* 0x8002AE08 tests the DOL's active/repeat candidate bits at record +0x04. */
+    /* 0x8002AE08 tests buttons currently held (record +0x04). */
     if (manager == 0 || controllerIndex < 0) {
         return 0;
     }
@@ -621,10 +644,10 @@ unsigned int InputOrMenuStateManager_TestActiveMask(int *manager, int controller
     return ((0U - mask) | mask) >> 31;
 }
 
-unsigned int InputOrMenuStateManager_TestTriggeredMask(int *manager, int controllerIndex, unsigned int mask) {
+unsigned int InputOrMenuStateManager_TestRepeatMask(int *manager, int controllerIndex, unsigned int mask) {
     unsigned int activeMask;
 
-    /* 0x8002AE48 tests triggered/current input bits at controller record +0x10. */
+    /* 0x8002AE48 tests press + auto-repeat (0.5 s delay, 0.1 s interval; record +0x10). */
     if (manager == 0 || controllerIndex < 0) {
         return 0;
     }
@@ -762,14 +785,14 @@ int CGame_UpdateViewerSetupSelection(int *cgame) {
     }
 
     lineHeight = RuntimeDebugText_GetLineHeight();
-    if (InputOrMenuStateManager_TestTriggeredMask(CGame_GetInputManager(), 4, 8)) {
+    if (InputOrMenuStateManager_TestRepeatMask(CGame_GetInputManager(), 4, 8)) {
         *(short *)((unsigned char *)cgame + 0x48) = 0;
         (*(int *)((unsigned char *)cgame + 0x14))--;
         if (*(int *)((unsigned char *)cgame + 0x14) < 0) {
             *(int *)((unsigned char *)cgame + 0x14) = 1;
         }
     }
-    if (InputOrMenuStateManager_TestTriggeredMask(CGame_GetInputManager(), 4, 4)) {
+    if (InputOrMenuStateManager_TestRepeatMask(CGame_GetInputManager(), 4, 4)) {
         *(short *)((unsigned char *)cgame + 0x48) = 0;
         (*(int *)((unsigned char *)cgame + 0x14))++;
         if (*(int *)((unsigned char *)cgame + 0x14) > 1) {
@@ -778,7 +801,7 @@ int CGame_UpdateViewerSetupSelection(int *cgame) {
     }
 
     if (*(int *)((unsigned char *)cgame + 0x14) == 0) {
-        if (InputOrMenuStateManager_TestTriggeredMask(CGame_GetInputManager(), 4, 1)) {
+        if (InputOrMenuStateManager_TestRepeatMask(CGame_GetInputManager(), 4, 1)) {
             do {
                 (*(int *)((unsigned char *)cgame + 0xc8))--;
                 if (*(int *)((unsigned char *)cgame + 0xc8) < 0) {
@@ -789,7 +812,7 @@ int CGame_UpdateViewerSetupSelection(int *cgame) {
                      *(int *)((unsigned char *)cgame + 0xc8) != 4 &&
                      *(int *)((unsigned char *)cgame + 0xc8) != 6);
         }
-        if (InputOrMenuStateManager_TestTriggeredMask(CGame_GetInputManager(), 4, 2)) {
+        if (InputOrMenuStateManager_TestRepeatMask(CGame_GetInputManager(), 4, 2)) {
             do {
                 (*(int *)((unsigned char *)cgame + 0xc8))++;
                 if (*(int *)((unsigned char *)cgame + 0xc8) > 6) {
@@ -802,13 +825,13 @@ int CGame_UpdateViewerSetupSelection(int *cgame) {
         }
     }
     else if (*(int *)((unsigned char *)cgame + 0x14) == 1) {
-        if (InputOrMenuStateManager_TestTriggeredMask(CGame_GetInputManager(), 4, 1)) {
+        if (InputOrMenuStateManager_TestRepeatMask(CGame_GetInputManager(), 4, 1)) {
             (*(int *)((unsigned char *)cgame + 0x10))--;
             if (*(int *)((unsigned char *)cgame + 0x10) < 0) {
                 *(int *)((unsigned char *)cgame + 0x10) = 1;
             }
         }
-        if (InputOrMenuStateManager_TestTriggeredMask(CGame_GetInputManager(), 4, 2)) {
+        if (InputOrMenuStateManager_TestRepeatMask(CGame_GetInputManager(), 4, 2)) {
             (*(int *)((unsigned char *)cgame + 0x10))++;
             if (*(int *)((unsigned char *)cgame + 0x10) > 1) {
                 *(int *)((unsigned char *)cgame + 0x10) = 0;
@@ -1189,29 +1212,9 @@ void UiRootManager_StartBootTransitionController(
     int arg2,
     int arg3,
     int showSecondChild) {
-    int *controller;
-    int i;
-
-    /* 0x80100280 forwards to FUN_801023D8(*(uiRoot +0x30), ...). */
-    controller = UiRootManager_GetBootTransitionController(uiRootManager);
-    if (controller == 0 || controller[0x0b] != -1) {
-        return;
-    }
-
-    controller[0x1c] = ((unsigned int)(mode - 6) < 2U) ? 0 : arg3;
-    controller[0x0b] = mode;
-    controller[0x0c] = 0;
-    controller[0x1a] = arg2;
-    CzanUiManager_SetObjectGroupEnabled(0, controller[0], 0);
-    CzanUiManager_StartObjectGroupAnimation(0.0, 0, controller[0], 0);
-    CzanUiManager_SetChildObjectEnabled(0, controller[0], 1, showSecondChild == 1 ? 0 : 1);
-
-    for (i = 1; i <= 10; i++) {
-        if (controller[i] != -1) {
-            CzanUiManager_SetObjectGroupDisplayFlags(0, controller[i], 0, 1);
-        }
-    }
-    UiRootBootTransition_AttachPromptHelpersForStart(controller);
+    /* 0x80100280 forwards to 0x801023D8(*(uiRoot +0x30), mode, arg2, arg3, showSecondChild). */
+    UiRootBootTransition_Start(UiRootManager_GetBootTransitionController(uiRootManager), mode, arg2, arg3,
+                               showSecondChild);
 }
 
 void UiRootManager_ConfigureBootTransitionPrompt(int *uiRootManager, int effectSlot, int baseEffectId) {
@@ -1223,6 +1226,7 @@ void UiRootManager_ConfigureBootTransitionPrompt(int *uiRootManager, int effectS
         return;
     }
 
+    FontManager_ResetPromptCursor();
     controller[0x1b] = baseEffectId;
     controller[0x11] = -1;
     controller[0x10] = 0;
@@ -1240,9 +1244,21 @@ void UiRootManager_CloseBootTransitionController(int *uiRootManager) {
         return;
     }
 
+    /* 0x801028BC: phase 2, close cue 0x257, window anim 1 (0x80062D58). */
     controller[0x0c] = 2;
-    CzanUiManager_SetObjectGroupEnabled(0, controller[0], 0);
-    CzanUiManager_StartObjectGroupAnimation(0.0, 0, controller[0], 1);
+    CharacterAssetManager_PlayCue(GameMain_GetCharacterAssetManager(), 0x257);
+    CGameUi_StartObjectGroupAnimation(controller[0], 1, 0, 0);
+}
+
+void UiRootManager_SetBootTransitionAdvanceLock(int *uiRootManager, int value) {
+    int *controller;
+
+    /* 0x80100288 forwards to 0x80102940: controller +0x68 = value. While set, the
+       mode-6 page indicator stays hidden (0x80101020). */
+    controller = UiRootManager_GetBootTransitionController(uiRootManager);
+    if (controller != 0) {
+        controller[0x1a] = value;
+    }
 }
 
 unsigned int UiRootManager_IsBootTransitionPromptReady(int *uiRootManager) {
@@ -1284,6 +1300,7 @@ void UiRootManager_SetBootTransitionSelectedOption(int *uiRootManager, int selec
     }
 
     controller[0x0f] = selectedOption;
+    FontManager_SetPromptCursor(selectedOption);
     if (0 <= selectedOption && selectedOption < 6 && controller[selectedOption + 3] != -1) {
         CzanUiManager_StartObjectGroupAnimation(0.0, 0, controller[selectedOption + 3], 2);
         CzanUiManager_AlignObjectGroupByReferenceEdge(
@@ -1333,49 +1350,49 @@ void UiRootManager_SelectImmediateTransition(int *uiRootManager) {
     CGameUiSelectionPanel_SelectImmediateTransition((int *)UiRootHostPointerFromBits(uiRootManager[0x0d]));
 }
 
-void UiRootManager_StartTitleTransitionA(int *uiRootManager, int animationIndex, int priority, int forceAlpha) {
-    int groupHandle;
-
-    /* 0x80100550 starts the UI-root title transition group at +0x0C. The DOL
-       additionally applies a small vector constant through 0x80175B00 and can
-       force alpha through 0x8017501C; the host-visible behavior depends first on
-       starting the group animation and placing it at the requested draw priority. */
-    if (uiRootManager == 0) {
-        return;
-    }
-
-    groupHandle = uiRootManager[3];
+static void UiRootManager_StartTitleTransitionGroup(
+    int groupHandle,
+    int animationIndex,
+    int priority,
+    int forceToEnd,
+    const unsigned char *color) {
+    /* Shared body of 0x80100550 / 0x80100618 / 0x801006F0:
+       0x80062D58(group, anim, 0, 0), optional 0x80175B00 colour blocks,
+       0x8017559C priority, and when forced 0x80175F58 + 0x8017501C (jump to the
+       animation's last frame). */
     if (groupHandle < 0) {
         return;
     }
-
     CGameUi_StartObjectGroupAnimation(groupHandle, animationIndex, 0, 0);
-    CzanUiManager_SetObjectGroupPriority(0, groupHandle, priority);
-    if (forceAlpha != 0) {
-        CzanUiManager_SetObjectGroupDrawEnabled(0, groupHandle, 1);
+    if (color != 0) {
+        CzanUiManager_SetObjectGroupColorBlocks(0, groupHandle, color);
+    }
+    /* 0x8017559C: edge alignment (draw-order key), not the +0x168 priority. */
+    CzanUiManager_AlignObjectGroupByReferenceEdge(0, groupHandle, priority, 0);
+    if (forceToEnd != 0) {
+        CzanUiManager_SeekObjectGroupAnimationToEnd(0, groupHandle);
     }
 }
 
-void UiRootManager_StartTitleTransitionB(int *uiRootManager, int animationIndex, int priority, int forceAlpha) {
-    int groupHandle;
+void UiRootManager_StartTitleTransitionA(int *uiRootManager, int animationIndex, int priority, int forceAlpha) {
+    /* 0x80100550: full-screen fade quad (uiRoot +0x0C, 'back_white') in white
+       (DAT_802E91B0 = 0xFFFFFFFF). Anim 0 fades in, anim 1 fades out. */
+    static const unsigned char white[4] = { 0xff, 0xff, 0xff, 0xff };
 
-    /* 0x80100618 is the second variant on the same +0x0C group. It differs from
-       0x80100550 by the vector constant it feeds to 0x80175B00; the host path keeps
-       the same animation/priority/alpha side effects. */
     if (uiRootManager == 0) {
         return;
     }
+    UiRootManager_StartTitleTransitionGroup(uiRootManager[3], animationIndex, priority, forceAlpha, white);
+}
 
-    groupHandle = uiRootManager[3];
-    if (groupHandle < 0) {
+void UiRootManager_StartTitleTransitionB(int *uiRootManager, int animationIndex, int priority, int forceAlpha) {
+    /* 0x80100618: same fade quad in black (DAT_802E91B4 = 0x000000FF). */
+    static const unsigned char black[4] = { 0x00, 0x00, 0x00, 0xff };
+
+    if (uiRootManager == 0) {
         return;
     }
-
-    CGameUi_StartObjectGroupAnimation(groupHandle, animationIndex, 0, 0);
-    CzanUiManager_SetObjectGroupPriority(0, groupHandle, priority);
-    if (forceAlpha != 0) {
-        CzanUiManager_SetObjectGroupDrawEnabled(0, groupHandle, 1);
-    }
+    UiRootManager_StartTitleTransitionGroup(uiRootManager[3], animationIndex, priority, forceAlpha, black);
 }
 
 unsigned int UiRootManager_IsTitleTransitionAIdle(int *uiRootManager) {
@@ -1387,23 +1404,12 @@ unsigned int UiRootManager_IsTitleTransitionAIdle(int *uiRootManager) {
 }
 
 void UiRootManager_StartTitleTransitionC(int *uiRootManager, int animationIndex, int priority, int forceAlpha) {
-    int groupHandle;
-
-    /* 0x801006F0 starts the UI-root title transition group at +0x10. */
+    /* 0x801006F0: background dimmer (uiRoot +0x10, 'black01'). Anim 0 dims, anim 1
+       clears. No colour block. */
     if (uiRootManager == 0) {
         return;
     }
-
-    groupHandle = uiRootManager[4];
-    if (groupHandle < 0) {
-        return;
-    }
-
-    CGameUi_StartObjectGroupAnimation(groupHandle, animationIndex, 0, 0);
-    CzanUiManager_SetObjectGroupPriority(0, groupHandle, priority);
-    if (forceAlpha != 0) {
-        CzanUiManager_SetObjectGroupDrawEnabled(0, groupHandle, 1);
-    }
+    UiRootManager_StartTitleTransitionGroup(uiRootManager[4], animationIndex, priority, forceAlpha, 0);
 }
 
 unsigned int UiRootManager_IsTitleTransitionCIdle(int *uiRootManager) {
@@ -1776,7 +1782,7 @@ void CGameUiRoot_ResetMenuPresentationBankFlags(int *uiRoot, int bankIndex) {
 }
 
 static void CGameUiSelectionPanel_UpdateSelectionCursor(int *panelState) {
-    if (InputOrMenuStateManager_TestTriggeredMask(CGame_GetInputManager(), 4, 2) != 0) {
+    if (InputOrMenuStateManager_TestRepeatMask(CGame_GetInputManager(), 4, 2) != 0) {
         if (panelState[0x0d] < panelState[0x0e] - 1) {
             panelState[0x0d]++;
         }
@@ -1785,7 +1791,7 @@ static void CGameUiSelectionPanel_UpdateSelectionCursor(int *panelState) {
         }
         GlobalCueManager_PlayCue(0.0, 0, 0x24f, 0, 0);
     }
-    else if (InputOrMenuStateManager_TestTriggeredMask(CGame_GetInputManager(), 4, 1) != 0) {
+    else if (InputOrMenuStateManager_TestRepeatMask(CGame_GetInputManager(), 4, 1) != 0) {
         if (panelState[0x0d] < 1) {
             panelState[0x0d] = panelState[0x0e] - 1;
         }
@@ -2216,57 +2222,187 @@ void ActiveGameplayControllerBase_ResetMenuPresentationGrid(int *controller) {
     }
 }
 
-void UiRootSubManager_UpdateTextureFrameGroupMotion(int *controller) {
-    int bankIndex;
-    int childIndex;
-    int uiManager;
+static unsigned char *CGameUiPresentationBank(int *controller, int bankIndex) {
+    /* Bank layout (relative to controller + bankIndex * 0x3E0): +0x08 group handles
+       [0x28], +0xA8/+0xAC target mask (high/low word), +0xB0/+0xB4 current mask,
+       +0xB8 state (-1 idle, 0 shown, 1 moving), +0xBC laid-out count, +0xC0 timer,
+       +0xC4 entries [0x28] x 0x14 {x, y, targetX, targetY, active}. Controller +0 is
+       the right edge the rows are aligned to (666, or 850 in 16:9). */
+    return (unsigned char *)controller + bankIndex * 0x3e0;
+}
 
-    /* 0x801061B4 is the per-frame update for the two 0x28-entry texture-frame
-       banks initialized by 0x80106054. It detects mask changes at bank +0xA8/+0xAC,
-       seeds the transition through 0x801064F8, interpolates the per-entry position
-       records, then 0x80106724 applies those offsets to the Czan object groups. */
+#define PRESENTATION_I32(bank, offset) (*(int *)(void *)((bank) + (offset)))
+#define PRESENTATION_F32(bank, offset) (*(float *)(void *)((bank) + (offset)))
+
+static void CGameUiPresentation_LayoutBank(int *controller, int bankIndex) {
+    /* 0x801064F8: every masked item becomes active and visible; the first three
+       (and any in the first half) go on the row at y 434, the rest at y 451, each
+       right-aligned to controller +0 with a 3-pixel gap and 100-pixel width.
+       Unmasked items keep their position with target y 488 (off screen). */
+    unsigned char *bank = CGameUiPresentationBank(controller, bankIndex);
+    float baseX = *(float *)(void *)controller;
+    int order[0x28];
+    float widths[0x28];
+    float rowSum[2];
+    int count = 0;
+    int placed = 0;
+    int i;
+
+    PRESENTATION_I32(bank, 0xbc) = 0;
+    for (i = 0; i < 0x28; i++) {
+        if (CGameUiPresentationMaskContains((const int *)bank, i)) {
+            float *entry = CGameUiPresentationEntry((int *)bank, i);
+
+            *(int *)(void *)(entry + 4) = 1;
+            order[i] = count;
+            widths[count] = 100.0f;
+            count++;
+            if (PRESENTATION_I32(bank, 0x08 + i * 4) != -1) {
+                CzanUiManager_SetObjectGroupEnabled(CGame_GetGlobalUiManager(), PRESENTATION_I32(bank, 0x08 + i * 4), 0);
+            }
+        }
+        else {
+            order[i] = -1;
+        }
+    }
+    PRESENTATION_I32(bank, 0xbc) = count;
+
+    rowSum[0] = -3.0f;
+    rowSum[1] = -3.0f;
+    for (i = 0; i < count; i++) {
+        int row = (i * 2 < count || i < 3) ? 0 : 1;
+        rowSum[row] += 3.0f + widths[i];
+    }
+    for (i = 0; i < 0x28; i++) {
+        float *entry = CGameUiPresentationEntry((int *)bank, i);
+
+        if (order[i] != -1) {
+            int row = (placed * 2 < count || placed < 3) ? 0 : 1;
+
+            entry[2] = baseX - rowSum[row];
+            entry[3] = row == 0 ? 434.0f : 451.0f;
+            rowSum[row] -= 3.0f + widths[placed];
+            placed++;
+        }
+        else {
+            entry[2] = entry[0];
+            entry[3] = 488.0f;
+        }
+    }
+}
+
+void UiRootSubManager_UpdateTextureFrameGroupMotion(int *controller) {
+    /* 0x801061B4 + 0x80106724 */
+    float step = 1.0f;   /* 60 / (refresh 60 / (frame skip 0 + 1)) */
+    int bankIndex;
+    int i;
+
     if (controller == 0) {
         return;
     }
-
-    uiManager = CGame_GetGlobalUiManager();
     for (bankIndex = 0; bankIndex < 2; bankIndex++) {
-        int *bank = controller + bankIndex * (0x3e0 / 4);
-        int previousHigh = bank[0xb0 / 4];
-        int previousLow = bank[0xb4 / 4];
-        int targetHigh = bank[0xa8 / 4];
-        int targetLow = bank[0xac / 4];
+        unsigned char *bank = CGameUiPresentationBank(controller, bankIndex);
+        int state = PRESENTATION_I32(bank, 0xb8);
 
-        if (previousHigh != targetHigh || previousLow != targetLow) {
-            for (childIndex = 0; childIndex < 0x28; childIndex++) {
-                int objectGroupHandle = bank[2 + childIndex];
-                float *entry = CGameUiPresentationEntry(bank, childIndex);
-                int visibleByTarget = CGameUiPresentationMaskContains(bank, childIndex);
+        if (state == -1 || state == 0) {
+            if (PRESENTATION_I32(bank, 0xa8) != PRESENTATION_I32(bank, 0xb0) ||
+                PRESENTATION_I32(bank, 0xac) != PRESENTATION_I32(bank, 0xb4)) {
+                CGameUiPresentation_LayoutBank(controller, bankIndex);
+                PRESENTATION_I32(bank, 0xb0) = PRESENTATION_I32(bank, 0xa8);
+                PRESENTATION_I32(bank, 0xb4) = PRESENTATION_I32(bank, 0xac);
+                PRESENTATION_I32(bank, 0xb8) = 1;
+                PRESENTATION_F32(bank, 0xc0) = 0.0f;
+            }
+        }
+        else if (state == 1) {
+            PRESENTATION_F32(bank, 0xc0) += step;
+            for (i = 0; i < 0x28; i++) {
+                float *entry = CGameUiPresentationEntry((int *)bank, i);
 
-                entry[0] = entry[2];
-                entry[1] = entry[3];
-                entry[4] = 0.0f;
-                if (objectGroupHandle != -1) {
-                    CzanUiManager_SetObjectGroupEnabled(uiManager, objectGroupHandle, visibleByTarget ? 0 : 1);
+                if (*(int *)(void *)(entry + 4) != 0) {
+                    entry[0] = (entry[0] + entry[2]) * 0.5f;
+                    entry[1] = (entry[1] + entry[3]) * 0.5f;
                 }
             }
+            if (PRESENTATION_F32(bank, 0xc0) >= 3.0f) {
+                float baseX = *(float *)(void *)controller;
 
-            bank[0xb0 / 4] = targetHigh;
-            bank[0xb4 / 4] = targetLow;
-            bank[0xb8 / 4] = targetHigh == 0 && targetLow == 0 ? -1 : 0;
-        }
+                for (i = 0; i < 0x28; i++) {
+                    float *entry = CGameUiPresentationEntry((int *)bank, i);
 
-        if (bank[0xb8 / 4] != -1) {
-            for (childIndex = 0; childIndex < 0x28; childIndex++) {
-                int objectGroupHandle = bank[2 + childIndex];
-                float *entry = CGameUiPresentationEntry(bank, childIndex);
-                if (objectGroupHandle != -1 && entry[4] != 0.0f) {
-                    float xyOffset[3];
-                    xyOffset[0] = entry[0];
-                    xyOffset[1] = entry[1];
-                    xyOffset[2] = 0.0f;
-                    CzanUiManager_ApplyObjectGroupPositionLayout(uiManager, objectGroupHandle, xyOffset);
+                    if (CGameUiPresentationMaskContains((const int *)bank, i)) {
+                        entry[0] = entry[2];
+                        entry[1] = entry[3];
+                    }
+                    else {
+                        *(int *)(void *)(entry + 4) = 0;
+                        entry[0] = baseX - 100.0f;
+                        entry[1] = 488.0f;
+                        entry[2] = entry[0];
+                        entry[3] = 488.0f;
+                        if (PRESENTATION_I32(bank, 0x08 + i * 4) != -1) {
+                            CzanUiManager_SetObjectGroupEnabled(CGame_GetGlobalUiManager(),
+                                                                PRESENTATION_I32(bank, 0x08 + i * 4), 1);
+                        }
+                    }
                 }
+                PRESENTATION_F32(bank, 0xc0) = 3.0f;
+                PRESENTATION_I32(bank, 0xb8) =
+                    (PRESENTATION_I32(bank, 0xa8) | PRESENTATION_I32(bank, 0xac)) != 0 ? 0 : -1;
+            }
+        }
+    }
+
+    /* 0x80106724: place the active items. */
+    for (bankIndex = 0; bankIndex < 2; bankIndex++) {
+        unsigned char *bank = CGameUiPresentationBank(controller, bankIndex);
+
+        if (PRESENTATION_I32(bank, 0xb8) == -1) {
+            continue;
+        }
+        for (i = 0; i < 0x28; i++) {
+            float *entry = CGameUiPresentationEntry((int *)bank, i);
+
+            if (*(int *)(void *)(entry + 4) != 0 && PRESENTATION_I32(bank, 0x08 + i * 4) != -1) {
+                float xyOffset[3];
+
+                xyOffset[0] = entry[0];
+                xyOffset[1] = entry[1];
+                xyOffset[2] = 0.0f;
+                CzanUiManager_ApplyObjectGroupPositionLayout(CGame_GetGlobalUiManager(),
+                                                            PRESENTATION_I32(bank, 0x08 + i * 4), xyOffset);
+            }
+        }
+    }
+}
+
+void UiRootSubManager_InitPresentationState(int *controller, int widescreen) {
+    /* 0x80105DE4 (constructor part): idle banks, entries parked off screen, hidden;
+       controller +0 = 850 in 16:9, else 666. */
+    int bankIndex;
+    int i;
+
+    *(float *)(void *)controller = widescreen ? 850.0f : 666.0f;
+    controller[1] = 0;
+    for (bankIndex = 0; bankIndex < 2; bankIndex++) {
+        unsigned char *bank = CGameUiPresentationBank(controller, bankIndex);
+
+        PRESENTATION_I32(bank, 0xa8) = 0;
+        PRESENTATION_I32(bank, 0xac) = 0;
+        PRESENTATION_I32(bank, 0xb0) = 0;
+        PRESENTATION_I32(bank, 0xb4) = 0;
+        PRESENTATION_I32(bank, 0xb8) = -1;
+        PRESENTATION_F32(bank, 0xc0) = 0.0f;
+        for (i = 0; i < 0x28; i++) {
+            float *entry = CGameUiPresentationEntry((int *)bank, i);
+
+            *(int *)(void *)(entry + 4) = 0;
+            entry[0] = *(float *)(void *)controller - 100.0f;
+            entry[1] = 488.0f;
+            entry[2] = entry[0];
+            entry[3] = 488.0f;
+            if (PRESENTATION_I32(bank, 0x08 + i * 4) != -1) {
+                CzanUiManager_SetObjectGroupEnabled(CGame_GetGlobalUiManager(), PRESENTATION_I32(bank, 0x08 + i * 4), 1);
             }
         }
     }

@@ -30,8 +30,10 @@ static int gSoundArchiveReloadGuard;
 static int gRuntimeMemoryCriticalFlag;
 static int gRuntimeMemoryCriticalValue;
 static void *gModuleSystemHostPointers[256];
-static int gCSelectHostBootPhase;
-static int gCSelectHostBootPhaseTicks;
+/* Wii system language (SCGetLanguage) used for the global context +0x8C.
+   0=Japanese 1=English 2=German 3=French 4=Spanish 5=Italian 6=Dutch.
+   The USA disc only ships US/FR/SP select data; see CSelectResourcePaths. */
+static int gHostSystemLanguage = 1;
 
 #define GLOBAL_TEXTURE_MANAGER_SLOTS 512
 #define CSELECT_MODULE_SIZE 0x1c18
@@ -58,14 +60,6 @@ typedef struct CSelectPlayerCountFlow {
 typedef struct CSelectTitleModelFocus {
     unsigned char storage[0x1b8];
 } CSelectTitleModelFocus;
-
-typedef enum CSelectHostBootPhase {
-    CSELECT_HOST_BOOT_PHASE_NONE = 0,
-    CSELECT_HOST_BOOT_PHASE_WAIT_SELECT_BIN = 1,
-    CSELECT_HOST_BOOT_PHASE_BOOT_FLOW = 2,
-    CSELECT_HOST_BOOT_PHASE_WAIT_SEL_TITLE = 3,
-    CSELECT_HOST_BOOT_PHASE_TITLE_READY = 4
-} CSelectHostBootPhase;
 
 typedef struct RuntimeLowLevelMemoryPoolState {
     int initialized;
@@ -112,6 +106,10 @@ static RuntimeLowLevelCoreState gRuntimeLowLevelCore;
 static RuntimeLowLevelMemoryPoolState gRuntimeLowLevelMemoryPool;
 static RuntimeLowLevelVideoState gRuntimeLowLevelVideo;
 static CSelectTitleModelFocus gCSelectTitleModelFocus;
+/* DAT_802E71F8: Mii (RFL) manager; [0] == 1 means Mii data is readable. The PC port
+   has no Mii Channel and treats Mii data as available, so boot skips the
+   "Mii Channel save data could not be read" prompt (decision 2026-10-02). */
+static int gMiiManagerState[1] = { 1 };
 
 typedef struct MainLoopManagerKnownFields {
     int frameCounter;
@@ -149,6 +147,45 @@ static int RuntimeFloatBits(float value) {
     return bits.i;
 }
 
+int HostPointer_ToBits32(const void *pointer, const char *owner) {
+    /* The host keeps pointers in 32-bit fields like the Wii. The x64 exe is linked
+       /LARGEADDRESSAWARE:NO with a low base, so every host address is below 2 GB
+       and survives the round trip. Anything above (e.g. memory owned by a system
+       DLL) would be truncated: report it once per owner instead of failing later. */
+    static const char *reported[16];
+    uintptr_t value = (uintptr_t)pointer;
+    int i;
+
+    if (value > 0x7fffffffu) {
+        for (i = 0; i < 16 && reported[i] != 0 && reported[i] != owner; i++) {
+        }
+        if (i < 16 && reported[i] == 0) {
+            reported[i] = owner;
+            RuntimeDebugReport("HostPointer: %s pointer %p does not fit in 32 bits\n", owner, pointer);
+        }
+    }
+    return (int)value;
+}
+
+static int HostPointer_CheckLowAddressSpace(void) {
+    /* Startup self-check for the /LARGEADDRESSAWARE:NO link (see build_host_gl.bat). */
+    static int staticProbe;
+    int stackProbe;
+    void *heapProbe = malloc(64);
+    int ok = (uintptr_t)&staticProbe <= 0x7fffffffu &&
+             (uintptr_t)&stackProbe <= 0x7fffffffu &&
+             (uintptr_t)heapProbe <= 0x7fffffffu;
+
+    if (!ok) {
+        RuntimeDebugReport(
+            "fatal: host addresses are above 2 GB (static=%p stack=%p heap=%p). "
+            "Link with /LARGEADDRESSAWARE:NO /DYNAMICBASE:NO /BASE:0x10000000 (tools\\build_host_gl.bat).\n",
+            (void *)&staticProbe, (void *)&stackProbe, heapProbe);
+    }
+    free(heapProbe);
+    return ok;
+}
+
 static int RuntimePointerBits(void *pointer) {
     int i;
 
@@ -169,7 +206,7 @@ static int RuntimePointerBits(void *pointer) {
         }
     }
 
-    return (int)(uintptr_t)pointer;
+    return HostPointer_ToBits32(pointer, "runtime");
 }
 
 static void *RuntimePointerFromBits(int bits) {
@@ -836,7 +873,8 @@ static void GlobalRuntimeContext_Init(
     }
     context[0x9d] = RuntimePointerBits(submanager274);
 
-    context[0x23] = 4;
+    /* 0x80142EAC: SCGetLanguage() & 0xFF stored at +0x8C. */
+    context[0x23] = gHostSystemLanguage;
     context[0x2e] = -1;
     context[0x24] = 1;
     context[0x25] = 1;
@@ -856,6 +894,79 @@ static void GlobalRuntimeContext_Init(
 
 int *GlobalRuntimeContext_Get(void) {
     return gGlobalRuntimeContext;
+}
+
+void GameHost_SetSystemLanguage(int wiiLanguage) {
+    if (wiiLanguage >= 0 && wiiLanguage <= 9) {
+        gHostSystemLanguage = wiiLanguage;
+    }
+}
+
+int GameHost_GetSystemLanguage(void) {
+    return gHostSystemLanguage;
+}
+
+static int HostStrCaseCmp(const char *a, const char *b) {
+    while (*a != '\0' && *b != '\0') {
+        int ca = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a;
+        int cb = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
+        if (ca != cb) {
+            return ca - cb;
+        }
+        a++;
+        b++;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+static int GameHost_ParseLanguageName(const char *name) {
+    static const struct { const char *name; int language; } kNames[] = {
+        { "ja", 0 }, { "jp", 0 },
+        { "en", 1 }, { "us", 1 },
+        { "de", 2 }, { "fr", 3 },
+        { "es", 4 }, { "sp", 4 },
+        { "it", 5 }, { "nl", 6 },
+    };
+    unsigned int i;
+
+    if (name == 0 || name[0] == '\0') {
+        return -1;
+    }
+    if (name[0] >= '0' && name[0] <= '9') {
+        return atoi(name);
+    }
+    for (i = 0; i < sizeof(kNames) / sizeof(kNames[0]); i++) {
+        if (HostStrCaseCmp(name, kNames[i].name) == 0) {
+            return kNames[i].language;
+        }
+    }
+    return -1;
+}
+
+void GameHost_ConfigureFromArgs(int argc, char **argv) {
+    const char *value = getenv("DDRII_LANG");
+    int i;
+    int language;
+
+    /* Host replacement for the Wii system settings: --lang en|fr|es (or
+       --lang=en, or the DDRII_LANG environment variable). Default is English,
+       which is what a USA console reports. */
+    for (i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--lang=", 7) == 0) {
+            value = argv[i] + 7;
+        }
+        else if (strcmp(argv[i], "--lang") == 0 && i + 1 < argc) {
+            value = argv[++i];
+        }
+    }
+    language = GameHost_ParseLanguageName(value);
+    if (value != 0 && language < 0) {
+        printf("host: unknown language '%s', using English\n", value);
+    }
+    if (language >= 0) {
+        GameHost_SetSystemLanguage(language);
+    }
+    printf("host: system language %d\n", gHostSystemLanguage);
 }
 
 int GlobalRuntimeContext_SelectRegionVariant(int *globalContext) {
@@ -1268,41 +1379,468 @@ static void UiFrameState_Update(int *uiFrameState) {
     (void)uiFrameState;
 }
 
-static void InputOrMenuStateManager_WriteControllerRecord(
-    int *manager,
-    int controllerIndex,
-    unsigned int activeMask,
-    unsigned int heldMask,
-    unsigned int triggeredMask) {
-    unsigned char *record;
+/* Input/menu manager (gManager_802E70AC, 0xEF0 bytes). Manager +0x00 is the frame
+   rate; slot s (0..3 = Wii Remotes, 4 = any controller) has a button-state object at
+   manager + 4 + s*0x20:
+     +0x00 held now        (record +0x04, tested by 0x8002AE08)
+     +0x04 pressed         (record +0x08, 0x8002AE28 / IsConfirmPressed / IsBackPressed)
+     +0x08 released        (record +0x0C)
+     +0x0C press + repeat  (record +0x10, 0x8002AE48)
+     +0x10 previous held   (record +0x14)
+     +0x14 repeat delay    (0.5 s), +0x18 repeat interval (0.1 s), +0x1C repeat counter
+   Bits are Wii Remote KPAD bits (see MENU_INPUT_* in the platform layer). */
+#define INPUT_SLOT_STRIDE 0x20
+#define INPUT_BUTTON_MASK 0x1ffffu
 
-    if (manager == 0 || controllerIndex < 0) {
-        return;
+static void InputButtonState_Update(unsigned char *state, unsigned int heldNow) {
+    /* 0x80146C1C */
+    unsigned int *fields = (unsigned int *)(void *)state;
+    unsigned int previous = fields[0x10 / 4];
+    unsigned int changed = previous ^ heldNow;
+    unsigned int repeat = heldNow & previous;
+
+    fields[0x00 / 4] = heldNow;
+    fields[0x04 / 4] = changed & heldNow & INPUT_BUTTON_MASK;
+    fields[0x08 / 4] = changed & previous & INPUT_BUTTON_MASK;
+    if ((repeat & INPUT_BUTTON_MASK) != 0) {
+        unsigned int counter = fields[0x1c / 4] + 1;
+        unsigned int delay = fields[0x14 / 4];
+        unsigned int interval = fields[0x18 / 4];
+
+        fields[0x1c / 4] = counter;
+        if (counter < delay || interval == 0 || (counter - delay) % interval != 0) {
+            repeat = 0;
+        }
     }
-
-    record = (unsigned char *)manager + controllerIndex * 0x20;
-    *(unsigned int *)(void *)(record + 0x04) = activeMask;
-    *(unsigned int *)(void *)(record + 0x08) = heldMask;
-    *(unsigned int *)(void *)(record + 0x10) = triggeredMask;
+    else {
+        fields[0x1c / 4] = 0;
+    }
+    if (fields[0x04 / 4] != 0) {
+        fields[0x1c / 4] = 0;
+    }
+    fields[0x0c / 4] = repeat | fields[0x04 / 4];
+    fields[0x10 / 4] = heldNow;
 }
 
 static void InputOrMenuStateManager_Update(int *manager, int flags) {
+    /* 0x8002A33C: refresh the repeat timing when the frame rate changes, then OR each
+       remote's KPAD hold bits (remote, nunchuk, classic) and run 0x80146C1C on every
+       slot. The PC host feeds the keyboard/XInput mask to remote 0 and slot 4. */
     unsigned int heldMask = 0;
-    unsigned int triggeredMask = 0;
+    unsigned int unusedTriggered = 0;
+    float frameRate = 60.0f;
+    int slot;
 
-    /* 0x8002A33C updates the controller/menu records consumed by the DOL helper
-       functions. The boot/select path reads logical controller slot 4; gameplay
-       setup checks also probe slot 0 for start/confirm-style masks. */
-    (void)flags;
-    Platform_PollMenuInput(&heldMask, &triggeredMask);
-    InputOrMenuStateManager_WriteControllerRecord(manager, 0, heldMask, heldMask, triggeredMask);
-    InputOrMenuStateManager_WriteControllerRecord(manager, 4, heldMask, heldMask, triggeredMask);
+    if (manager == 0 || flags == 1) {
+        return;
+    }
+    if (*(float *)(void *)manager != frameRate) {
+        *(float *)(void *)manager = frameRate;
+        for (slot = 0; slot < 5; slot++) {
+            unsigned char *state = (unsigned char *)manager + 4 + slot * INPUT_SLOT_STRIDE;
+
+            *(unsigned int *)(void *)(state + 0x14) = (unsigned int)(0.5f * frameRate);
+            *(unsigned int *)(void *)(state + 0x18) = (unsigned int)(0.1f * frameRate);
+            *(unsigned int *)(void *)(state + 0x1c) = 0;
+        }
+    }
+
+    Platform_PollMenuInput(&heldMask, &unusedTriggered);
+    for (slot = 0; slot < 5; slot++) {
+        unsigned int held = (slot == 0 || slot == 4) ? heldMask : 0;
+
+        InputButtonState_Update((unsigned char *)manager + 4 + slot * INPUT_SLOT_STRIDE, held);
+    }
+}
+
+/* ---- Wii Remote pointer manager (gManager_802E70B4, 0xBF0 bytes) ----------------
+   +0x000 flags (bit 0 = loaded)        +0x008 hit regions: 0x100 x {group, child}
+   +0x804 single-pointer mode           +0x808 Czan UI manager
+   +0x80C four 0xF8-byte remote records:
+     +0x00 channel  +0x04 flags  +0x08 previous flags  +0x0C x,y,z (screen pixels)
+     +0x18 Czan UI manager  +0x1C input manager  +0x24 pointer cooldown (seconds)
+     +0x28/+0x6C/+0xB0 cursor entries (0x44-byte CSelModeEntry bases):
+       anchor (Pointer.bin 0/0), droplet (0/1, linked to anchor child 0),
+       player number (0/2, linked to droplet child 1 '@dummy')
+   Record flags: 0x1 connected, 0x2 connection changed, 0x4 active, 0x8 on screen,
+   0x10 cursor hidden, 0x20 dimmed, 0x40 pointer usable, 0x100 pointer granted,
+   0x200 hidden by game. The KPAD layer (+0x25C, 0x8014B4AC..) is replaced by the
+   host mouse: remote 0 is always connected and points where the mouse is. */
+#define POINTER_RECORD_BASE 0x80c
+#define POINTER_RECORD_SIZE 0xf8
+#define POINTER_REGION_COUNT 0x100
+
+static unsigned char *PointerManager_GetRecord(int *manager, int channel) {
+    return (unsigned char *)manager + POINTER_RECORD_BASE + channel * POINTER_RECORD_SIZE;
+}
+
+#define POINTER_FLAGS(record) (*(int *)(void *)((record) + 0x04))
+#define POINTER_PREV_FLAGS(record) (*(int *)(void *)((record) + 0x08))
+#define POINTER_POS(record) ((float *)(void *)((record) + 0x0c))
+#define POINTER_COOLDOWN(record) (*(float *)(void *)((record) + 0x24))
+#define POINTER_ENTRY(record, n) ((void *)((record) + 0x28 + (n) * 0x44))
+
+static int PointerFlags_Set(int flags, int bit, int on) {
+    /* 0x8010D928 */
+    return on ? (flags | bit) : (flags & ~bit);
+}
+
+static int HostKpad_IsConnected(int channel) {
+    /* 0x8014B7AC */
+    return channel == 0;
+}
+
+static int HostKpad_GetPointer(int channel, float *x, float *y) {
+    /* 0x8014B4AC / 0x8014B4BC validity and 0x8014B524 position. */
+    if (channel != 0) {
+        return 0;
+    }
+    return Platform_GetPointerPosition(x, y);
+}
+
+static void PointerEntry_InitBase(void *entry) {
+    /* 0x80110BA4: slot type 6, handles and cached animations -1, count 0. */
+    int *words = (int *)entry;
+    int i;
+
+    words[0] = 6;
+    for (i = 1; i <= 4; i++) {
+        words[i] = 0;
+    }
+    for (i = 0; i < 4; i++) {
+        words[5 + i] = -1;
+        words[9 + i] = -1;
+    }
+    words[13] = 0;
+    words[14] = 0;
+    words[15] = 0;
+}
+
+static void PointerRecord_Load(unsigned char *record, int channel, const void *pointerData, unsigned int pointerSize) {
+    /* 0x8010DC50 */
+    static const float offscreen[3] = { -640.0f, -480.0f, 0.0f };
+    int handles[3];
+    int i;
+
+    POINTER_FLAGS(record) = 0;
+    POINTER_PREV_FLAGS(record) = 0;
+    memcpy(POINTER_POS(record), offscreen, sizeof(offscreen));
+    POINTER_COOLDOWN(record) = 0.0f;
+    *(int *)(void *)(record + 0x00) = channel;
+    *(int *)(void *)(record + 0x18) = 0;
+    *(int *)(void *)(record + 0x1c) = RuntimePointerBits(gGameMainManagers.inputOrMenuStateManager);
+
+    for (i = 0; i < 3; i++) {
+        CzanLinkBlock block;
+
+        PointerEntry_InitBase(POINTER_ENTRY(record, i));
+        if (CzanLinkResource_GetBlock(pointerData, pointerSize, (unsigned int)i, &block)) {
+            HostCzan_RegisterLinkSize(block.data, block.size);
+            CSelModeEntry_AddUiObject(POINTER_ENTRY(record, i), (void *)block.data);
+        }
+    }
+    CSelModeEntry_SetPositionOrLayout(POINTER_ENTRY(record, 0), 0, -1, POINTER_POS(record));
+    ((int *)POINTER_ENTRY(record, 1))[0] = 3;   /* 0x801105F4 */
+    ((int *)POINTER_ENTRY(record, 2))[0] = 3;
+    CSelModeEntry_SetObjectFlags(POINTER_ENTRY(record, 1), 0, channel * 2 + 1);
+    CSelModeEntry_SetObjectFlags(POINTER_ENTRY(record, 2), 0, channel * 2);
+    CSelModeEntry_PlayObject(POINTER_ENTRY(record, 1), 0, 0, channel, 0);
+    CSelModeEntry_PlayObject(POINTER_ENTRY(record, 2), 0, 0, channel, 0);
+    for (i = 0; i < 3; i++) {
+        handles[i] = CSelModeEntry_GetObjectHandle(POINTER_ENTRY(record, i), 0);
+    }
+    if (handles[1] >= 0 && handles[0] >= 0) {
+        CzanUiManager_LinkObjectGroupToReferenceObject(0, handles[1], handles[0], 0, 0x0f);
+    }
+    if (handles[2] >= 0 && handles[1] >= 0) {
+        CzanUiManager_LinkObjectGroupToReferenceObject(0, handles[2], handles[1], 1, 0x0f);
+    }
+    for (i = 0; i < 3; i++) {
+        CSelModeEntry_StartObjectAnimation(0.0, POINTER_ENTRY(record, i), 0, 0, 0, 0);
+    }
+}
+
+void PointerManager_Load(int *manager, void *linkData) {
+    /* 0x8010E770 */
+    unsigned int linkSize;
+    CzanLinkBlock pointerBlock;
+    int i;
+
+    if (manager == 0 || linkData == 0) {
+        return;
+    }
+    manager[1] = 0;
+    for (i = 0; i < POINTER_REGION_COUNT * 2; i++) {
+        manager[2 + i] = -1;
+    }
+    linkSize = HostCzan_GetRegisteredLinkSize(linkData);
+    if (!CzanLinkResource_IsValid(linkData, linkSize) ||
+        !CzanLinkResource_GetBlock(linkData, linkSize, 0, &pointerBlock)) {
+        return;
+    }
+    HostCzan_RegisterLinkSize(pointerBlock.data, pointerBlock.size);
+    manager[0x804 / 4] = 1;
+    manager[0x808 / 4] = 0;
+    manager[0] |= 1;
+    for (i = 0; i < 4; i++) {
+        PointerRecord_Load(PointerManager_GetRecord(manager, i), i, pointerBlock.data, pointerBlock.size);
+    }
+}
+
+static void PointerRecord_UpdateConnection(unsigned char *record) {
+    /* 0x8010E0D8 */
+    int flags = POINTER_FLAGS(record);
+    int channel = *(int *)(void *)record;
+
+    if ((flags & 2) == 0) {
+        int previous = POINTER_PREV_FLAGS(record);
+
+        flags = PointerFlags_Set(flags, 1, HostKpad_IsConnected(channel));
+        if ((previous & 1) != (flags & 1)) {
+            flags |= 2;
+        }
+    }
+    if ((flags & 2) != 0) {
+        flags = PointerFlags_Set(flags, 4, (flags & 1) != 0);
+    }
+    POINTER_FLAGS(record) = flags;
+}
+
+static void PointerRecord_UpdateFlags(unsigned char *record, int pointing) {
+    /* 0x8010E1E8 */
+    float *pos = POINTER_POS(record);
+    int flags = POINTER_FLAGS(record);
+    int onScreen = pointing && pos[0] >= 0.0f && pos[0] <= 640.0f && pos[1] >= 0.0f && pos[1] <= 480.0f;
+
+    flags = PointerFlags_Set(flags, 8, onScreen);
+    flags = PointerFlags_Set(flags, 0x10,
+                             !((flags & 1) && (flags & 4) && (flags & 8) && !(flags & 0x200)));
+    flags = PointerFlags_Set(flags, 0x40, (flags & 0x100) && (flags & 8));
+    flags = PointerFlags_Set(flags, 0x20, (flags & 0x40) == 0);
+    POINTER_FLAGS(record) = flags;
+}
+
+static void PointerRecord_ApplyVisuals(unsigned char *record) {
+    /* 0x8010E3C8 */
+    int flags = POINTER_FLAGS(record);
+    unsigned char hidden = (flags & 0x10) != 0;
+    unsigned char alpha = (flags & 0x20) ? 0x50 : 0xff;
+    int i;
+
+    for (i = 1; i <= 2; i++) {
+        int handle = CSelModeEntry_GetObjectHandle(POINTER_ENTRY(record, i), 0);
+
+        CSelModeEntry_SetObjectEnabled(POINTER_ENTRY(record, i), 0, -1, hidden);
+        if (handle >= 0) {
+            CzanUiManager_SetObjectGroupVertexAlpha(0, handle, alpha);
+        }
+    }
+    POINTER_FLAGS(record) = flags & ~2;
+}
+
+static void PointerRecord_Update(unsigned char *record, int skipFrame) {
+    /* 0x8010DF54. Remote roll (0x8014B4D0) is level for the mouse, so the cursor
+       rotation written through 0x80110720 stays 0. */
+    float x;
+    float y;
+    int pointing;
+    int i;
+
+    if (skipFrame != 0) {
+        return;
+    }
+    POINTER_PREV_FLAGS(record) = POINTER_FLAGS(record);
+    PointerRecord_UpdateConnection(record);
+    pointing = HostKpad_GetPointer(*(int *)(void *)record, &x, &y);
+    if ((POINTER_FLAGS(record) & 4) != 0 && pointing) {
+        float *pos = POINTER_POS(record);
+
+        pos[0] = x;
+        pos[1] = y;
+        pos[2] = 0.0f;
+        CSelModeEntry_SetPositionOrLayout(POINTER_ENTRY(record, 0), 0, -1, pos);
+    }
+    PointerRecord_UpdateFlags(record, pointing);
+    PointerRecord_ApplyVisuals(record);
+    for (i = 0; i < 3; i++) {
+        CSelModeEntry_ActivateObject(POINTER_ENTRY(record, i), 0);
+    }
+}
+
+static void PointerManager_GrantPointers(int *manager) {
+    /* 0x8010F0D4: connected, on-screen remotes past their cooldown get 0x100; in
+       single-pointer mode (+0x804) only the first one. */
+    int granted = 0;
+    int channel;
+
+    for (channel = 0; channel < 4; channel++) {
+        unsigned char *record = PointerManager_GetRecord(manager, channel);
+        int grant = HostKpad_IsConnected(channel) &&
+                    (POINTER_FLAGS(record) & 8) != 0 &&
+                    POINTER_COOLDOWN(record) <= 0.0f &&
+                    (manager[0x804 / 4] == 0 || granted == 0);
+
+        POINTER_FLAGS(record) = PointerFlags_Set(POINTER_FLAGS(record), 0x100, grant);
+        granted |= grant;
+    }
 }
 
 static void Manager802e70b4_Update(int *manager, int skipModuleFrame) {
-    /* FUN_8010E9DC updates the 0xBF0 manager allocated as gManager_802E70B4. */
-    (void)manager;
-    (void)skipModuleFrame;
+    /* 0x8010E9DC */
+    float frameSeconds = 1.0f / 60.0f;
+    int channel;
+
+    if (manager == 0 || skipModuleFrame != 0 || (manager[0] & 1) == 0) {
+        return;
+    }
+    for (channel = 0; channel < 4; channel++) {
+        unsigned char *record = PointerManager_GetRecord(manager, channel);
+
+        POINTER_COOLDOWN(record) -= frameSeconds;
+        if (POINTER_COOLDOWN(record) < 0.0f) {
+            POINTER_COOLDOWN(record) = 0.0f;
+        }
+    }
+    PointerManager_GrantPointers(manager);
+    for (channel = 0; channel < 4; channel++) {
+        unsigned char *record = PointerManager_GetRecord(manager, channel);
+
+        PointerRecord_Update(record, skipModuleFrame);
+        if ((POINTER_FLAGS(record) & 8) != 0 && (POINTER_PREV_FLAGS(record) & 8) == 0) {
+            POINTER_FLAGS(record) |= 0x100;
+            POINTER_COOLDOWN(record) = 0.0f;
+        }
+    }
+}
+
+int PointerManager_RegisterRegion(int *manager, int groupHandle, int childIndex) {
+    /* 0x8010EB78 */
+    int i;
+
+    for (i = 0; i < POINTER_REGION_COUNT; i++) {
+        if (manager[2 + i * 2] == -1) {
+            manager[2 + i * 2] = groupHandle;
+            manager[3 + i * 2] = childIndex;
+            manager[1]++;
+            return i;
+        }
+    }
+    return -1;
+}
+
+void PointerManager_UnregisterRegion(int *manager, int region) {
+    /* 0x8010EC30 */
+    if (manager == 0 || region < 0 || region >= POINTER_REGION_COUNT) {
+        return;
+    }
+    manager[2 + region * 2] = -1;
+    manager[3 + region * 2] = -1;
+    manager[1]--;
+}
+
+int PointerManager_HitTestRegion(int *manager, int *hitPerChannel, int region) {
+    /* 0x8010EC54: bit mask of remotes whose usable pointer (0x1|0x4|0x8|0x40, not
+       0x10/0x20) lies inside the region's child object. */
+    int group;
+    int child;
+    int hits = 0;
+    int channel;
+
+    if (hitPerChannel != 0) {
+        memset(hitPerChannel, 0, 4 * sizeof(int));
+    }
+    if (manager == 0 || region < 0 || region >= POINTER_REGION_COUNT) {
+        return 0;
+    }
+    group = manager[2 + region * 2];
+    child = manager[3 + region * 2];
+    if (group == -1 || child == -1 || CzanUiManager_IsChildObjectHidden(0, group, child)) {
+        return 0;
+    }
+    for (channel = 0; channel < 4; channel++) {
+        unsigned char *record = PointerManager_GetRecord(manager, channel);
+        int flags = POINTER_FLAGS(record);
+        int hit = 0;
+
+        if ((flags & 1) && (flags & 4) && (flags & 8) && !(flags & 0x10) && !(flags & 0x20) && (flags & 0x40)) {
+            hit = CzanUiManager_HitTestChildObject(0, group, child, POINTER_POS(record)[0], POINTER_POS(record)[1]);
+        }
+        if (hitPerChannel != 0) {
+            hitPerChannel[channel] = hit;
+        }
+        hits |= hit;
+    }
+    return hits;
+}
+
+void PointerManager_SetCooldown(int *manager, int channel) {
+    /* 0x8010EEC4 with r4 == 0: 1.5 s before the pointer is granted again. */
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        if (channel == 4 || channel == i) {
+            POINTER_COOLDOWN(PointerManager_GetRecord(manager, i)) = 1.5f;
+        }
+    }
+}
+
+void PointerManager_SetHidden(int *manager, int hidden) {
+    /* 0x8010EFB0 */
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        unsigned char *record = PointerManager_GetRecord(manager, i);
+        POINTER_FLAGS(record) = PointerFlags_Set(POINTER_FLAGS(record), 0x200, hidden);
+    }
+}
+
+void PointerManager_SetSingleMode(int *manager, int singleMode) {
+    /* 0x8010EEBC: +0x804 */
+    if (manager != 0) {
+        manager[0x804 / 4] = singleMode;
+    }
+}
+
+int *GameMain_GetPointerManager(void) {
+    return gGameMainManagers.manager802e70b4;
+}
+
+int PointerManager_IsOnScreen(int *manager, int channel) {
+    /* 0x8010F014: channel 4 = any remote. */
+    int i;
+
+    if (manager == 0) {
+        return 0;
+    }
+    for (i = 0; i < 4; i++) {
+        if ((channel == 4 || channel == i) &&
+            (POINTER_FLAGS(PointerManager_GetRecord(manager, i)) & 8) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void PointerManager_DrawHost(int *manager) {
+    /* Host bridge: the retail global Czan list draws the cursor entries with the
+       front-most priorities; the host's scoped draws add them last. */
+    int handles[12];
+    int count = 0;
+    int channel;
+    int i;
+
+    if (manager == 0 || (manager[0] & 1) == 0) {
+        return;
+    }
+    for (channel = 0; channel < 4; channel++) {
+        for (i = 1; i <= 2; i++) {
+            int handle = CSelModeEntry_GetObjectHandle(POINTER_ENTRY(PointerManager_GetRecord(manager, channel), i), 0);
+            if (handle >= 0) {
+                handles[count++] = handle;
+            }
+        }
+    }
+    CzanUiManager_DrawObjectGroupsReverse(0, handles, count);
 }
 
 static void GlobalCueManager_Update(int *manager) {
@@ -1337,6 +1875,9 @@ int GameMain(void) {
     const char *startModule = getenv("DDRII_HOST_START");
 
     setvbuf(stdout, 0, _IONBF, 0);
+    if (!HostPointer_CheckLowAddressSpace()) {
+        return 1;
+    }
 
     ClearMemory(&mainLoopManager, 0, sizeof(mainLoopManager));
     ClearMemory(&moduleController, 0, sizeof(moduleController));
@@ -1632,7 +2173,6 @@ void BootResourceBundle_ApplyLoadedResources(int *resourceBundle) {
        and FUN_8010E770(gManager_802E70B4, Pointer) still need full bodies. Keep
        the exact data flow visible and call the recovered managers we do have. */
     (void)miiLinkData;
-    (void)pointerLinkData;
 
     if (textLinkData != 0) {
         TextManager_LoadResource(gGameMainManagers.manager802e70b0, textLinkData);
@@ -1644,7 +2184,14 @@ void BootResourceBundle_ApplyLoadedResources(int *resourceBundle) {
         CharacterAssetManager_LoadSelectCommon(gGameMainManagers.characterAssetManager, selectCommonLinkData);
     }
     if (uiRootLinkData != 0) {
-        UiRootManager_RegisterResource(gGameMainManagers.uiRootManager, uiRootLinkData);
+        /* 0x800FE548: the full loader, as in the DOL. Groups created with flags 0 stay
+           inert and hidden until a state machine starts them (Czan +0x171/+0xB0), so
+           comAF no longer appears all at once. This creates uiRoot +0x0C (fade quad)
+           and +0x10 (dimmer) used by the title transitions. */
+        UiRootManager_LoadResource(gGameMainManagers.uiRootManager, uiRootLinkData);
+    }
+    if (pointerLinkData != 0) {
+        PointerManager_Load(gGameMainManagers.manager802e70b4, pointerLinkData);
     }
     if (ssqCommonLinkData != 0) {
         LargeResourceManager_ReloadFromDefaultLink(
@@ -1886,110 +2433,748 @@ static int CSelectBootTitleFlow_Init(CSelectBootTitleFlow *flow) {
     return (int)(intptr_t)flow;
 }
 
-static int CSelectBootTitleFlow_Tick(CSelectBootTitleFlow *flow, int forceIdle) {
+static float Runtime_GetFrameStep(void) {
+    /* Shared by several per-frame updates (0x800CC690, 0x800E1988, ...):
+       step = 60.0f / (settings +0x50 / (settings +0x54 + 1)), settings =
+       DAT_802E71B8 +0x258. 1.0 at 60 Hz with no frame skip; the host does not fill
+       these fields yet, so fall back to 1.0. */
+    int *settings = GlobalRuntimeContext_GetPointerAt(0x258);
+    float rate;
+    int divisor;
+
+    if (settings == 0) {
+        return 1.0f;
+    }
+    rate = *(float *)(void *)(settings + 0x50 / 4);
+    divisor = settings[0x54 / 4] + 1;
+    if (!(rate > 0.0f) || divisor <= 0) {
+        return 1.0f;
+    }
+    return 60.0f / (rate / (float)divisor);
+}
+
+/* ---- Save data manager (gManager_802E70E0, 0x28F58 bytes) ----------------------
+   +0x00000      pointer to the NAND transfer buffer
+   +0x00004      save image, 0x28F38 bytes (what is written to the save file)
+   +0x28DA4      boot flags (bit 0x2 = boot import done; inside the save image)
+   +0x28EE4      runtime flags (bit 0x1 cleared by 0x8009B9AC)
+   +0x28F44      "loaded data is valid" (0x8009B99C sets, 0x8009B9AC clears)
+   +0x28F48..54  NAND operation handles; +0x28F54 = DDR (first game) import object
+   On the Wii the file I/O runs asynchronously through the NAND manager
+   (DAT_802E71B8 +0x264, 0x80165xxx/0x80166xxx). The PC port keeps the save image
+   unchanged in save/ddr2.dat next to the exe and performs each operation
+   synchronously, so the NAND manager is never busy. */
+#define SAVE_IMAGE_SIZE 0x28f38
+#define SAVE_MANAGER_LOADED_VALID_OFFSET 0x28f44
+#define SAVE_MANAGER_RUNTIME_FLAGS_OFFSET 0x28ee4
+
+enum {
+    SAVE_LOAD_OK = 0,
+    SAVE_LOAD_NO_FILE = 1,
+    SAVE_LOAD_CORRUPT = 2
+};
+
+static unsigned char gSaveHostBuffer[SAVE_IMAGE_SIZE];
+static int gSaveHostLoadResult = SAVE_LOAD_NO_FILE;
+
+static void SaveHost_GetPath(char *path, size_t size, int temporary) {
+    char exePath[MAX_PATH];
+    char *slash;
+
+    if (GetModuleFileNameA(0, exePath, sizeof(exePath)) == 0) {
+        strcpy(exePath, ".\\x.exe");
+    }
+    slash = strrchr(exePath, '\\');
+    if (slash != 0) {
+        slash[1] = '\0';
+    }
+    snprintf(path, size, "%ssave\\ddr2.dat%s", exePath, temporary ? ".tmp" : "");
+}
+
+static int SaveDataManager_IsNandBusy(void) {
+    /* 0x80166CB8(NAND manager): host operations complete immediately. */
+    return 0;
+}
+
+static int SaveDataManager_CheckFreeSpace(void) {
+    /* 0x801660E8(NAND manager): 0 ok, 4 not enough blocks, 5 not enough inodes. */
+    return 0;
+}
+
+static void SaveDataManager_StartLoad(int *saveManager) {
+    /* 0x8009A850: open and read the save file into the NAND buffer. */
+    char path[MAX_PATH + 32];
+    FILE *file;
+    size_t got;
+    int extra;
+
+    (void)saveManager;
+    SaveHost_GetPath(path, sizeof(path), 0);
+    file = fopen(path, "rb");
+    if (file == 0) {
+        gSaveHostLoadResult = SAVE_LOAD_NO_FILE;
+        RuntimeDebugReport("SaveData: no save file (%s)\n", path);
+        return;
+    }
+    got = fread(gSaveHostBuffer, 1, SAVE_IMAGE_SIZE, file);
+    extra = fgetc(file);
+    fclose(file);
+    gSaveHostLoadResult = (got == SAVE_IMAGE_SIZE && extra == EOF) ? SAVE_LOAD_OK : SAVE_LOAD_CORRUPT;
+    RuntimeDebugReport("SaveData: read %s -> %s\n", path, gSaveHostLoadResult == SAVE_LOAD_OK ? "ok" : "corrupt");
+}
+
+static int SaveDataManager_GetLoadResult(int *saveManager) {
+    /* 0x8009A8B0: 0 loaded, 1 no file, other = error (corrupt / access error). */
+    (void)saveManager;
+    return gSaveHostLoadResult;
+}
+
+static void SaveDataManager_EndOperation(int *saveManager) {
+    /* 0x8009AACC: release the finished NAND operation handle. */
+    (void)saveManager;
+}
+
+static void SaveDataManager_StartSpaceCheck(int *saveManager) {
+    /* 0x8009AAB4 -> 0x80165FC8: query free blocks/inodes for the new file. */
+    (void)saveManager;
+}
+
+static void SaveDataManager_MarkLoadedValid(int *saveManager) {
+    /* 0x8009B99C */
+    if (saveManager != 0) {
+        *(int *)(void *)((unsigned char *)saveManager + SAVE_MANAGER_LOADED_VALID_OFFSET) = 1;
+    }
+}
+
+static void SaveDataManager_ClearLoadedValid(int *saveManager) {
+    /* 0x8009B9AC */
+    if (saveManager != 0) {
+        unsigned char *bytes = (unsigned char *)saveManager;
+
+        *(int *)(void *)(bytes + SAVE_MANAGER_LOADED_VALID_OFFSET) = 0;
+        *(unsigned int *)(void *)(bytes + SAVE_MANAGER_RUNTIME_FLAGS_OFFSET) &= ~1u;
+    }
+}
+
+static void SaveDataManager_ApplyToGame(int *saveManager) {
+    /* 0x8009A99C distributes the save image into the game managers (records,
+       unlocks, options, Mii backup dancers via gManager_802E70D0, ...).
+       TODO: not ported yet; the image is kept in the manager only. */
+    (void)saveManager;
+    RuntimeDebugReport("SaveData: apply-to-game (0x8009A99C) not ported yet\n");
+}
+
+static void SaveDataManager_ApplyLoaded(int *saveManager) {
+    /* 0x8009A948: when the loaded data is valid, copy the buffer into the image. */
+    if (saveManager == 0 ||
+        *(int *)(void *)((unsigned char *)saveManager + SAVE_MANAGER_LOADED_VALID_OFFSET) != 1) {
+        return;
+    }
+    memcpy((unsigned char *)saveManager + 4, gSaveHostBuffer, SAVE_IMAGE_SIZE);
+    SaveDataManager_ApplyToGame(saveManager);
+}
+
+static void SaveDataManager_InitNewData(int *saveManager, int forBootCreate) {
+    /* 0x8009AC64: clear the image and fill the defaults for a new file.
+       TODO: only the clear is ported; the default tables (0x80273700 +0xA0 ...)
+       are filled once this function is ported. */
+    (void)forBootCreate;
+    if (saveManager != 0) {
+        memset((unsigned char *)saveManager + 4, 0, SAVE_IMAGE_SIZE);
+    }
+    RuntimeDebugReport("SaveData: new-file defaults (0x8009AC64) only cleared, not ported yet\n");
+}
+
+static void SaveDataManager_WriteFile(int *saveManager) {
+    /* 0x8009AB1C: copy the image into the NAND buffer and write the file. */
+    char path[MAX_PATH + 32];
+    char tempPath[MAX_PATH + 32];
+    char dir[MAX_PATH + 32];
+    char *slash;
+    FILE *file;
+    int ok = 0;
+
+    if (saveManager == 0) {
+        return;
+    }
+    memcpy(gSaveHostBuffer, (unsigned char *)saveManager + 4, SAVE_IMAGE_SIZE);
+    SaveHost_GetPath(path, sizeof(path), 0);
+    SaveHost_GetPath(tempPath, sizeof(tempPath), 1);
+    strcpy(dir, path);
+    slash = strrchr(dir, '\\');
+    if (slash != 0) {
+        *slash = '\0';
+        CreateDirectoryA(dir, 0);
+    }
+    file = fopen(tempPath, "wb");
+    if (file != 0) {
+        ok = fwrite(gSaveHostBuffer, 1, SAVE_IMAGE_SIZE, file) == SAVE_IMAGE_SIZE;
+        ok = (fclose(file) == 0) && ok;
+    }
+    if (ok) {
+        ok = MoveFileExA(tempPath, path, MOVEFILE_REPLACE_EXISTING) != 0;
+    }
+    RuntimeDebugReport("SaveData: write %s -> %s\n", path, ok ? "ok" : "FAILED");
+}
+
+static void SaveDataManager_DeleteFile(int *saveManager) {
+    /* 0x8009AB90: delete the save file (corrupted data -> "Delete file"). */
+    char path[MAX_PATH + 32];
+
+    (void)saveManager;
+    SaveHost_GetPath(path, sizeof(path), 0);
+    DeleteFileA(path);
+    gSaveHostLoadResult = SAVE_LOAD_NO_FILE;
+    RuntimeDebugReport("SaveData: deleted %s\n", path);
+}
+
+/* DDR (first game) save import, object at save manager +0x28F54. It only exists
+   when the console has a DanceDanceRevolution save; the PC has none, so the game
+   reports "No save data for DanceDanceRevolution found." exactly like such a Wii. */
+static int SaveDataManager_IsImportBusy(int *saveManager) { (void)saveManager; return 0; }      /* 0x8009C264 */
+static void SaveDataManager_PollImport(int *saveManager) { (void)saveManager; }                /* 0x8009C1B4 */
+static int SaveDataManager_ImportFound(int *saveManager) { (void)saveManager; return 0; }      /* 0x8009C294 */
+static int SaveDataManager_ImportAlreadyUnlocked(int *saveManager) { (void)saveManager; return 0; } /* 0x8009C2B4 */
+static void SaveDataManager_ApplyImport(int *saveManager) { (void)saveManager; }               /* 0x8009C1F8 */
+static void SaveDataManager_FinishImportRead(int *saveManager) { (void)saveManager; }          /* 0x8009C170 */
+static void SaveDataManager_ReleaseImport(int *saveManager) { (void)saveManager; }             /* 0x8009C080 */
+
+static void SaveFlow_ShowMessage(int message, int selectedOption) {
+    /* Configure prompt text (block 0 = save messages) and preselect a choice. */
+    UiRootManager_ConfigureBootTransitionPrompt(gGameMainManagers.uiRootManager, 0, message);
+    if (selectedOption >= 0) {
+        UiRootManager_SetBootTransitionSelectedOption(gGameMainManagers.uiRootManager, selectedOption);
+    }
+}
+
+static void SaveFlow_ShowNotice(int message) {
+    /* Configure + 0x80100288(1): message that waits for A (state 0x16). */
+    UiRootManager_ConfigureBootTransitionPrompt(gGameMainManagers.uiRootManager, 0, message);
+    UiRootManager_SetBootTransitionAdvanceLock(gGameMainManagers.uiRootManager, 1);
+}
+
+static void SaveFlow_Close(void) {
+    UiRootManager_CloseBootTransitionController(gGameMainManagers.uiRootManager);
+}
+
+static void SaveFlow_Update(int *flowOwner, float step) {
+    /* 0x800CCD2C: save-data flow on gManager_802E70C4 (jump table 0x802BD220).
+       Text messages are text block 0 (tools/dump_text.py --block 0). */
+    int *saveManager = gGameMainManagers.manager802e70e0;
+    int *uiRoot = gGameMainManagers.uiRootManager;
+    float *timer;
     int state;
+    int result;
+
+    if (flowOwner == 0) {
+        return;
+    }
+    timer = (float *)(void *)(flowOwner + 0x28 / 4);
+    state = flowOwner[0x24 / 4];
+
+#define SAVE_SET_STATE(s) (flowOwner[0x24 / 4] = (s))
+    switch (state) {
+        case 1:   /* boot load: "Loading." */
+        case 2: { /* reload */
+            *timer += step;
+            if (SaveDataManager_IsNandBusy()) {
+                break;
+            }
+            result = SaveDataManager_GetLoadResult(saveManager);
+            if (result == SAVE_LOAD_OK) {
+                if (*timer >= 60.0f) {
+                    SaveDataManager_EndOperation(saveManager);
+                    if (state == 1) {
+                        SaveDataManager_MarkLoadedValid(saveManager);
+                        SaveDataManager_ApplyLoaded(saveManager);
+                    }
+                    SaveFlow_Close();
+                    SAVE_SET_STATE(0x0e);
+                }
+            }
+            else if (result == SAVE_LOAD_NO_FILE) {
+                SaveDataManager_EndOperation(saveManager);
+                SaveDataManager_StartSpaceCheck(saveManager);
+                SAVE_SET_STATE(3);
+            }
+            else if (*timer >= 60.0f) {
+                /* "The file cannot be used because the data is corrupted." */
+                SaveDataManager_EndOperation(saveManager);
+                SaveFlow_ShowMessage(13, 1);
+                SAVE_SET_STATE(4);
+            }
+            break;
+        }
+        case 3:
+            /* No file: check free space, then offer to create one. */
+            *timer += step;
+            if (SaveDataManager_IsNandBusy() || *timer < 60.0f) {
+                break;
+            }
+            switch (SaveDataManager_CheckFreeSpace()) {
+                case 0:
+                    /* "There is no file loaded..." -> "Create new file. Proceed? Yes/No" */
+                    SaveFlow_ShowMessage(0, 0);
+                    SAVE_SET_STATE(6);
+                    break;
+                case 4:
+                    SaveFlow_ShowMessage(2, 1);
+                    SAVE_SET_STATE(8);
+                    break;
+                case 5:
+                    SaveFlow_ShowMessage(5, 1);
+                    SAVE_SET_STATE(9);
+                    break;
+                default:
+                    break;
+            }
+            break;
+        case 4:
+            /* Corrupted: "Continue without saving / loading" or "Delete file". */
+            result = UiRootManager_GetBootTransitionResult(uiRoot);
+            if (result == 0) {
+                SaveFlow_ShowMessage(9, 1);
+                SAVE_SET_STATE(0x0a);
+            }
+            else if (result == 1) {
+                SaveFlow_ShowMessage(12, -1); /* "Deleting data." */
+                *timer = 0.0f;
+                SaveDataManager_DeleteFile(saveManager);
+                SAVE_SET_STATE(5);
+            }
+            break;
+        case 5:
+            *timer += step;
+            if (!SaveDataManager_IsNandBusy()) {
+                SaveDataManager_EndOperation(saveManager);
+                SaveDataManager_StartSpaceCheck(saveManager);
+                SAVE_SET_STATE(3);
+            }
+            break;
+        case 6:
+            /* "Create new file. Proceed?" */
+            result = UiRootManager_GetBootTransitionResult(uiRoot);
+            if (result == 0) {
+                SaveFlow_ShowMessage(8, -1); /* "Creating data." */
+                *timer = 0.0f;
+                if (flowOwner[0x2c / 4] == 1) {
+                    SaveDataManager_InitNewData(saveManager, 1);
+                }
+                SaveDataManager_MarkLoadedValid(saveManager);
+                SaveDataManager_WriteFile(saveManager);
+                SaveDataManager_ApplyLoaded(saveManager);
+                SAVE_SET_STATE(7);
+            }
+            else if (result == 1) {
+                /* "You will not save. Continue playing?" */
+                SaveFlow_ShowMessage(9, 1);
+                SAVE_SET_STATE(0x0d);
+            }
+            break;
+        case 7:
+            *timer += step;
+            if (!SaveDataManager_IsNandBusy() && *timer >= 60.0f) {
+                SaveDataManager_EndOperation(saveManager);
+                SaveFlow_Close();
+                SAVE_SET_STATE(0x0e);
+            }
+            break;
+        case 8:
+        case 9:
+            /* Not enough space: continue without saving / return to the Wii Menu. */
+            result = UiRootManager_GetBootTransitionResult(uiRoot);
+            if (result == 0) {
+                SaveFlow_ShowMessage(9, 1);
+                SAVE_SET_STATE(state == 8 ? 0x0b : 0x0c);
+            }
+            else if (result == 1) {
+                SaveFlow_Close();
+                SAVE_SET_STATE(0x0f);
+            }
+            break;
+        case 0x0a:
+        case 0x0b:
+        case 0x0c:
+        case 0x0d:
+            /* "You will not save. Continue playing?" */
+            result = UiRootManager_GetBootTransitionResult(uiRoot);
+            if (result == 0) {
+                SaveFlow_Close();
+                SaveDataManager_ClearLoadedValid(saveManager);
+                if (flowOwner[0x2c / 4] == 1) {
+                    SaveDataManager_InitNewData(saveManager, 0);
+                }
+                else {
+                    SaveDataManager_ApplyToGame(saveManager);
+                }
+                SAVE_SET_STATE(0x0e);
+            }
+            else if (result == 1) {
+                if (state == 0x0a) {
+                    SaveFlow_ShowMessage(13, 1);
+                    SAVE_SET_STATE(4);
+                }
+                else if (state == 0x0d) {
+                    SaveFlow_ShowMessage(0, 0);
+                    SAVE_SET_STATE(6);
+                }
+                else if (state == 0x0b) {
+                    SaveFlow_ShowMessage(2, 1);
+                    SAVE_SET_STATE(8);
+                }
+                else {
+                    SaveFlow_ShowMessage(5, 1);
+                    SAVE_SET_STATE(9);
+                }
+            }
+            break;
+        case 0x0e:
+            if (UiRootManager_IsBootTransitionControllerIdle(uiRoot) != 0) {
+                SAVE_SET_STATE(0x11);
+            }
+            break;
+        case 0x0f:
+        case 0x10:
+            /* Exit requests: global +0x274 -> +0xA0 = 2 (Data Management) / 1 (Wii Menu). */
+            if (UiRootManager_IsBootTransitionControllerIdle(uiRoot) != 0) {
+                int *submanager274 = GlobalRuntimeContext_GetPointerAt(0x274);
+
+                SAVE_SET_STATE(0x11);
+                if (submanager274 != 0) {
+                    submanager274[0xa0 / 4] = state == 0x0f ? 2 : 1;
+                }
+            }
+            break;
+        case 0x12:
+            /* DDR (first game) save import: "Loading DanceDanceRevolution Save Data." */
+            *timer += step;
+            if (SaveDataManager_IsImportBusy(saveManager) == 0) {
+                SaveDataManager_PollImport(saveManager);
+                if (*timer >= 60.0f) {
+                    unsigned int flags = (unsigned int)flowOwner[0x30 / 4];
+
+                    if (SaveDataManager_ImportFound(saveManager) == 1) {
+                        if ((flags & 1u) != 0) {
+                            if (SaveDataManager_ImportAlreadyUnlocked(saveManager) == 1) {
+                                if ((flags & 2u) != 0) {
+                                    SaveFlow_ShowNotice(0x16);
+                                    SAVE_SET_STATE(0x16);
+                                }
+                                else {
+                                    SAVE_SET_STATE(0x17);
+                                }
+                            }
+                            else {
+                                SaveFlow_ShowMessage(0x17, 1); /* "Do you want to unlock...?" */
+                                SAVE_SET_STATE(0x14);
+                            }
+                        }
+                        else if ((flags & 2u) != 0) {
+                            SaveFlow_ShowNotice(0x14);
+                            SAVE_SET_STATE(0x16);
+                        }
+                        else {
+                            SAVE_SET_STATE(0x17);
+                        }
+                    }
+                    else {
+                        /* "No save data for DanceDanceRevolution found." */
+                        SaveFlow_ShowNotice(0x15);
+                        SAVE_SET_STATE(0x16);
+                        flowOwner[0x30 / 4] = (int)(flags | 4u);
+                    }
+                }
+            }
+            if (flowOwner[0x24 / 4] == 0x17) {
+                SaveFlow_Close();
+            }
+            break;
+        case 0x14:
+            result = UiRootManager_GetBootTransitionResult(uiRoot);
+            if (result == 0) {
+                SaveDataManager_ApplyImport(saveManager);
+                SaveDataManager_FinishImportRead(saveManager);
+                UiRootManager_ConfigureBootTransitionPrompt(uiRoot, 0, 0x1a);
+                SAVE_SET_STATE(0x15);
+                *timer = 0.0f;
+            }
+            else if (result == 1) {
+                SaveFlow_Close();
+                SAVE_SET_STATE(0x17);
+            }
+            break;
+        case 0x15:
+            *timer += step;
+            if (SaveDataManager_IsImportBusy(saveManager) == 0 && *timer >= 60.0f) {
+                if (((unsigned int)flowOwner[0x30 / 4] & 2u) != 0) {
+                    SaveFlow_ShowNotice(0x18);
+                    SAVE_SET_STATE(0x16);
+                }
+                else {
+                    SaveFlow_Close();
+                    SAVE_SET_STATE(0x17);
+                }
+            }
+            break;
+        case 0x16:
+            /* Notice: wait for A. */
+            if (InputOrMenuStateManager_IsConfirmPressed(gGameMainManagers.inputOrMenuStateManager, 4) != 0) {
+                SaveFlow_Close();
+                SAVE_SET_STATE(0x17);
+                CharacterAssetManager_PlayCue(flowOwner, 0x265);
+            }
+            break;
+        case 0x17:
+            if (UiRootManager_IsBootTransitionControllerIdle(uiRoot) != 0) {
+                if (((unsigned int)flowOwner[0x30 / 4] & 4u) != 0) {
+                    SaveDataManager_ReleaseImport(saveManager);
+                }
+                SAVE_SET_STATE(0x11);
+            }
+            break;
+        default:
+            break;
+    }
+#undef SAVE_SET_STATE
+
+    if (flowOwner[0x24 / 4] != state) {
+        const char *trace = getenv("DDRII_TRACE_TITLE");
+
+        RuntimeDebugReport("SaveFlow: state 0x%x -> 0x%x\n", state, flowOwner[0x24 / 4]);
+        if (trace != 0 && trace[0] == '1' && uiRoot != 0) {
+            /* Prompt controller groups (uiRoot +0x30): [0] window, [1]/[2] text
+               panels, [3..8] buttons, [9]/[10] page/next indicators. */
+            int *controller = (int *)UiRootHostPointerFromBits(uiRoot[0x0c]);
+            int i;
+
+            RuntimeDebugReport("  uiRoot groups [1..4] = %d %d %d %d\n", uiRoot[1], uiRoot[2], uiRoot[3], uiRoot[4]);
+            for (i = 0; controller != 0 && i <= 10; i++) {
+                RuntimeDebugReport("  prompt group c[%d] = %d\n", i, controller[i]);
+            }
+            for (i = 0; controller != 0 && i <= 10; i++) {
+                char tag[16];
+
+                snprintf(tag, sizeof(tag), "prompt%d", i);
+                CzanUiManager_DebugDumpGroup(controller[i], tag);
+            }
+        }
+    }
+}
+
+/* gManager_802E70E0 (save/player-data manager) status flags live at +0x28DA4
+   (addis +3, -0x725C). Bit 0x2 = the boot save load/import has run. */
+#define SAVE_MANAGER_FLAGS_OFFSET 0x28da4
+
+static unsigned int *SaveDataManager_GetFlags(int *saveManager) {
+    if (saveManager == 0) {
+        return 0;
+    }
+    return (unsigned int *)(void *)((unsigned char *)saveManager + SAVE_MANAGER_FLAGS_OFFSET);
+}
+
+static int SaveDataManager_NeedsBootImport(int *saveManager) {
+    /* 0x8009BDFC: returns 1 while flag bit 0x2 is clear. */
+    unsigned int *flags = SaveDataManager_GetFlags(saveManager);
+
+    return flags == 0 || (*flags & 2U) == 0;
+}
+
+static void SaveDataManager_MarkBootImportDone(int *saveManager) {
+    /* 0x8009BE14 */
+    unsigned int *flags = SaveDataManager_GetFlags(saveManager);
+
+    if (flags != 0) {
+        *flags |= 2U;
+    }
+}
+
+static int MiiStore_ValidateBackupDancers(void) {
+    /* 0x800F3A34(gManager_802E70D0 +0x14A4): with Mii data available, checks each
+       of the 6 saved backup-dancer Mii references (0x8009BEE8 / 0x80189DCC) and
+       returns 0 when a referenced Mii has been deleted. The host has no Mii
+       database, so no reference can be broken. */
+    return 1;
+}
+
+/* Save-data flow on gManager_802E70C4 (host characterAssetManager): +0x24 state
+   (0x11 = idle), +0x28 timer, +0x2C/+0x30 flow flags. */
+#define SAVE_FLOW_STATE_IDLE 0x11
+
+static void SaveFlow_StartBootLoad(int *flowOwner, int showSecondChild) {
+    /* 0x800CCBE4: start the boot save-data load ("Loading. Please do not touch..."). */
+    if (flowOwner == 0 || flowOwner[0x24 / 4] != SAVE_FLOW_STATE_IDLE) {
+        return;
+    }
+    SaveDataManager_StartLoad(gGameMainManagers.manager802e70e0);
+    UiRootManager_StartBootTransitionController(gGameMainManagers.uiRootManager, 6, 0, 0, showSecondChild);
+    UiRootManager_ConfigureBootTransitionPrompt(gGameMainManagers.uiRootManager, 0, 10);
+    flowOwner[0x24 / 4] = 1;
+    *(float *)(void *)(flowOwner + 0x28 / 4) = 0.0f;
+    flowOwner[0x2c / 4] = 1;
+    RuntimeDebugReport("SaveFlow: boot load started (state 1)\n");
+}
+
+static void SaveFlow_StartBootImport(int *flowOwner, int showSecondChild, int flagA, int flagB, int flagC) {
+    /* 0x800CCC68: start the DDR (first game) save import ("Loading
+       DanceDanceRevolution Save Data", text block 0 message 25). */
+    if (flowOwner == 0 || flowOwner[0x24 / 4] != SAVE_FLOW_STATE_IDLE) {
+        return;
+    }
+    /* 0x8009BF88 / 0x8009C12C(gManager_802E70E0): prepare the import buffers. */
+    UiRootManager_StartBootTransitionController(gGameMainManagers.uiRootManager, 6, 0, 0, showSecondChild);
+    UiRootManager_ConfigureBootTransitionPrompt(gGameMainManagers.uiRootManager, 0, 0x19);
+    flowOwner[0x24 / 4] = 0x12;
+    flowOwner[0x30 / 4] = (flagA != 0 ? 1 : 0) | (flagB != 0 ? 2 : 0) | (flagC != 0 ? 4 : 0);
+    *(float *)(void *)(flowOwner + 0x28 / 4) = 0.0f;
+    flowOwner[0x2c / 4] = 0;
+    RuntimeDebugReport("SaveFlow: boot import started (state 0x12)\n");
+}
+
+static void CSelectBootTitleFlow_OnEnter(CSelectBootTitleFlow *flow) {
+    /* 0x800DE068 (vtable enter): cue mode 0, owner +0x10 -> [0] = 0 (host has no
+       owner record yet), fade quad out of white (A anim 1) and background dimmer on
+       (C anim 0, priority 100): the darker stage behind the save prompt and NOTICE. */
+    (void)flow;
+    CharacterAssetManager_SetCueMode(gGameMainManagers.characterAssetManager, 0);
+    UiRootManager_StartTitleTransitionA(gGameMainManagers.uiRootManager, 1, 0, 0);
+    UiRootManager_StartTitleTransitionC(gGameMainManagers.uiRootManager, 0, 100, 0);
+}
+
+static int CSelectBootTitleFlow_Tick(CSelectBootTitleFlow *flow, int forceIdle) {
+    /* 0x800DE0DC: CSelect state 0. Mii-data check, then the boot save load/import,
+       then hands off to the title flow (returns 0x0C). Jump table 0x802BD2D0. */
+    int state;
+    int next = 0;
     int *uiRootManager;
-    int *playerDataManager;
+    int *flowOwner;
+    int *saveManager;
 
     if (flow == 0 || forceIdle == 1) {
         return 0;
     }
 
-    /* 0x800DE0DC. This is intentionally still a partial port: every branch below
-       is from the recovered state machine, but several UI/save helpers are not
-       implemented yet and are called only when a named host equivalent exists. */
     state = *(int *)(void *)(flow->storage + 0x130);
     uiRootManager = gGameMainManagers.uiRootManager;
-    playerDataManager = gGameMainManagers.playerDataManager;
+    flowOwner = gGameMainManagers.characterAssetManager;
+    saveManager = gGameMainManagers.manager802e70e0;
 
+#define BOOT_SET_STATE(s) (*(int *)(void *)(flow->storage + 0x130) = (s))
     switch (state) {
         case 0:
             if (UiRootManager_IsTitleTransitionAIdle(uiRootManager) != 0 &&
                 UiRootManager_IsTitleTransitionCIdle(uiRootManager) != 0) {
-                *(int *)(void *)(flow->storage + 0x130) = 1;
+                BOOT_SET_STATE(1);
             }
             break;
         case 1:
-            /* DAT_802E71F8[0] == 1 skips the save prompt path. The host UI-frame
-               state object is not mapped yet, so keep the default save-check path. */
+            if (gMiiManagerState[0] == 1) {
+                BOOT_SET_STATE(4);
+                break;
+            }
+            /* "Mii Channel save data could not be read" ->
+               Continue without Mii characters / Return to the Wii Menu. */
             UiRootManager_StartBootTransitionController(uiRootManager, 6, 1, 0, 1);
             UiRootManager_ConfigureBootTransitionPrompt(uiRootManager, 9, 0);
-            *(int *)(void *)(flow->storage + 0x130) = 2;
+            BOOT_SET_STATE(2);
             UiRootManager_SetBootTransitionSelectedOption(uiRootManager, 1);
             *(float *)(void *)(flow->storage + 0x134) = 0.0f;
             break;
         case 2:
             if (UiRootManager_GetBootTransitionResult(uiRootManager) == 0) {
+                /* "You will not be able to use Mii characters. Proceed? Yes/No" */
                 UiRootManager_ConfigureBootTransitionPrompt(uiRootManager, 9, 2);
-                *(int *)(void *)(flow->storage + 0x130) = 3;
+                BOOT_SET_STATE(3);
                 UiRootManager_SetBootTransitionSelectedOption(uiRootManager, 1);
             }
             else if (UiRootManager_GetBootTransitionResult(uiRootManager) == 1) {
                 UiRootManager_CloseBootTransitionController(uiRootManager);
-                *(int *)(void *)(flow->storage + 0x130) = 6;
+                BOOT_SET_STATE(6);
             }
             break;
         case 3:
             if (UiRootManager_GetBootTransitionResult(uiRootManager) == 0) {
                 UiRootManager_CloseBootTransitionController(uiRootManager);
-                *(int *)(void *)(flow->storage + 0x130) = 4;
+                BOOT_SET_STATE(4);
             }
             else if (UiRootManager_GetBootTransitionResult(uiRootManager) == 1) {
                 UiRootManager_ConfigureBootTransitionPrompt(uiRootManager, 9, 0);
-                *(int *)(void *)(flow->storage + 0x130) = 2;
+                BOOT_SET_STATE(2);
                 UiRootManager_SetBootTransitionSelectedOption(uiRootManager, 1);
             }
             break;
         case 4:
             if (UiRootManager_IsBootTransitionControllerIdle(uiRootManager) != 0) {
-                *(int *)(void *)(flow->storage + 0x130) = 5;
+                SaveFlow_StartBootLoad(flowOwner, 0);
+                BOOT_SET_STATE(5);
             }
             break;
         case 5:
-            if (CharacterAssetManager_IsSelectCommonIdle(gGameMainManagers.characterAssetManager) == 0) {
+            if (CharacterAssetManager_IsSelectCommonIdle(flowOwner) == 0) {
                 break;
             }
-            if (playerDataManager == 0 || PlayerDataManager_GetSetupFieldF8(playerDataManager) == 0) {
-                *(int *)(void *)(flow->storage + 0x130) = 7;
+            if (MiiStore_ValidateBackupDancers() != 0) {
+                if (SaveDataManager_NeedsBootImport(saveManager) == 0) {
+                    BOOT_SET_STATE(10);
+                    next = 0x0c;
+                }
+                else {
+                    SaveFlow_StartBootImport(flowOwner, 0, 1, 1, 1);
+                    BOOT_SET_STATE(9);
+                }
+            }
+            else {
+                /* "The Mii character set as MY BACKUP DANCER has been deleted." */
+                BOOT_SET_STATE(7);
                 UiRootManager_StartBootTransitionController(uiRootManager, 6, 1, 0, 1);
                 UiRootManager_ConfigureBootTransitionPrompt(uiRootManager, 9, 4);
             }
-            else {
-                *(int *)(void *)(flow->storage + 0x130) = 10;
-                return 0x0c;
-            }
             break;
         case 6:
-            if (UiRootManager_IsSelectionPanelIdle(uiRootManager) != 0) {
-                *(int *)(void *)(flow->storage + 0x130) = 10;
+            /* "Return to the Wii Menu": global +0x274 -> +0xA0 requests the exit. */
+            if (UiRootManager_IsBootTransitionControllerIdle(uiRootManager) != 0) {
+                int *submanager274 = GlobalRuntimeContext_GetPointerAt(0x274);
+
+                BOOT_SET_STATE(10);
+                if (submanager274 != 0) {
+                    submanager274[0xa0 / 4] = 1;
+                }
             }
             break;
         case 7:
-            /* The real game waits for confirm on the create-save prompt. Without
-               the exact prompt UI loaded yet, advance only when host input says A. */
             if (UiRootManager_IsBootTransitionPromptReady(uiRootManager) != 0 &&
                 InputOrMenuStateManager_IsConfirmPressed(gGameMainManagers.inputOrMenuStateManager, 4) != 0) {
-                *(int *)(void *)(flow->storage + 0x130) = 8;
+                BOOT_SET_STATE(8);
                 UiRootManager_CloseBootTransitionController(uiRootManager);
             }
             break;
         case 8:
             if (UiRootManager_IsBootTransitionControllerIdle(uiRootManager) != 0) {
-                if (playerDataManager == 0 || PlayerDataManager_GetSetupFieldF8(playerDataManager) == 0) {
-                    *(int *)(void *)(flow->storage + 0x130) = 10;
-                    return 0x0c;
+                if (SaveDataManager_NeedsBootImport(saveManager) == 0) {
+                    BOOT_SET_STATE(10);
+                    next = 0x0c;
                 }
-                *(int *)(void *)(flow->storage + 0x130) = 9;
+                else {
+                    SaveFlow_StartBootImport(flowOwner, 0, 1, 1, 1);
+                    BOOT_SET_STATE(9);
+                }
             }
             break;
         case 9:
-            *(int *)(void *)(flow->storage + 0x130) = 10;
-            return 0x0c;
+            if (CharacterAssetManager_IsSelectCommonIdle(flowOwner) != 0) {
+                SaveDataManager_MarkBootImportDone(saveManager);
+                BOOT_SET_STATE(10);
+                next = 0x0c;
+            }
+            break;
         default:
             break;
     }
+#undef BOOT_SET_STATE
 
-    return 0;
+    if (*(int *)(void *)(flow->storage + 0x130) != state) {
+        RuntimeDebugReport("CSelect boot flow: state %d -> %d\n", state, *(int *)(void *)(flow->storage + 0x130));
+    }
+    return next;
 }
 
 static int CSelectTitleFlow_Init(CSelectTitleFlow *flow) {
@@ -2099,6 +3284,14 @@ static void CSelectTitleModelFocus_BuildInitialMatrix(CSelectTitleModelFocus *fo
         (const float *)(const void *)(bytes + 0x14),
         (const float *)(const void *)(bytes + 0x2c),
         (const float *)(const void *)(bytes + 0x20));
+    /* 0x80102E5C: FUN_8015F080(owner, fov +0x38, aspect, 1.0, 10000.0) with
+       aspect 16:9 when widescreen (global +0x258 -> +0x4C), else 4:3. */
+    {
+        int *videoSettings = GlobalRuntimeContext_GetPointerAt(0x258);
+        float aspect = (videoSettings != 0 && videoSettings[0x4c / 4] != 0) ? 1.7777778f : 1.3333334f;
+        CzanModelOwner_SetProjectionParams(
+            owner, *(float *)(void *)(bytes + 0x38), aspect, 1.0, 10000.0);
+    }
     CzanModelOwner_UpdateCurrentMatrix(owner, 0);
     CzanModelOwner_CopyCurrentModelMatrix(owner, bytes + 0x3c);
     Matrix34_Copy((float *)(void *)(bytes + 0x6c), (const float *)(const void *)(bytes + 0x3c));
@@ -2178,10 +3371,6 @@ static void CSelectTitleCoordinator_TickDraw(CSelectTitleFlow *flow) {
         (char)bytes[0xac]);
 }
 
-static int CSelect_HostConfirmPressed(void) {
-    return InputOrMenuStateManager_IsConfirmPressed(gGameMainManagers.inputOrMenuStateManager, 4) != 0 ||
-           Platform_ConsumeConfirmPressed() != 0;
-}
 
 static void CSelect_StartObjectGroupAnimation(int objectGroupHandle, int animationIndex, int arg2, int arg3) {
     int uiManager = RuntimePointerBits(GlobalRuntimeContext_GetPointerAt(0x270));
@@ -2225,6 +3414,17 @@ static void CSelectTitleFlow_LoadSelTitle(CSelectTitleFlow *flow, void *linkData
         CSelModeEntry_AddUiObject(entry2, (void *)block.data);
     }
     CSelModeEntry_SetObjectEnabled(entry1, 0, -1, 1);
+    {
+        /* 0x800E14EC..0x800E1520: register entry1 child 1 ('Lets_A_US') as a pointer
+           hit region and keep its index in entry1 +0x4C (triplet {0, 0, region}). */
+        int triplet[3];
+
+        triplet[0] = 0;
+        triplet[1] = 0;
+        triplet[2] = PointerManager_RegisterRegion(gGameMainManagers.manager802e70b4,
+                                                   CSelModeEntry_GetObjectHandle(entry1, 0), 1);
+        CSelModeEntry_SetTransformTriplet(entry1, triplet);
+    }
     CSelModeEntry_SetObjectFlags(entry1, 0, 0xffffffc4);
     CSelModeEntry_ActivateObject(entry1, 0);
     CSelModeEntry_SetObjectFlags(entry0, 0, 0xffffffe2);
@@ -2247,22 +3447,26 @@ static void CSelectTitleFlow_LoadSelTitle(CSelectTitleFlow *flow, void *linkData
     }
 
     if (entry0->objectHandles[0] >= 0) {
-        static const float titleFocusForward[3] = { 0.0f, 0.0f, 1.0f };
-        static const float titleFocusUp[3] = { 0.0f, 1.0f, 0.0f };
-        static const float titleFocusTranslation[3] = { 0.0f, 0.0f, 0.0f };
+        /* 0x800E15F0..0x800E1668: title model camera. FUN_8008D5EC(flow,
+           eye, up, target, fov) stores eye at focus +0x14, up at +0x2C,
+           target at +0x20 and the FOV at +0x38. */
+        static const float titleCameraEye[3] = { 40.0f, -15.0f, 170.0f };
+        static const float titleCameraUp[3] = { 0.0f, 1.0f, 0.0f };
+        static const float titleCameraTarget[3] = { 40.0f, -15.0f, 0.0f };
 
         CSelectTitleCoordinator_Create(flow, entry0->objectHandles[0], 0, 0, 0);
         CSelectTitleCoordinator_ApplyVectors(
             flow,
-            0.0,
-            titleFocusForward,
-            titleFocusUp,
-            titleFocusTranslation);
+            45.0,
+            titleCameraEye,
+            titleCameraUp,
+            titleCameraTarget);
     }
 
-    /* With the constructor's +0x0C defaulting to 0, the original enters state 3
-       and starts animation 0 on the group stored at +0x20. */
-    *(int *)(void *)(flow->storage + 0x144) = 3;
+    /* 0x800E1670..0x800E17B8: title entry mode +0x0C picks the first state.
+       0 = cold boot (state 3: group +0x20 intro), 1 = return to title (state 0x0D:
+       logo + title call), anything else = straight into the OP movie (state 0x0A). */
+    CharacterAssetManager_SetCueMode(gGameMainManagers.characterAssetManager, 0);
     group0 = *(int *)(void *)(flow->storage + 0x1c);
     group2 = *(int *)(void *)(flow->storage + 0x24);
     if (group0 >= 0) {
@@ -2272,9 +3476,27 @@ static void CSelectTitleFlow_LoadSelTitle(CSelectTitleFlow *flow, void *linkData
         CzanUiManager_SetObjectGroupDisplayFlags(0, group2, 1, 1);
     }
     group1 = *(int *)(void *)(flow->storage + 0x20);
-    if (group1 >= 0) {
-        CSelect_StartObjectGroupAnimation(group1, 0, 0, 0);
+    switch (*(int *)(void *)(flow->storage + 0x0c)) {
+        case 0:
+            *(int *)(void *)(flow->storage + 0x144) = 3;
+            if (group1 >= 0) {
+                CSelect_StartObjectGroupAnimation(group1, 0, 0, 0);
+            }
+            break;
+        case 1:
+            *(int *)(void *)(flow->storage + 0x144) = 0x0d;
+            CSelModeEntry_StartObjectAnimation(0.0, entry0, 0, 0, 0, 0);
+            CSelModeEntry_StartObjectAnimation(0.0, entry2, 0, 0, 0, 0);
+            break;
+        default:
+            /* The original also calls 0x8010A808 here to start OP/OP43.thp. The host
+               never enters with this mode yet; TODO start the movie when it does. */
+            *(int *)(void *)(flow->storage + 0x144) = 0x0a;
+            break;
     }
+    *(float *)(void *)(flow->storage + 0x148) = 0.0f;
+    *(int *)(void *)(flow->storage + 0x164) = 0;
+    *(int *)(void *)(flow->storage + 0x168) = -1;
     if (entry0->objectHandles[0] >= 0 && entry2->objectHandles[0] >= 0) {
         CzanUiManager_LinkObjectGroupToReferenceObject(0, entry2->objectHandles[0], entry0->objectHandles[0], 0, 0x1f);
         CzanUiManager_SetObjectGroupPriority(0, entry2->objectHandles[0], 0x14);
@@ -2324,6 +3546,13 @@ static void CSelectTitleFlow_Draw(CSelectTitleFlow *flow) {
                 groupHandles[groupCount++] = rawGroups[i];
             }
         }
+        /* The DOL draws the whole global list (0x800FEBE8); the UI-root fade quad
+           (+0x0C) and dimmer (+0x10) belong to it during the title. */
+        for (i = 3; i <= 4; i++) {
+            if (gGameMainManagers.uiRootManager[i] >= 0) {
+                groupHandles[groupCount++] = gGameMainManagers.uiRootManager[i];
+            }
+        }
         for (i = 0; i < 3; i++) {
             int slot;
             for (slot = 0; slot < entries[i]->objectHandleCount && slot < 4; slot++) {
@@ -2362,7 +3591,15 @@ static void CSelectTitleFlow_StartOpeningMovie(CSelectTitleFlow *flow, int *cSel
         return;
     }
 
-    moviePath = ResourceManager_HostPointerBits("movie/select/OP.thp");
+    /* 0x800E1780 / 0x800E1C28 / 0x800E1D14: path table at r13-0x7C38 picks
+       OP.thp for widescreen and OP43.thp for 4:3. */
+    {
+        int *videoSettings = GlobalRuntimeContext_GetPointerAt(0x258);
+        moviePath = ResourceManager_HostPointerBits(
+            (videoSettings != 0 && videoSettings[0x4c / 4] != 0) ?
+                "movie/select/OP.thp" : "movie/select/OP43.thp");
+    }
+    CharacterAssetManager_SetCueMode(gGameMainManagers.characterAssetManager, 0);
     ResourceSlotHandle_Rebind(gGameMainManagers.manager802e70a8, moviePath, 0);
     slotIndex = gGameMainManagers.manager802e70a8 != 0 ? gGameMainManagers.manager802e70a8[1] : -1;
     cSelect[0x1c10 / 4] = moviePath;
@@ -2379,127 +3616,453 @@ static void CSelectTitleFlow_StartOpeningMovie(CSelectTitleFlow *flow, int *cSel
         ResourceSlotHandle_IsActivePending(gGameMainManagers.manager802e70a8));
 }
 
+/* Title cue ids played through 0x800CC894. Names come from the DOL's OSReport strings
+   at 0x80279EA4. */
+enum {
+    TITLE_CUE_OPEN = 0x25b,       /* dtwDefSndTitleOpen */
+    TITLE_CUE_VOICE_CALL = 0x286, /* dtwDefSndVoiceTitleCall */
+    TITLE_CUE_OK = 0x264          /* dtwDefSndTitleOK1 / dtwDefSndTitleOK4 */
+};
+
+/* Wii button masks tested on controller slot 4 (any controller). */
+#define TITLE_INPUT_CONFIRM 0x800u
+#define TITLE_INPUT_CONFIRM_OR_BACK 0xc00u
+#define TITLE_INPUT_ANY 0x1ffffu
+
+static int CSelectTitle_TestPressed(unsigned int mask) {
+    /* 0x8002AE28 on gManager_802E70AC: newly pressed this frame. */
+    return InputOrMenuStateManager_TestPressedMask(gGameMainManagers.inputOrMenuStateManager, 4, mask) != 0;
+}
+
+static int CSelectTitle_TestHeld(unsigned int mask) {
+    /* 0x8002AE08 on gManager_802E70AC: currently held. */
+    return InputOrMenuStateManager_TestActiveMask(gGameMainManagers.inputOrMenuStateManager, 4, mask) != 0;
+}
+
+static float CSelectTitle_GetFrameStep(void) {
+    return Runtime_GetFrameStep();
+}
+
+static void CSelectTitleFlow_UpdateOpeningMovieFade(CSelectTitleFlow *flow, float step) {
+    /* 0x8010A770: +0x130 fade mode (-1 off, 0 fading, 1 fade then switch), +0x134
+       fade timer, +0x138 fade length, +0x13C next fade length. */
+    unsigned char *f = flow->storage;
+    float *fadeTimer = (float *)(void *)(f + 0x134);
+    float fadeLength = *(float *)(void *)(f + 0x138);
+
+    if (*(int *)(void *)(f + 0x130) < 0) {
+        return;
+    }
+    *fadeTimer += step;
+    if (*fadeTimer >= fadeLength) {
+        if (*(int *)(void *)(f + 0x130) == 1) {
+            *fadeTimer = 0.0f;
+            *(float *)(void *)(f + 0x138) = *(float *)(void *)(f + 0x13c);
+            *(int *)(void *)(f + 0x130) = 2;
+        }
+        else {
+            *fadeTimer = fadeLength;
+        }
+    }
+}
+
+static int CSelectTitleFlow_IsOpeningMovieReady(CSelectTitleFlow *flow) {
+    /* 0x8010A9BC: fade finished and the movie slot is no longer loading. */
+    return *(float *)(void *)(flow->storage + 0x134) >= *(float *)(void *)(flow->storage + 0x138) &&
+           ResourceSlotHandle_IsActivePending(gGameMainManagers.manager802e70a8) == 0;
+}
+
+static void CSelectTitleFlow_ResetOpeningMovieFade(CSelectTitleFlow *flow) {
+    /* 0x8010AA08 */
+    *(int *)(void *)(flow->storage + 0x130) = -1;
+    *(float *)(void *)(flow->storage + 0x134) = 0.0f;
+    *(float *)(void *)(flow->storage + 0x138) = 30.0f;
+    *(float *)(void *)(flow->storage + 0x13c) = 30.0f;
+}
+
+static void CSelectTitleFlow_StartOpeningMoviePlayback(CSelectTitleFlow *flow) {
+    /* 0x8010A950 */
+    (void)flow;
+    if (gGameMainManagers.manager802e70a8 != 0) {
+        MovieSlotHandle_StartPlayback(gGameMainManagers.manager802e70a8, gGameMainManagers.manager802e70a8[1], 0);
+    }
+}
+
+static int CSelectTitleFlow_IsOpeningMovieNotPlaying(CSelectTitleFlow *flow) {
+    /* 0x8010A990 */
+    (void)flow;
+    return gGameMainManagers.manager802e70a8 != 0 &&
+           MovieSlotHandle_HasPlaybackStarted(gGameMainManagers.manager802e70a8, gGameMainManagers.manager802e70a8[1]) == 0;
+}
+
+static void CSelectTitleFlow_ReleaseOpeningMovie(CSelectTitleFlow *flow) {
+    /* 0x8010A960 */
+    CharacterAssetManager_SetCueMode(gGameMainManagers.characterAssetManager, 1);
+    ResourceSlotHandle_Release(gGameMainManagers.manager802e70a8);
+    *(int *)(void *)(flow->storage + 0x154) = 0;
+}
+
+static int CSelectTitle_IsPointerOnScreen(CSelectTitleFlow *flow) {
+    /* 0x8010F014(+0x158, 4): any remote's record flag 0x8 (pointer on screen). */
+    (void)flow;
+    return PointerManager_IsOnScreen(gGameMainManagers.manager802e70b4, 4);
+}
+
+static void CSelectTitle_SetPressStartColor(CSelectTitleFlow *flow, unsigned int rgba) {
+    /* 0x8011078C(entry1, 0, 1, &rgba, 1) -> CzanUiManager_SetObjectGroupColorBlocks.
+       Pointer hover only: grey 0x808080FF normal, white 0xFFFFFFFF highlighted.
+       TODO: port 0x80175B00 / 0x80175C28. */
+    (void)flow;
+    (void)rgba;
+}
+
+static void CSelectTitle_StartEntryAnimation(CSelectTitleFlow *flow, int entryOffset, int anim, int loop, int mode, double startFrame) {
+    /* 0x801105FC(f1 startFrame, entry, slot 0, anim, loop, mode) */
+    CSelModeEntry_StartObjectAnimation(startFrame, flow->storage + entryOffset, 0, anim, loop, mode);
+}
+
+static void CSelectTitle_HideEntry(CSelectTitleFlow *flow, int entryOffset) {
+    int handle = CSelModeEntry_GetObjectHandle(flow->storage + entryOffset, 0);
+
+    if (handle >= 0) {
+        CzanUiManager_SetObjectGroupDisplayFlags(0, handle, 1, 1);
+    }
+}
+
+static void CSelectTitleFlow_TraceGroups(CSelectTitleFlow *flow) {
+    /* Debug aid: DDRII_TRACE_TITLE=1 dumps every title object on each state change. */
+    static int enabled = -1;
+    static const char *const names[6] = { "caution", "notice", "bemani", "logo", "pressA", "bg" };
+    static const int offsets[6] = { 0x1c, 0x20, 0x24, 0x16c, 0x1bc, 0x20c };
+    int i;
+
+    if (enabled < 0) {
+        const char *value = getenv("DDRII_TRACE_TITLE");
+        enabled = value != 0 && value[0] == '1';
+    }
+    if (!enabled || flow == 0) {
+        return;
+    }
+    for (i = 0; i < 6; i++) {
+        int handle = i < 3 ? *(int *)(void *)(flow->storage + offsets[i])
+                           : CSelModeEntry_GetObjectHandle(flow->storage + offsets[i], 0);
+
+        if (handle >= 0) {
+            CzanUiManager_DebugDumpGroup(handle, names[i]);
+        }
+    }
+    if (gGameMainManagers.uiRootManager != 0) {
+        RuntimeDebugReport("  uiRoot fade +0x0C=%d dim +0x10=%d\n",
+                           gGameMainManagers.uiRootManager[3], gGameMainManagers.uiRootManager[4]);
+        CzanUiManager_DebugDumpGroup(gGameMainManagers.uiRootManager[3], "fade");
+        CzanUiManager_DebugDumpGroup(gGameMainManagers.uiRootManager[4], "dim");
+    }
+}
+
 static int CSelectTitleFlow_Tick(CSelectTitleFlow *flow, int *cSelect, int forceIdle) {
+    /* 0x800E1988. Returns the next CSelect state: 0x0C (stay), 1 (mode select), or
+       0x1D (idle timeout to attract/demo). Timer +0x148 advances by the frame step,
+       so thresholds below are in 60 Hz frames. */
+    enum { E0 = 0x16c, E1 = 0x1bc, E2 = 0x20c };
+    unsigned char *f;
     int state;
-    int group1;
-    float timer;
-    double threshold;
+    int next = 0x0c;
+    int group;
+    float step;
+    float *timer;
 
     if (flow == 0 || forceIdle == 1) {
         return 0x0c;
     }
 
-    state = *(int *)(void *)(flow->storage + 0x144);
-    group1 = *(int *)(void *)(flow->storage + 0x20);
+    f = flow->storage;
+    timer = (float *)(void *)(f + 0x148);
+    step = CSelectTitle_GetFrameStep();
+    CSelectTitleFlow_UpdateOpeningMovieFade(flow, step);
+    state = *(int *)(void *)(f + 0x144);
 
+#define TITLE_SET_STATE(s) (*(int *)(void *)(f + 0x144) = (s))
+#define TITLE_I32(off) (*(int *)(void *)(f + (off)))
     switch (state) {
-        case 3:
-            if (group1 >= 0 && CzanUiManager_IsObjectGroupAnimationDone(0, group1) != 0) {
-                *(int *)(void *)(flow->storage + 0x144) = 4;
-                *(float *)(void *)(flow->storage + 0x148) = 0.0f;
-                RuntimeDebugReport("CSelect title: state 3 -> 4\n");
+        case 0x00:
+            /* Group +0x1C (first notice) intro animation. */
+            group = TITLE_I32(0x1c);
+            if (group >= 0 && CzanUiManager_IsObjectGroupAnimationDone(0, group) != 0) {
+                TITLE_SET_STATE(1);
+                *timer = 0.0f;
             }
             break;
-        case 4:
-            timer = *(float *)(void *)(flow->storage + 0x148) + 1.0f;
-            *(float *)(void *)(flow->storage + 0x148) = timer;
-            threshold = CSelectTitleFlow_GetGroupAnimationDuration(group1, 0, 120.0);
-            if (threshold < 1.0) {
-                threshold = 120.0;
+        case 0x01:
+            /* Hold the notice: 480 frames, or 120 once A/B was pressed. */
+            *timer += step;
+            if (CSelectTitle_TestPressed(TITLE_INPUT_CONFIRM_OR_BACK)) {
+                TITLE_I32(0x14c) = 1;
             }
-            if ((double)timer >= threshold) {
-                *(int *)(void *)(flow->storage + 0x144) = 5;
-                *(int *)(void *)(flow->storage + 0x14c) = 0;
-                if (group1 >= 0) {
-                    CSelect_StartObjectGroupAnimation(group1, 1, 0, 0);
-                }
-                RuntimeDebugReport("CSelect title: state 4 -> 5\n");
+            if (*timer >= 480.0f || (TITLE_I32(0x14c) == 1 && *timer >= 120.0f)) {
+                TITLE_I32(0x14c) = 0;
+                TITLE_SET_STATE(2);
+                CSelect_StartObjectGroupAnimation(TITLE_I32(0x1c), 1, 0, 0);
             }
             break;
-        case 5:
-            if (group1 >= 0 && CzanUiManager_IsObjectGroupAnimationDone(0, group1) != 0) {
-                CzanUiManager_SetObjectGroupDisplayFlags(0, group1, 1, 1);
-                *(int *)(void *)(flow->storage + 0x144) = 0x0c;
-                *(float *)(void *)(flow->storage + 0x148) = 0.0f;
+        case 0x02:
+            group = TITLE_I32(0x1c);
+            if (group >= 0 && CzanUiManager_IsObjectGroupAnimationDone(0, group) != 0) {
+                CzanUiManager_SetObjectGroupDisplayFlags(0, group, 1, 1);
+                TITLE_SET_STATE(3);
+                CSelect_StartObjectGroupAnimation(TITLE_I32(0x20), 0, 0, 0);
+            }
+            break;
+        case 0x03:
+            /* Cold boot enters here: group +0x20 intro animation. */
+            group = TITLE_I32(0x20);
+            if (group >= 0 && CzanUiManager_IsObjectGroupAnimationDone(0, group) != 0) {
+                TITLE_SET_STATE(4);
+                *timer = 0.0f;
+            }
+            break;
+        case 0x04:
+            /* Fixed 120-frame hold (FLOAT_802E8DE8 = 120.0f); not skippable. */
+            *timer += step;
+            if (*timer >= 120.0f) {
+                TITLE_SET_STATE(5);
+                TITLE_I32(0x14c) = 0;
+                CSelect_StartObjectGroupAnimation(TITLE_I32(0x20), 1, 0, 0);
+            }
+            break;
+        case 0x05:
+            group = TITLE_I32(0x20);
+            if (group >= 0 && CzanUiManager_IsObjectGroupAnimationDone(0, group) != 0) {
+                CzanUiManager_SetObjectGroupDisplayFlags(0, group, 1, 1);
+                TITLE_SET_STATE(0x0c);
                 UiRootManager_StartTitleTransitionC(gGameMainManagers.uiRootManager, 1, 100, 0);
                 UiRootManager_StartTitleTransitionA(gGameMainManagers.uiRootManager, 0, 0x32, 0);
-                RuntimeDebugReport("CSelect title: state 5 -> 12\n");
             }
             break;
         case 0x0c:
             if (UiRootManager_IsTitleTransitionAIdle(gGameMainManagers.uiRootManager) != 0 &&
                 UiRootManager_IsTitleTransitionCIdle(gGameMainManagers.uiRootManager) != 0) {
-                *(int *)(void *)(flow->storage + 0x144) = 10;
+                TITLE_SET_STATE(0x0a);
                 CSelectTitleFlow_StartOpeningMovie(flow, cSelect);
-                RuntimeDebugReport("CSelect title: state 12 -> 10\n");
             }
             break;
-        case 10:
-            timer = *(float *)(void *)(flow->storage + 0x148) + 1.0f;
-            *(float *)(void *)(flow->storage + 0x148) = timer;
-            if (ResourceSlotHandle_IsActivePending(gGameMainManagers.manager802e70a8) == 0) {
-                *(int *)(void *)(flow->storage + 0x144) = 0x0b;
-                *(int *)(void *)(flow->storage + 0x130) = -1;
-                *(float *)(void *)(flow->storage + 0x134) = 0.0f;
-                *(float *)(void *)(flow->storage + 0x138) = 1.0f;
-                *(float *)(void *)(flow->storage + 0x13c) = 1.0f;
-                if (gGameMainManagers.manager802e70a8 != 0) {
-                    MovieSlotHandle_StartPlayback(
-                        gGameMainManagers.manager802e70a8,
-                        gGameMainManagers.manager802e70a8[1],
-                        0);
-                }
-                RuntimeDebugReport("CSelect title: state 10 -> 11 OP movie playback requested\n");
+        case 0x07:
+            group = TITLE_I32(0x24);
+            if (group >= 0 && CzanUiManager_IsObjectGroupAnimationDone(0, group) != 0) {
+                TITLE_SET_STATE(8);
+                *timer = 0.0f;
+                TITLE_I32(0x14c) = 0;
             }
-            else if (CSelect_HostConfirmPressed() != 0) {
-                *(int *)(void *)(flow->storage + 0x144) = 6;
+            break;
+        case 0x08:
+            /* 120-frame hold on group +0x24; A/B skips only when entry mode +0x0C != 0. */
+            *timer += step;
+            if (CSelectTitle_TestPressed(TITLE_INPUT_CONFIRM_OR_BACK) && TITLE_I32(0x0c) != 0) {
+                TITLE_I32(0x14c) = 1;
+            }
+            if (*timer >= 120.0f || TITLE_I32(0x14c) == 1) {
+                TITLE_I32(0x14c) = 0;
+                TITLE_SET_STATE(9);
+                CSelect_StartObjectGroupAnimation(TITLE_I32(0x24), 0, 0, 3);
+                CSelectTitleFlow_StartOpeningMovie(flow, cSelect);
+            }
+            break;
+        case 0x09:
+            group = TITLE_I32(0x24);
+            if (group >= 0 && CzanUiManager_IsObjectGroupAnimationDone(0, group) != 0) {
+                CzanUiManager_SetObjectGroupDisplayFlags(0, group, 1, 1);
+                TITLE_SET_STATE(0x0a);
+            }
+            break;
+        case 0x0a:
+            /* OP movie loading. A/B skips straight to the title. */
+            if (CSelectTitleFlow_IsOpeningMovieReady(flow)) {
+                TITLE_SET_STATE(0x0b);
+                CSelectTitleFlow_ResetOpeningMovieFade(flow);
+                CSelectTitleFlow_StartOpeningMoviePlayback(flow);
+            }
+            else if (CSelectTitle_TestHeld(TITLE_INPUT_CONFIRM_OR_BACK)) {
+                CSelectTitleFlow_ReleaseOpeningMovie(flow);
+                TITLE_SET_STATE(6);
                 UiRootManager_StartTitleTransitionC(gGameMainManagers.uiRootManager, 1, 100, 0);
                 UiRootManager_StartTitleTransitionB(gGameMainManagers.uiRootManager, 1, 0x32, 0);
-                RuntimeDebugReport("CSelect title: state 10 -> 6\n");
             }
             break;
         case 0x0b:
-            if ((gGameMainManagers.manager802e70a8 != 0 &&
-                 MovieSlotHandle_HasPlaybackStarted(
-                     gGameMainManagers.manager802e70a8,
-                     gGameMainManagers.manager802e70a8[1]) == 0) ||
-                CSelect_HostConfirmPressed() != 0) {
-                ResourceSlotHandle_Release(gGameMainManagers.manager802e70a8);
-                *(int *)(void *)(flow->storage + 0x144) = 6;
+            /* OP movie playing until it ends or A/B is pressed. */
+            if (CSelectTitleFlow_IsOpeningMovieNotPlaying(flow) ||
+                CSelectTitle_TestHeld(TITLE_INPUT_CONFIRM_OR_BACK)) {
+                CSelectTitleFlow_ReleaseOpeningMovie(flow);
+                TITLE_SET_STATE(6);
                 UiRootManager_StartTitleTransitionC(gGameMainManagers.uiRootManager, 1, 100, 0);
                 UiRootManager_StartTitleTransitionB(gGameMainManagers.uiRootManager, 1, 0x32, 0);
-                RuntimeDebugReport("CSelect title: state 11 -> 6 OP movie complete/skip\n");
             }
             break;
-        case 6:
+        case 0x06:
             if (UiRootManager_IsTitleTransitionAIdle(gGameMainManagers.uiRootManager) != 0) {
-                int entry2Handle;
-                CSelModeEntryKnownFields *entry1;
+                int handle;
 
-                entry1 = (CSelModeEntryKnownFields *)(void *)(flow->storage + 0x1bc);
-                *(int *)(void *)(flow->storage + 0x144) = 0x0d;
-                CSelModeEntry_StartObjectAnimation(0.0, flow->storage + 0x16c, 0, 0, 0, 0);
-                CSelModeEntry_StartObjectAnimation(0.0, flow->storage + 0x20c, 0, 0, 0, 0);
-                *(float *)(void *)(flow->storage + 0x148) = 0.0f;
-                entry2Handle = CSelModeEntry_GetObjectHandle(flow->storage + 0x20c, 0);
-                if (entry2Handle >= 0) {
-                    CzanUiManager_SetObjectGroupAnimationResetMode(0, entry2Handle, 1);
+                TITLE_SET_STATE(0x0d);
+                CSelectTitle_StartEntryAnimation(flow, E0, 0, 0, 0, 0.0);
+                CSelectTitle_StartEntryAnimation(flow, E2, 0, 0, 0, 0.0);
+                *timer = 0.0f;
+                handle = CSelModeEntry_GetObjectHandle(f + E2, 0);
+                if (handle >= 0) {
+                    CzanUiManager_SetObjectGroupAnimationResetMode(0, handle, 1);
                 }
-                if (entry1->objectHandleCount > 0 && entry1->objectHandles[0] >= 0) {
-                    CSelModeEntry_SetObjectEnabled(entry1, 0, -1, 1);
-                }
-                *(int *)(void *)(flow->storage + 0x260) = 0;
-                RuntimeDebugReport("CSelect title: state 6 -> 13 title call\n");
+                TITLE_I32(0x260) = 0;
             }
             break;
         case 0x0d:
-            if (CSelect_HostConfirmPressed() != 0) {
-                RuntimeDebugReport("CSelect title: state 13 -> 1 mode select\n");
-                return 1;
+            /* Title logo intro (entry0) with "Press A" (entry1) fading in at frame 390. */
+            *timer += step;
+            if (TITLE_I32(0x150) == 1 && TITLE_I32(0x164) == 0 && *timer >= 150.0f) {
+                TITLE_I32(0x168) = CharacterAssetManager_PlayCue(gGameMainManagers.characterAssetManager, TITLE_CUE_OPEN);
+                RuntimeDebugReport("dtwDefSndTitleOpen\n");
+                TITLE_I32(0x150) = 0;
+            }
+            if (CSelectTitle_TestPressed(TITLE_INPUT_CONFIRM) && TITLE_I32(0x260) == 0) {
+                /* A during the intro: jump the logo to its end and show "Press A" now. */
+                TITLE_I32(0x260) = 1;
+                *timer = 200.0f;
+                CSelectTitle_StartEntryAnimation(flow, E0, 0, 0, 0, 1000.0);
+                CSelModeEntry_SetObjectEnabled(f + E1, 0, -1, 0);
+                CSelectTitle_StartEntryAnimation(flow, E1, 0, 0, 0, 0.0);
+                TITLE_I32(0x164) = 1;
+                if (TITLE_I32(0x168) >= 0) {
+                    /* 0x8002456C(gManager_802E70A4, handle, 250): fade out the open cue. */
+                    RuntimeDebugReport("CSelect title: fade cue %d (250)\n", TITLE_I32(0x168));
+                }
+            }
+            if (*timer >= 390.0f && TITLE_I32(0x260) == 0) {
+                CSelModeEntry_SetObjectEnabled(f + E1, 0, -1, 0);
+                CSelectTitle_StartEntryAnimation(flow, E1, 0, 0, 0, 0.0);
+                TITLE_I32(0x260) = 1;
+            }
+            if (CSelModeEntry_IsObjectAnimationDone(f + E0, 0) != 0) {
+                CharacterAssetManager_SetCueMode(gGameMainManagers.characterAssetManager, 1);
+                TITLE_SET_STATE(0x0e);
+                *timer = 0.0f;
+                CharacterAssetManager_PlayCue(gGameMainManagers.characterAssetManager, TITLE_CUE_VOICE_CALL);
+                RuntimeDebugReport("dtwDefSndVoiceTitleCall\n");
+            }
+            else if (*timer > 390.0f && CSelectTitle_TestPressed(TITLE_INPUT_CONFIRM)) {
+                CSelectTitle_StartEntryAnimation(flow, E1, 5, 0, 0, 0.0);
+                CSelectTitle_StartEntryAnimation(flow, E0, 1, 0, 0, 0.0);
+                /* 0x8009B59C(gManager_802E70E0): commit pending player/controller setup. */
+                TITLE_SET_STATE(0x0f);
+                CharacterAssetManager_PlayCue(gGameMainManagers.characterAssetManager, TITLE_CUE_OK);
+                RuntimeDebugReport("dtwDefSndTitleOK1\n");
+            }
+            /* "Press A" intro (anim 0) done -> loop the blink (anim 1). */
+            if (CSelModeEntry_IsObjectAnimationDone(f + E1, 0) != 0 &&
+                CSelModeEntry_GetCachedAnimationId(f + E1, 0) == 0) {
+                CSelectTitle_StartEntryAnimation(flow, E1, 1, 1, 0, 0.0);
+            }
+            break;
+        case 0x0e: {
+            /* Title idle: waiting for A. 1200 frames with no input -> attract timeout. */
+            int previousPointer = TITLE_I32(0x15c);
+            int pointer;
+
+            if (CSelModeEntry_IsObjectAnimationDone(f + E1, 0) != 0 &&
+                CSelModeEntry_GetCachedAnimationId(f + E1, 0) == 0) {
+                CSelectTitle_StartEntryAnimation(flow, E1, 1, 1, 0, 0.0);
+            }
+            pointer = CSelectTitle_IsPointerOnScreen(flow) != 0;
+            TITLE_I32(0x15c) = pointer;
+            if (!CSelectTitle_TestHeld(TITLE_INPUT_ANY) && pointer == 0) {
+                *timer += step;
+            }
+            else {
+                *timer = 0.0f;
+            }
+            if (previousPointer != pointer) {
+                if (pointer == 1) {
+                    CSelectTitle_StartEntryAnimation(flow, E1, 2, 0, 0, 0.0);
+                    CSelectTitle_SetPressStartColor(flow, 0x808080ffu);
+                }
+                else {
+                    CSelectTitle_StartEntryAnimation(flow, E1, 2, 0, 3, 0.0);
+                }
+            }
+            /* 0x800E22B4..0x800E23E8: pointer hit test on 'Lets_A_US' (region at
+               entry1 +0x4C). Hover plays anim 4 once the flip-in (anim 2) is shown;
+               leaving plays anim 2 from frame 100; a finished flip-out with the
+               pointer gone returns to the 'Point at the screen' blink (anim 1). */
+            {
+                CSelModeEntryKnownFields *entry1 = (CSelModeEntryKnownFields *)(void *)(f + E1);
+                int hits = PointerManager_HitTestRegion(gGameMainManagers.manager802e70b4, 0,
+                                                        entry1->transformOrState2);
+
+                if (hits == 1) {
+                    if (CSelModeEntry_GetCachedAnimationId(f + E1, 0) == 2) {
+                        CSelectTitle_StartEntryAnimation(flow, E1, 4, 0, 0, 0.0);
+                        CSelectTitle_SetPressStartColor(flow, 0xffffffffu);
+                        /* 0x8010F0A4: rumble the hovering remotes (no host rumble). */
+                    }
+                }
+                else if (CSelModeEntry_GetCachedAnimationId(f + E1, 0) == 4) {
+                    CSelectTitle_StartEntryAnimation(flow, E1, 2, 0, 0, 100.0);
+                    CSelectTitle_SetPressStartColor(flow, 0x808080ffu);
+                }
+                else if (CSelModeEntry_GetCachedAnimationId(f + E1, 0) == 2 &&
+                         CSelModeEntry_IsObjectAnimationDone(f + E1, 0) != 0 &&
+                         TITLE_I32(0x15c) == 0) {
+                    CSelectTitle_StartEntryAnimation(flow, E1, 1, 1, 0, 0.0);
+                }
+            }
+
+            if (*timer >= 1200.0f) {
+                CSelectTitle_StartEntryAnimation(flow, E0, 1, 0, 0, 0.0);
+                CSelectTitle_StartEntryAnimation(flow, E1, 0, 0, 3, 0.0);
+                TITLE_SET_STATE(0x10);
+                CSelectTitleCoordinator_ClearModelGroup(flow);
+            }
+            else if (CSelectTitle_TestPressed(TITLE_INPUT_CONFIRM)) {
+                CSelectTitle_StartEntryAnimation(flow, E1, 5, 0, 0, 0.0);
+                CharacterAssetManager_PlayCue(gGameMainManagers.characterAssetManager, TITLE_CUE_OK);
+                RuntimeDebugReport("dtwDefSndTitleOK4\n");
+                CSelectTitle_StartEntryAnimation(flow, E0, 1, 0, 0, 0.0);
+                CSelectTitleCoordinator_ClearModelGroup(flow);
+                /* 0x8009B59C(gManager_802E70E0) */
+                TITLE_SET_STATE(0x0f);
+            }
+            break;
+        }
+        case 0x0f:
+            /* A accepted: wait for the logo outro, then go to mode select. */
+            if (CSelModeEntry_IsObjectAnimationDone(f + E0, 0) != 0) {
+                CSelectTitle_HideEntry(flow, E0);
+                CSelectTitleCoordinator_ClearModelGroup(flow);
+                next = 1;
+            }
+            break;
+        case 0x10:
+            /* Idle timeout: wait for the logo outro, flag the CSelect owner and
+               return 0x1D (attract/demo request). */
+            if (CSelModeEntry_IsObjectAnimationDone(f + E0, 0) != 0) {
+                int *owner = (int *)RuntimePointerFromBits(TITLE_I32(0x10));
+
+                if (owner != 0) {
+                    owner[0] = 8;
+                }
+                CSelectTitle_HideEntry(flow, E0);
+                CSelectTitleCoordinator_ClearModelGroup(flow);
+                next = 0x1d;
             }
             break;
         default:
             break;
+    }
+#undef TITLE_I32
+#undef TITLE_SET_STATE
+
+    if (*(int *)(void *)(f + 0x144) != state) {
+        RuntimeDebugReport("CSelect title: state 0x%x -> 0x%x\n", state, *(int *)(void *)(f + 0x144));
+        CSelectTitleFlow_TraceGroups(flow);
+    }
+    if (next != 0x0c) {
+        RuntimeDebugReport("CSelect title: state 0x%x returns CSelect state 0x%x\n", state, next);
     }
 
     UiRootManager_UpdateGlobalCzanListOnce(gGameMainManagers.uiRootManager, 0);
@@ -2507,7 +4070,7 @@ static int CSelectTitleFlow_Tick(CSelectTitleFlow *flow, int *cSelect, int force
         gGameMainManagers.uiRootManager[0x28 / 4] = 0;
     }
     CSelectTitleCoordinator_TickDraw(flow);
-    return 0x0c;
+    return next;
 }
 
 static int CSelect_IsResourceReady(int resourceBits) {
@@ -2520,24 +4083,6 @@ static int CSelect_RequestResourceIfMissing(int *cSelect, int wordIndex, const c
         return CSelect_IsResourceReady(cSelect[wordIndex]);
     }
     return CSelect_StoreLoadedResource(cSelect, wordIndex, path);
-}
-
-static void *CSelect_GetLoadedResourcePayload(int resourceBits, unsigned int *outSize) {
-    ResourceHandle *handle = (ResourceHandle *)RuntimePointerFromBits(resourceBits);
-    unsigned char *data;
-
-    if (outSize != 0) {
-        *outSize = 0;
-    }
-    if (handle == 0 || handle->loaded == 0 || handle->data == 0 || handle->size <= 0xa0) {
-        return 0;
-    }
-
-    data = (unsigned char *)handle->data + 0xa0;
-    if (outSize != 0) {
-        *outSize = (unsigned int)handle->size - 0xa0u;
-    }
-    return data;
 }
 
 static void *CSelect_GetLoadedResourceData(int resourceBits, unsigned int *outSize) {
@@ -2556,26 +4101,86 @@ static void *CSelect_GetLoadedResourceData(int resourceBits, unsigned int *outSi
     return handle->data;
 }
 
-static void CSelect_ActivateSelectBinBridge(int *cSelect, int regionIndex) {
+/* 0x80129414 / 0x801294E0 / 0x8012953C: small 0x0C-byte timeline object built
+   from select_bin root block 0x0F (boss-folder UI). Layout:
+   +0x00 uiManager, +0x04 object group handle, +0x08 start frame. */
+typedef struct CSelectSelectBinTimeline {
+    int uiManager;
+    int groupHandle;
+    float startFrame;
+} CSelectSelectBinTimeline;
+
+static void CSelectSelectBinTimeline_InitFromBlock(
+    CSelectSelectBinTimeline *timeline,
+    int uiManager,
+    const unsigned char *blockData,
+    unsigned int blockSize,
+    float startFrame) {
+    timeline->groupHandle = -1;
+    timeline->startFrame = 0.0f;
+    timeline->uiManager = uiManager;
+    HostCzan_RegisterLinkSize(blockData, blockSize);
+    timeline->groupHandle = CzanUiManager_CreateObjectGroup(uiManager, (void *)blockData, 2, 0);
+    CzanUiManager_SetObjectGroupPriority(uiManager, timeline->groupHandle, 0x400);
+    /* +0x173 = 1: the group exists but is not drawn until Start. */
+    CzanUiManager_SetObjectGroupEnabled(uiManager, timeline->groupHandle, 1);
+    timeline->startFrame = startFrame;
+}
+
+void CSelectSelectBinTimeline_Start(void *timelinePointer) {
+    CSelectSelectBinTimeline *timeline = (CSelectSelectBinTimeline *)timelinePointer;
+
+    if (timeline == 0 || timeline->groupHandle < 0) {
+        return;
+    }
+    CzanUiManager_SetObjectGroupAnimationResetMode(timeline->uiManager, timeline->groupHandle, 1);
+    CzanUiManager_SetObjectGroupEnabled(timeline->uiManager, timeline->groupHandle, 0);
+    CzanUiManager_StartObjectGroupAnimation(
+        timeline->startFrame, timeline->uiManager, timeline->groupHandle, 0);
+}
+
+void CSelectSelectBinTimeline_Finalize(void *timelinePointer) {
+    CSelectSelectBinTimeline *timeline = (CSelectSelectBinTimeline *)timelinePointer;
+
+    if (timeline == 0 || timeline->groupHandle < 0) {
+        return;
+    }
+    CzanUiManager_SetObjectGroupDisplayFlags(timeline->uiManager, timeline->groupHandle, 1, 1);
+}
+
+static void CSelect_LoadSelectBinSharedResources(int *cSelect) {
     void *linkData;
     unsigned int linkSize;
-    unsigned int blockCount;
-    unsigned int blockIndex;
+    int blockCount;
+    int blockIndex;
+    int regionIndex;
     CzanLinkBlock block;
+    CSelectSelectBinTimeline *timeline;
 
+    /* 0x800470E0, called from the CSelect_Tick gate once select_bin_XX.bin is
+       loaded (+0x14 == 1). Order and conditions follow the DOL exactly. */
+    regionIndex = CSelect_GetRegionIndex();
     if (cSelect == 0 || cSelect[0x10 / 4] != 0) {
         return;
     }
+    cSelect[0x14 / 4] = 0;
 
     linkData = CSelect_GetLoadedResourceData(cSelect[0x1bfc / 4], &linkSize);
     if (linkData == 0 || !CzanLinkResource_IsValid(linkData, linkSize)) {
+        ResourceHandle *debugHandle = (ResourceHandle *)RuntimePointerFromBits(cSelect[0x1bfc / 4]);
+        RuntimeDebugReport("CSelect: %s is missing or invalid (handle=%p loaded=%d size=%d)\n",
+                           CSelectResourcePaths[regionIndex][1], (void *)debugHandle,
+                           debugHandle != 0 ? debugHandle->loaded : -1,
+                           debugHandle != 0 ? (int)debugHandle->size : -1);
         return;
     }
 
-    blockCount = CzanLinkResource_GetBlockCount(linkData, linkSize);
-    for (blockIndex = 0; blockIndex + 0x11 < blockCount; blockIndex++) {
-        if (CzanLinkResource_GetBlock(linkData, linkSize, blockIndex, &block)) {
-            cSelect[(0x44 / 4) + (int)blockIndex] = (int)CreateTextureFromTplResource(
+    /* Shared TPL textures: blocks 0 .. blockCount - 0x12 into +0x44. With the
+       16-block US/FR/SP files this loop runs zero times, as on hardware. */
+    blockCount = (int)CzanLinkResource_GetBlockCount(linkData, linkSize);
+    for (blockIndex = 0; blockIndex < blockCount - 0x11; blockIndex++) {
+        if (CzanLinkResource_GetBlock(linkData, linkSize, (unsigned int)blockIndex, &block)) {
+            cSelect[(0x44 / 4) + blockIndex] = (int)CreateTextureFromTplResource(
                 (TextureManagerKnownFields *)GlobalRuntimeContext_GetPointerAt(0x26c),
                 (void *)block.data,
                 (int)block.size,
@@ -2583,33 +4188,47 @@ static void CSelect_ActivateSelectBinBridge(int *cSelect, int regionIndex) {
         }
     }
 
-    cSelect[0x1bf8 / 4] = -1;
-    cSelect[0x14 / 4] = 0;
-    cSelect[0x10 / 4] = 1;
-    if (gCSelectHostBootPhase == CSELECT_HOST_BOOT_PHASE_WAIT_SELECT_BIN) {
-        cSelect[0x1bf0 / 4] = 0;
-        cSelect[0x3c / 4] = 0;
-        gCSelectHostBootPhase = CSELECT_HOST_BOOT_PHASE_BOOT_FLOW;
-        gCSelectHostBootPhaseTicks = 0;
-        RuntimeDebugReport("CSelect boot: select_bin bridge active, entering boot title flow\n");
+    /* +0x1BF8: timeline object from root block 0x0F, created hidden. */
+    timeline = (CSelectSelectBinTimeline *)MemoryPool_AllocateAligned(0, 0x0c, 0x20);
+    cSelect[0x1bf8 / 4] = RuntimePointerBits(timeline);
+    if (timeline != 0 && CzanLinkResource_GetBlock(linkData, linkSize, 0x0f, &block)) {
+        CSelectSelectBinTimeline_InitFromBlock(
+            timeline,
+            RuntimePointerBits(GlobalRuntimeContext_GetPointerAt(0x270)),
+            block.data,
+            block.size,
+            0.0f);
     }
+
+    cSelect[0x10 / 4] = 1;
+    if (cSelect[0x18 / 4] == 0) {
+        CSelect_StoreLoadedResource(cSelect, 0x1c04 / 4, CSelectResourcePaths[regionIndex][2]);
+        cSelect[0x1c / 4] = 1;
+    }
+    else if (cSelect[0x08 / 4] == 0) {
+        CSelect_StoreLoadedResource(cSelect, 0x1c00 / 4, CSelectResourcePaths[regionIndex][0]);
+        cSelect[0x0c / 4] = 1;
+    }
+    RuntimeDebugReport("CSelect: %s parsed\n", CSelectResourcePaths[regionIndex][1]);
 }
 
-static void CSelect_TickHostBootSequence(int *cSelect, int regionIndex) {
-    if (cSelect == 0 || gCSelectHostBootPhase == CSELECT_HOST_BOOT_PHASE_NONE) {
-        return;
-    }
-
-    (void)regionIndex;
-    gCSelectHostBootPhaseTicks++;
-
-    if (gCSelectHostBootPhase == CSELECT_HOST_BOOT_PHASE_WAIT_SEL_TITLE &&
-        cSelect[0x18 / 4] != 0) {
-        gCSelectHostBootPhase = CSELECT_HOST_BOOT_PHASE_TITLE_READY;
-        gCSelectHostBootPhaseTicks = 0;
-        cSelect[0x1bf0 / 4] = 0;
-        cSelect[0x3c / 4] = 0x0c;
-        RuntimeDebugReport("CSelect boot: selTitle ready, entering title flow\n");
+/* Resource gating in front of the active-screen switch (0x80045D2C-0x80045EB8).
+   Returns 1 when the next state must wait. The cue-manager checks
+   (FUN_80023DA8) are not ported yet. */
+static int CSelect_IsNextStateBlocked(const int *cSelect) {
+    switch (cSelect[0x3c / 4]) {
+        case 0:
+            return 0;
+        case 5:
+            return cSelect[0x08 / 4] == 0 || cSelect[0x28 / 4] == 0;
+        case 0x0c:
+            return cSelect[0x18 / 4] == 0;
+        case 0x0e:
+            return cSelect[0x20 / 4] == 0 || cSelect[0x28 / 4] == 0;
+        case 0x10:
+            return cSelect[0x34 / 4] != 0 || cSelect[0x28 / 4] == 0;
+        default:
+            return cSelect[0x10 / 4] == 0 || cSelect[0x28 / 4] == 0;
     }
 }
 
@@ -2808,10 +4427,10 @@ static int CSelectPlayerCountFlow_Update(CSelectPlayerCountFlow *flow, int first
     }
     if (state == 2) {
         oldSelectedIndex = selectedIndex;
-        if (InputOrMenuStateManager_TestTriggeredMask(inputManager, 4, 2) != 0) {
+        if (InputOrMenuStateManager_TestRepeatMask(inputManager, 4, 2) != 0) {
             selectedIndex = (selectedIndex + 1) % 5;
         }
-        else if (InputOrMenuStateManager_TestTriggeredMask(inputManager, 4, 1) != 0) {
+        else if (InputOrMenuStateManager_TestRepeatMask(inputManager, 4, 1) != 0) {
             selectedIndex = (selectedIndex + 4) % 5;
         }
         if (selectedIndex != oldSelectedIndex) {
@@ -2873,12 +4492,17 @@ static int CSelectPlayerCountFlow_Update(CSelectPlayerCountFlow *flow, int first
         return 2;
     }
     if (state == 4) {
+        int *selectCommon = (int *)RuntimePointerFromBits(*(int *)(void *)(flow->storage + 0x130));
         if (*(int *)(void *)(flow->storage + 0x144) == 1) {
             CSelModeEntry_StartObjectAnimation(0.0, flow->storage + 0x150, 0, 1, 0, 0);
+            /* 0x8008CE08: confirm moves the background forward. */
+            CSelectCommon_AdvanceBackgroundForward(selectCommon, 1);
         }
         else {
             CSelModeEntry_ResetObjectAnimation(flow->storage + 0x150, 0);
             CSelModeEntry_StartObjectAnimation(0.0, flow->storage + 0x150, 0, 0, 0, 3);
+            /* 0x8008CE5C: back moves the background backward. */
+            CSelectCommon_AdvanceBackgroundBackward(selectCommon, 1);
         }
         *(int *)(void *)(flow->storage + 0x134) = 5;
         return 2;
@@ -2946,16 +4570,22 @@ static int CSelect_CreateActiveScreen(int *cSelect) {
     switch (nextSelectState) {
         case 0:
             CSelectBootTitleFlow_Init(&bootTitleFlowStorage);
+            CSelectBootTitleFlow_OnEnter(&bootTitleFlowStorage);
             cSelect[0x1bf0 / 4] = RuntimePointerBits(&bootTitleFlowStorage);
             cSelect[0x38 / 4] = nextSelectState;
             return 1;
         case 1:
-            linkData = CSelect_GetLoadedResourcePayload(cSelect[0x1bfc / 4], &linkSize);
+            linkData = CSelect_GetLoadedResourceData(cSelect[0x1bfc / 4], &linkSize);
             if (linkData == 0) {
+                if (lastMissingState != 1001) {
+                    lastMissingState = 1001;
+                    RuntimeDebugReport("CSelect: mode select waits for select_bin payload\n");
+                }
                 return 0;
             }
 
             if (!CzanLinkResource_GetBlock(linkData, linkSize, 0, &block)) {
+                RuntimeDebugReport("CSelect: select_bin payload has no block 0\n");
                 return 0;
             }
 
@@ -2980,7 +4610,7 @@ static int CSelect_CreateActiveScreen(int *cSelect) {
             RuntimeDebugReport("CSelect: created selTitle active screen\n");
             return 1;
         case 2:
-            linkData = CSelect_GetLoadedResourcePayload(cSelect[0x1bfc / 4], &linkSize);
+            linkData = CSelect_GetLoadedResourceData(cSelect[0x1bfc / 4], &linkSize);
             if (linkData == 0) {
                 return 0;
             }
@@ -3038,9 +4668,6 @@ int CSelect_OnEnter(int *cSelect, int moduleId) {
     /* 0x80045B8C / CSelect_OnEnter. This keeps the original CSelect fields and
        resource handles; screen-specific constructors are still called by Tick. */
     ClearMemory((unsigned char *)cSelect + 0xc4, 0, 0x910);
-    gCSelectHostBootPhase = CSELECT_HOST_BOOT_PHASE_NONE;
-    gCSelectHostBootPhaseTicks = 0;
-    cSelect[0x1bf8 / 4] = -1;
     if (gGameMainManagers.playerDataManager != 0) {
         playerDataValue = PlayerDataState_GetCurrentValue(gGameMainManagers.playerDataManager);
     }
@@ -3097,13 +4724,20 @@ int CSelect_OnEnter(int *cSelect, int moduleId) {
         cSelect[7] = 1;
     }
     else {
+        /* 0x80045454: normal boot. State 0 (boot/save flow) starts at once and
+           selTitle_XX.bin is requested here. select_bin_XX.bin follows from the
+           selTitle gate in CSelect_Tick, then selMusic from 0x800470E0. */
         cSelect[0xe] = 0;
         cSelect[0xf] = 0;
-        /* Keep the normal boot path staged like FUN_800470E0: select_bin first,
-           then selTitle. The OP movie is started later by FUN_800E1988 state 0x0C. */
-        cSelect[3] = 1;
-        gCSelectHostBootPhase = CSELECT_HOST_BOOT_PHASE_WAIT_SELECT_BIN;
+        CSelect_StoreLoadedResource(cSelect, 0x701, CSelectResourcePaths[regionIndex][2]);
+        cSelect[7] = 1;
+        /* TODO: FUN_8004BC40 (fresh title setup of the +0xC4 player data). */
     }
+
+    /* 0x800454CC */
+    cSelect[0x1bf0 / 4] = 0;
+    cSelect[0x1bf4 / 4] = 0;
+    cSelect[0x1bf8 / 4] = 0;
 
     cSelect[0x6fc] = 0;
     cSelect[0x6fd] = 0;
@@ -3127,41 +4761,70 @@ int CSelect_Tick(int *cSelect) {
     regionIndex = CSelect_GetRegionIndex();
     resourceManager260 = GlobalRuntimeContext_GetPointerAt(0x260);
 
-    /* 0x80045C80 / CSelect_Tick resource gate. This follows the recovered load
-       flags before handing off to the active-screen switch at +0x1BF0. */
-    if (cSelect[7] == 1 && CSelect_IsResourceReady(cSelect[0x701])) {
-        cSelect[7] = 0;
-        cSelect[6] = 1;
-    }
-    if (cSelect[9] == 1 && CSelect_IsResourceReady(cSelect[0x702])) {
-        cSelect[9] = 0;
-        cSelect[8] = 1;
+    /* CSelect_Tick resource gates, 0x80045B20-0x80045D28, in DOL order. Every
+       gate waits for the whole resource queue (FUN_80144294 == 1). */
+    if (cSelect[0x2c / 4] == 1 && GlobalResourceManager260_UpdateProgress(resourceManager260) == 1) {
+        /* TODO: FUN_80104340(cmnAccMdl data) and FUN_80098D58 (movie slot). */
+        cSelect[0x2c / 4] = 0;
+        cSelect[0x28 / 4] = 1;
     }
 
-    if (cSelect[0x0c / 4] == 1 && GlobalResourceManager260_UpdateProgress(resourceManager260) == 1 && cSelect[2] == 0) {
+    /* selMusic loaded */
+    if (cSelect[0x0c / 4] == 1 && GlobalResourceManager260_UpdateProgress(resourceManager260) == 1 &&
+        cSelect[0x08 / 4] == 0) {
         cSelect[0x0c / 4] = 0;
-        cSelect[2] = 1;
+        cSelect[0x08 / 4] = 1;
         if (cSelect[0x10 / 4] == 0) {
-            RuntimeMemory_SetCriticalFlag(1);
-            CSelect_StoreLoadedResource(cSelect, 0x6ff, CSelectResourcePaths[regionIndex][1]);
-            RuntimeMemory_ClearCriticalFlag();
+            CSelect_StoreLoadedResource(cSelect, 0x1bfc / 4, CSelectResourcePaths[regionIndex][1]);
             cSelect[0x14 / 4] = 1;
         }
     }
 
-    if (cSelect[0x14 / 4] == 1 && CSelect_IsResourceReady(cSelect[0x6ff])) {
-        CSelect_ActivateSelectBinBridge(cSelect, regionIndex);
-        CSelect_CreateActiveScreen(cSelect);
+    /* select_bin loaded -> 0x800470E0 */
+    if (cSelect[0x14 / 4] == 1 && GlobalResourceManager260_UpdateProgress(resourceManager260) == 1) {
+        CSelect_LoadSelectBinSharedResources(cSelect);
     }
 
-    CSelect_TickHostBootSequence(cSelect, regionIndex);
+    /* selTitle loaded */
+    if (cSelect[0x1c / 4] == 1 && GlobalResourceManager260_UpdateProgress(resourceManager260) == 1 &&
+        cSelect[0x18 / 4] == 0) {
+        cSelect[0x1c / 4] = 0;
+        cSelect[0x18 / 4] = 1;
+        if (cSelect[0x10 / 4] == 0) {
+            CSelect_StoreLoadedResource(cSelect, 0x1bfc / 4, CSelectResourcePaths[regionIndex][1]);
+            cSelect[0x14 / 4] = 1;
+        }
+    }
 
-    if (cSelect[0x10 / 4] == 1 && cSelect[0x1bf0 / 4] == 0) {
-        CSelect_CreateActiveScreen(cSelect);
+    /* selResult loaded */
+    if (cSelect[0x24 / 4] == 1 && GlobalResourceManager260_UpdateProgress(resourceManager260) == 1 &&
+        cSelect[0x20 / 4] == 0) {
+        cSelect[0x24 / 4] = 0;
+        cSelect[0x20 / 4] = 1;
+        if (cSelect[0x08 / 4] == 0) {
+            CSelect_StoreLoadedResource(cSelect, 0x1c00 / 4, CSelectResourcePaths[regionIndex][0]);
+            cSelect[0x0c / 4] = 1;
+        }
+    }
+
+    if (cSelect[0x1bf0 / 4] == 0) {
+        if (!CSelect_IsNextStateBlocked(cSelect)) {
+            CSelect_CreateActiveScreen(cSelect);
+        }
+        else {
+            static int lastBlockedState = -1;
+            if (lastBlockedState != cSelect[0x3c / 4]) {
+                lastBlockedState = cSelect[0x3c / 4];
+                RuntimeDebugReport("CSelect: state %d waits (+0x10=%d +0x28=%d +0x2c=%d)\n",
+                                   cSelect[0x3c / 4], cSelect[0x10 / 4], cSelect[0x28 / 4], cSelect[0x2c / 4]);
+            }
+        }
     }
 
     if (cSelect[0x1bf0 / 4] != 0) {
         CharacterAssetManager_UpdateActiveAssets(gGameMainManagers.characterAssetManager, 0);
+        /* 0x800CC690 also runs the save-data flow 0x800CCD2C each frame. */
+        SaveFlow_Update(gGameMainManagers.characterAssetManager, Runtime_GetFrameStep());
         CSelect_UpdateSelectCommonBackground(cSelect);
 
         if (cSelect[0x38 / 4] == 0) {
@@ -3169,31 +4832,27 @@ int CSelect_Tick(int *cSelect) {
             int nextState = CSelectBootTitleFlow_Tick(
                 (CSelectBootTitleFlow *)RuntimePointerFromBits(cSelect[0x1bf0 / 4]), 0);
             if (nextState != 0) {
+                /* Boot/save flow finished: drop it and let the gate create the
+                   next screen (0x0C waits for selTitle, +0x18). */
                 cSelect[0x3c / 4] = nextState;
-                if (nextState == 0x0c &&
-                    gCSelectHostBootPhase == CSELECT_HOST_BOOT_PHASE_BOOT_FLOW &&
-                    cSelect[0x18 / 4] == 0 &&
-                    cSelect[0x1c / 4] == 0) {
-                    CSelect_StoreLoadedResource(cSelect, 0x701, CSelectResourcePaths[regionIndex][2]);
-                    cSelect[0x1c / 4] = 1;
-                    gCSelectHostBootPhase = CSELECT_HOST_BOOT_PHASE_WAIT_SEL_TITLE;
-                    gCSelectHostBootPhaseTicks = 0;
-                    RuntimeDebugReport("CSelect boot: boot flow requested selTitle\n");
-                }
+                cSelect[0x1bf0 / 4] = 0;
             }
             RenderBeginFrame();
             ApplyRenderConfig(0, &backgroundColor);
-            UiRootManager_UpdateRuntimeBeforeDraw(gGameMainManagers.uiRootManager, 0);
+            /* The UiRoot update pass (0x800FEA60) runs once per frame from the main
+               loop; ticking it here too consumed each button press twice. */
             CSelect_DrawSelectCommonBackground();
             if (gGameMainManagers.uiRootManager != 0) {
                 UiRootManager_DrawBootCzanGroups(gGameMainManagers.uiRootManager);
             }
+            PointerManager_DrawHost(gGameMainManagers.manager802e70b4);
             RenderEndFrame();
         }
         else if (cSelect[0x38 / 4] == 1) {
             unsigned int backgroundColor = 0xFFFFFFFFu;
             int nextState = CSelMode_Update();
             if (nextState != 1) {
+                CSelMode_Release();
                 cSelect[0x3c / 4] = nextState;
                 cSelect[0x1bf0 / 4] = 0;
                 CSelect_CreateActiveScreen(cSelect);
@@ -3202,8 +4861,18 @@ int CSelect_Tick(int *cSelect) {
             ApplyRenderConfig(0, &backgroundColor);
             CSelect_DrawSelectCommonBackground();
             if (cSelect[0x38 / 4] == 1) {
+                int presentationGroups[0x50];
+                int presentationCount;
+
                 CSelMode_DrawHostUi();
+                /* comAF header/footer (UI-root texture-frame banks) set up by
+                   CGameUiRoot_SetMenuPresentationMode; the DOL draws them through the
+                   global Czan list. */
+                presentationCount = UiRootManager_GetPresentationGroups(
+                    gGameMainManagers.uiRootManager, presentationGroups, 0x50);
+                CzanUiManager_DrawObjectGroupsReverse(0, presentationGroups, presentationCount);
             }
+            PointerManager_DrawHost(gGameMainManagers.manager802e70b4);
             RenderEndFrame();
         }
         else if (cSelect[0x38 / 4] == 2) {
@@ -3225,6 +4894,7 @@ int CSelect_Tick(int *cSelect) {
             else if (cSelect[0x38 / 4] == 1) {
                 CSelMode_DrawHostUi();
             }
+            PointerManager_DrawHost(gGameMainManagers.manager802e70b4);
             RenderEndFrame();
         }
         else if (cSelect[0x38 / 4] == 0x0c) {
@@ -3234,6 +4904,38 @@ int CSelect_Tick(int *cSelect) {
                 cSelect,
                 0);
             if (nextState != 0x0c) {
+                /* 0x800E1904..0x800E1914 (title destructor): drop the pointer region. */
+                CSelectTitleFlow *title = (CSelectTitleFlow *)RuntimePointerFromBits(cSelect[0x1bf0 / 4]);
+                if (title != 0) {
+                    CSelModeEntryKnownFields *entry1 = (CSelModeEntryKnownFields *)(void *)(title->storage + 0x1bc);
+                    PointerManager_UnregisterRegion(gGameMainManagers.manager802e70b4, entry1->transformOrState2);
+                }
+            }
+            if (nextState == 0x1d) {
+                /* Host bridge: 0x1D is the title idle-timeout attract/demo request.
+                   The demo path is not ported, so re-enter the title the way the
+                   attract loop does after the demo: entry mode 2 (OP movie, state
+                   0x0A) rather than the cold-boot NOTICE (mode 0). */
+                CSelectTitleFlow *title;
+
+                RuntimeDebugReport("CSelect: attract/demo request 0x1D not ported; restarting title\n");
+                nextState = 0x0c;
+                cSelect[0x3c / 4] = nextState;
+                cSelect[0x1bf0 / 4] = 0;
+                CSelect_CreateActiveScreen(cSelect);
+                title = (CSelectTitleFlow *)RuntimePointerFromBits(cSelect[0x1bf0 / 4]);
+                if (title != 0 && cSelect[0x38 / 4] == 0x0c) {
+                    int noticeGroup = *(int *)(void *)(title->storage + 0x20);
+
+                    if (noticeGroup >= 0) {
+                        CzanUiManager_SetObjectGroupDisplayFlags(0, noticeGroup, 1, 1);
+                    }
+                    *(int *)(void *)(title->storage + 0x0c) = 2;
+                    *(int *)(void *)(title->storage + 0x144) = 0x0a;
+                    CSelectTitleFlow_StartOpeningMovie(title, cSelect);
+                }
+            }
+            else if (nextState != 0x0c) {
                 cSelect[0x3c / 4] = nextState;
                 cSelect[0x1bf0 / 4] = 0;
                 CSelect_CreateActiveScreen(cSelect);
@@ -3247,6 +4949,7 @@ int CSelect_Tick(int *cSelect) {
             else if (cSelect[0x38 / 4] == 1) {
                 CSelMode_DrawHostUi();
             }
+            PointerManager_DrawHost(gGameMainManagers.manager802e70b4);
             RenderEndFrame();
         }
     }

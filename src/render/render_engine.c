@@ -1,4 +1,7 @@
 #include "render/render_engine.h"
+#include "render/font_tables.h"
+
+#include "game/cgame.h"
 
 #include "platform/render_backend.h"
 #include "resource/czan_link.h"
@@ -6,11 +9,13 @@
 #include "runtime/cache.h"
 #include "runtime/memory.h"
 #include "runtime/module_system.h"
+#include "select/csel_mode.h"
 #include "ui/czan_ui.h"
 
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define TEXTURE_SLOT_AUTO 0xFFFFFFFFu
@@ -28,7 +33,6 @@ static TextureManagerKnownFields gUiRootTextureManager = {
 static void *gUiRootHostPointers[UI_ROOT_HOST_POINTERS];
 static int *gUiRootCurrentManager;
 static unsigned int gHostNextTextureSlot;
-static int gUiPromptNextSurfaceSlot = 1;
 
 static void UiRootBootTransition_Reset(int *subManager);
 
@@ -160,12 +164,379 @@ static void UiRootBootPromptHelper_SetEffectSlot(int helperBits, int effectSlot)
     *(int *)(void *)(helper + 0xbc) = effectSlot;
 }
 
-static void UiRootBootPromptHelper_EnsureSurface(unsigned char *helper) {
-    /* 0x800FD874 calls the font manager allocator (0x800B912C) once and stores
-       the surface slot at helper +8. The host reserves a stable slot id here; the
-       backing glyph/surface pixels are owned by the pending 0x800B937C port. */
+
+/* gManager_802E70E8 (font manager) prompt cursor: +0x1C selected choice, +0x20 number
+   of '#sl' choices counted while the active prompt text is drawn. The host font
+   renderer (0x800B937C) is not ported, so UiPromptText_Analyze produces the same
+   values from the message text. */
+static int gFontPromptCursor;
+static int gFontPromptChoiceCount;
+
+void FontManager_ResetPromptCursor(void) {
+    /* 0x8010280C / 0x80102A40: font manager +0x1C = +0x20 = 0. */
+    gFontPromptCursor = 0;
+    gFontPromptChoiceCount = 0;
+}
+
+void FontManager_SetPromptCursor(int choice) {
+    gFontPromptCursor = choice;
+}
+
+int FontManager_GetPromptCursor(void) {
+    return gFontPromptCursor;
+}
+
+/* ---- Font manager text renderer (gManager_802E70E8) ------------------------------
+   font_us.bin image 0 is a 320x312 glyph atlas (24-pixel rows), image 1 the choice
+   cursor. Text styles live at font +0x80 + slot * 0x1C (0x800B912C):
+   +0 width limit, +4 glyph width, +8 glyph height, +0xC line spacing, +0x10 RGBA,
+   +0x14 alignment (0 left, 1 centre, 2 right, 4 centre both ways). */
+typedef struct HostFontStyle {
+    float maxWidth;
+    float glyphWidth;
+    float glyphHeight;
+    float lineSpacing;
+    unsigned char color[4];
+    int alignment;
+    int used;
+} HostFontStyle;
+
+static HostFontStyle gFontStyles[16];
+
+int FontManager_AllocateStyle(const unsigned char *color, int alignment,
+                              float maxWidth, float glyphWidth, float glyphHeight, float lineSpacing) {
+    /* 0x800B912C */
+    int slot;
+
+    for (slot = 0; slot < 16; slot++) {
+        if (!gFontStyles[slot].used) {
+            gFontStyles[slot].maxWidth = maxWidth;
+            gFontStyles[slot].glyphWidth = glyphWidth;
+            gFontStyles[slot].glyphHeight = glyphHeight;
+            gFontStyles[slot].lineSpacing = lineSpacing;
+            memcpy(gFontStyles[slot].color, color, 4);
+            gFontStyles[slot].alignment = alignment;
+            gFontStyles[slot].used = 1;
+            return slot;
+        }
+    }
+    return -1;
+}
+
+void FontManager_FreeStyle(int slot) {
+    /* 0x800B922C */
+    if (slot >= 0 && slot < 16) {
+        gFontStyles[slot].used = 0;
+    }
+}
+
+static int Font_FindGlyph(unsigned int code) {
+    /* 0x800B7650: binary search, missing characters use glyph 0xA2. */
+    int low = 0;
+    int high = 251;
+
+    while (low <= high) {
+        int mid = (low + high) / 2;
+
+        if (kFontGlyphs[mid].code == code) {
+            return mid;
+        }
+        if (kFontGlyphs[mid].code < code) {
+            low = mid + 1;
+        }
+        else {
+            high = mid - 1;
+        }
+    }
+    return 0xa2;
+}
+
+static int Font_DecodeUtf8(const unsigned char *text, unsigned int *code) {
+    /* 0x800B7540: UTF-8 sequence length; the glyph code is the raw bytes packed. */
+    int length;
+    int i;
+
+    if (text[0] == 0) {
+        *code = 0;
+        return 0;
+    }
+    if ((text[0] & 0x80) == 0) {
+        length = 1;
+    }
+    else if ((text[0] & 0xe0) == 0xc0) {
+        length = 2;
+    }
+    else if ((text[0] & 0xf0) == 0xe0) {
+        length = 3;
+    }
+    else {
+        length = 4;
+    }
+    *code = 0;
+    for (i = 0; i < length && text[i] != 0; i++) {
+        *code = (*code << 8) | text[i];
+    }
+    return i;
+}
+
+static void Font_DrawQuad(float x, float y, float width, float height,
+                          float u0, float v0, float u1, float v1,
+                          const unsigned char *rgba, int textureIndex) {
+    unsigned int packedColor = ((unsigned int)rgba[0] << 24) | ((unsigned int)rgba[1] << 16) |
+                               ((unsigned int)rgba[2] << 8) | (unsigned int)rgba[3];
+    int textureSlot = FontManager_GetTextureSlot();
+    int x0 = (int)(x + 0.5f);
+    int y0 = (int)(y + 0.5f);
+    int x1 = (int)(x + width + 0.5f);
+    int y1 = (int)(y + height + 0.5f);
+
+    if (textureSlot < 0) {
+        return;
+    }
+    DrawTexturedTriangle2D(x0, y0, u0, v0, x1, y0, u1, v0, x1, y1, u1, v1,
+                           (void *)(intptr_t)textureSlot, textureIndex, &packedColor);
+    DrawTexturedTriangle2D(x0, y0, u0, v0, x1, y1, u1, v1, x0, y1, u0, v1,
+                           (void *)(intptr_t)textureSlot, textureIndex, &packedColor);
+}
+
+static void Font_DrawGlyph(int glyph, float x, float y, float scaleX, float glyphHeight, const unsigned char *rgba) {
+    /* 0x800B8B70: black shadow at +1,+1, then the glyph. */
+    const FontGlyphEntry *entry = &kFontGlyphs[glyph];
+    float u0 = (float)entry->x / 320.0f;
+    float v0 = (float)entry->y / 312.0f;
+    float u1 = u0 + (float)entry->width / 320.0f;
+    float v1 = v0 + 24.0f / 312.0f;
+    float width = (float)entry->width * scaleX;
+    unsigned char shadow[4];
+
+    shadow[0] = 0;
+    shadow[1] = 0;
+    shadow[2] = 0;
+    shadow[3] = rgba[3];
+    Font_DrawQuad(x + 1.0f, y + 1.0f, width, glyphHeight, u0, v0, u1, v1, shadow, 0);
+    Font_DrawQuad(x, y, width, glyphHeight, u0, v0, u1, v1, rgba, 0);
+}
+
+enum { FONT_PASS_DRAW_ALL = 0, FONT_PASS_MEASURE_LINE = 1, FONT_PASS_DRAW_LINE = 2 };
+
+typedef struct FontPassResult {
+    float lineWidth;    /* measure: pen advance of the line */
+    int consumed;       /* draw line: bytes consumed */
+    int finished;       /* end of text or page break */
+    int pageBreak;      /* '#pn' seen (font +0x18) */
+    float lineExtra;    /* extra height of the line (a 28-pixel '#t' banner) */
+} FontPassResult;
+
+static void Font_RunPass(const HostFontStyle *style, const unsigned char *baseColor, float scaleX, float scaleY,
+                         const char *text, float x, float y, int pass, FontPassResult *result) {
+    /* 0x800B7AA8. Pass 0 draws everything with wrapping, pass 1 measures one line,
+       pass 2 draws one line. Control codes: '#c<A..Y|Z>' colour (palette / default),
+       '#pn' page break, '#sl' choice (cursor on the selected one), '#t<x>' icon (not
+       ported, skipped); anything else prints literally. */
+    const unsigned char *p = (const unsigned char *)text;
+    float glyphScale = style->glyphWidth / 20.0f * scaleX;
+    float glyphHeight = style->glyphHeight * scaleY;
+    float lineAdvance = (style->glyphHeight + style->lineSpacing) * scaleY;
+    float limit = x + style->maxWidth * scaleX;
+    float penX = x;
+    float penY = y;
+    float lineExtra = 0.0f;
+    unsigned char color[4];
+
+    memcpy(color, baseColor, 4);
+    result->lineWidth = 0.0f;
+    result->consumed = 0;
+    result->finished = 0;
+    result->pageBreak = 0;
+
+    for (;;) {
+        unsigned int code;
+        int length = Font_DecodeUtf8(p, &code);
+
+        if (length == 0) {
+            result->finished = 1;
+            break;
+        }
+        if (code == '\n') {
+            p += length;
+            if (pass != FONT_PASS_DRAW_ALL) {
+                break;
+            }
+            penX = x;
+            penY += lineAdvance + lineExtra * scaleY;
+            lineExtra = 0.0f;
+            continue;
+        }
+        if (code == '#' && p[1] != 0 && p[2] != 0) {
+            unsigned char kind = (unsigned char)(p[1] | 0x20);
+            unsigned char arg = p[2];
+
+            if (kind == 'c') {
+                if (arg == 'Z' || arg == 'z') {
+                    memcpy(color, baseColor, 3);
+                }
+                else if (arg >= 'A' && arg <= 'Y') {
+                    memcpy(color, kFontPalette[arg - 'A'], 3);
+                }
+                else if (arg >= 'a' && arg <= 'y') {
+                    memcpy(color, kFontPalette[arg - 'a'], 3);
+                }
+                p += 3;
+                continue;
+            }
+            if (kind == 'p' && (arg == 'n' || arg == 'N')) {
+                result->pageBreak = 1;
+                result->finished = 1;
+                p += 3;
+                break;
+            }
+            if (kind == 's' && (arg == 'l' || arg == 'L')) {
+                float cursorWidth = 32.0f * glyphScale;
+
+                if (pass != FONT_PASS_MEASURE_LINE) {
+                    if (gFontPromptChoiceCount == gFontPromptCursor) {
+                        unsigned char cursorColor[4];
+
+                        memcpy(cursorColor, kFontPalette[0], 3);
+                        cursorColor[3] = color[3];
+                        Font_DrawQuad(penX, penY, cursorWidth, glyphHeight, 0.0f, 0.0f, 1.0f, 1.0f, cursorColor, 1);
+                    }
+                    gFontPromptChoiceCount++;
+                }
+                penX += cursorWidth;
+                p += 3;
+                continue;
+            }
+            if (kind == 't') {
+                /* 0x800B8540..0x800B87B0: '#tA'..'#tK' draws banner image letter-'A'+2
+                   (WARNING!, SONG CLEARED!!, ...) 450x28 at the pen and makes the line
+                   28 pixels tall. */
+                int banner = (arg | 0x20) - 'a';
+
+                if (banner >= 0 && banner <= 10) {
+                    lineExtra = 28.0f - (style->glyphHeight + style->lineSpacing);
+                    if (pass != FONT_PASS_MEASURE_LINE) {
+                        unsigned char bannerColor[4];
+
+                        memcpy(bannerColor, kFontPalette[0], 3);
+                        bannerColor[3] = color[3];
+                        Font_DrawQuad(penX, penY, 450.0f * scaleX, 28.0f * scaleY, 0.0f, 0.0f, 1.0f, 1.0f,
+                                      bannerColor, banner + 2);
+                    }
+                    penX += 450.0f * scaleX;
+                }
+                p += 3;
+                continue;
+            }
+        }
+        {
+            int glyph = Font_FindGlyph(code);
+            float advance = (float)kFontGlyphs[glyph].width * glyphScale + 1.0f;
+
+            if (penX + advance > limit && penX > x) {
+                if (pass != FONT_PASS_DRAW_ALL) {
+                    break;
+                }
+                penX = x;
+                penY += lineAdvance + lineExtra * scaleY;
+                lineExtra = 0.0f;
+            }
+            if (pass != FONT_PASS_MEASURE_LINE && code != ' ') {
+                Font_DrawGlyph(glyph, penX, penY, glyphScale, glyphHeight, color);
+            }
+            penX += advance;
+            p += length;
+        }
+    }
+    result->lineWidth = penX - x;
+    result->lineExtra = lineExtra;
+    result->consumed = (int)((const char *)p - text);
+}
+
+static int Font_DrawText(const HostFontStyle *style, const unsigned char *baseColor, float scaleX, float scaleY,
+                         const char *text, float x, float y) {
+    /* 0x800B7778: alignment 0 draws in one pass; others measure and place each line.
+       Returns 1 when the text stops at a '#pn' page break (textbox +0x64). */
+    FontPassResult result;
+    float lineAdvance = (style->glyphHeight + style->lineSpacing) * scaleY;
+
+    gFontPromptChoiceCount = 0;
+    if (text == 0) {
+        return 0;
+    }
+    if (style->alignment == 0 || style->alignment == 3) {
+        Font_RunPass(style, baseColor, scaleX, scaleY, text, x, y, FONT_PASS_DRAW_ALL, &result);
+        return result.pageBreak;
+    }
+    if (style->alignment == 4) {
+        y -= style->glyphHeight * scaleY * 0.5f;
+    }
+    for (;;) {
+        float lineX;
+
+        Font_RunPass(style, baseColor, scaleX, scaleY, text, x, y, FONT_PASS_MEASURE_LINE, &result);
+        lineX = (style->alignment == 2) ? x - result.lineWidth : x - result.lineWidth * 0.5f;
+        Font_RunPass(style, baseColor, scaleX, scaleY, text, lineX, y, FONT_PASS_DRAW_LINE, &result);
+        if (result.finished || result.consumed == 0) {
+            return result.pageBreak;
+        }
+        text += result.consumed;
+        y += lineAdvance + result.lineExtra * scaleY;
+    }
+}
+
+static void UiRootBootPromptHelper_EnsureSurface(unsigned char *helper, const unsigned char *color, int alignment,
+                                                 float maxWidth, float glyphWidth, float glyphHeight,
+                                                 float lineSpacing) {
+    /* 0x800FD874: allocate the helper's text style once (font manager 0x800B912C)
+       and keep the slot at helper +8. */
     if (helper != 0 && *(int *)(void *)(helper + 8) == -1) {
-        *(int *)(void *)(helper + 8) = gUiPromptNextSurfaceSlot++;
+        *(int *)(void *)(helper + 8) =
+            FontManager_AllocateStyle(color, alignment, maxWidth, glyphWidth, glyphHeight, lineSpacing);
+    }
+}
+
+static const char *UiPromptHelper_ResolveText(unsigned char *helper) {
+    int *textManager;
+
+    if (helper == 0) {
+        return 0;
+    }
+    if (*(int *)(void *)(helper + 0xc0) == -1) {
+        return (const char *)(helper + 0x24);
+    }
+    textManager = GameMain_GetTextManager();
+    TextManager_SelectBank(textManager, *(int *)(void *)(helper + 0xbc));
+    return TextManager_GetText(textManager, *(int *)(void *)(helper + 0xc0));
+}
+
+static void UiPromptText_Analyze(const char *text, int *outMorePages, int *outChoiceCount) {
+    /* Control codes are '#' + two letters; the second letter selects the action in
+       the font renderer (~0x800B8240..0x800B82D4): 'n'/'N' = page break (renderer
+       returns 1 -> textbox +0x64, "A shows the next page"), 'l'/'L' = selectable
+       choice (font manager +0x20 += 1). */
+    int morePages = 0;
+    int choices = 0;
+    const char *p;
+
+    for (p = text; p != 0 && *p != '\0'; p++) {
+        if (p[0] == '#' && p[1] != '\0' && p[2] != '\0') {
+            char code = p[2];
+
+            if (code == 'n' || code == 'N') {
+                morePages = 1;
+            }
+            else if (code == 'l' || code == 'L') {
+                choices++;
+            }
+            p += 2;
+        }
+    }
+    if (outMorePages != 0) {
+        *outMorePages = morePages;
+    }
+    if (outChoiceCount != 0) {
+        *outChoiceCount = choices;
     }
 }
 
@@ -179,6 +550,15 @@ void UiPromptEffectHelper_DrawByBits(int helperBits) {
        prepares DAT_802E70E8 font state, and calls 0x800B937C. Until the full font
        surface renderer is ported, keep the same gating and text-selection side
        effects and report a ready status without drawing fake host placeholders. */
+    if (getenv("DDRII_TRACE_TEXT") != 0 && helper != 0) {
+        static int tracedGate;
+        if (tracedGate++ < 10) {
+            RuntimeDebugReport("text gate: +10=%d +14=%d +0c=%d +b8=%d +08=%d\n",
+                               *(int *)(void *)(helper + 0x10), *(int *)(void *)(helper + 0x14),
+                               *(int *)(void *)(helper + 0x0c), *(int *)(void *)(helper + 0xb8),
+                               *(int *)(void *)(helper + 0x08));
+        }
+    }
     if (helper == 0 ||
         *(int *)(void *)(helper + 0x10) == -1 ||
         *(int *)(void *)(helper + 0x14) == -1 ||
@@ -186,19 +566,53 @@ void UiPromptEffectHelper_DrawByBits(int helperBits) {
         *(int *)(void *)(helper + 0xb8) != 0) {
         return;
     }
-    UiRootBootPromptHelper_EnsureSurface(helper);
+    /* +0x64 is the renderer's return value: 1 when the text ends a page with '#pn'
+       (more pages follow), not merely "text present". */
+    text = UiPromptHelper_ResolveText(helper);
+    (void)textManager;
+    UiPromptText_Analyze(text, (int *)(void *)(helper + 0x64), &gFontPromptChoiceCount);
 
-    if (*(int *)(void *)(helper + 0xc0) == -1) {
-        text = (const char *)(helper + 0x24);
-    }
-    else {
-        textManager = GameMain_GetTextManager();
-        TextManager_SelectBank(textManager, *(int *)(void *)(helper + 0xbc));
-        text = TextManager_GetText(textManager, *(int *)(void *)(helper + 0xc0));
-    }
+    /* 0x800FD970..0x800FDB80: origin = sprite transform applied to the offset at
+       helper +0x1C/+0x20; colour = sprite colour, RGB from helper +0xB0 when +0xC4 is
+       0, alpha from +0xB3 when +0xC8 is 0; the style colour replaces the RGB. */
+    {
+        int slot = *(int *)(void *)(helper + 8);
+        float x;
+        float y;
+        float scaleX;
+        float scaleY;
+        unsigned char spriteColor[4];
+        unsigned char color[4];
 
-    *(int *)(void *)(helper + 100) =
-        (text != 0 && text[0] != '\0' && strcmp(text, "ERROR") != 0) ? 1 : 0;
+        if (getenv("DDRII_TRACE_TEXT") != 0) {
+            static int traced;
+            if (traced++ < 20) {
+                RuntimeDebugReport("text: helper slot=%d group=%d child=%d text=%.40s\n",
+                                   slot, *(int *)(void *)(helper + 0x10), *(int *)(void *)(helper + 0x14),
+                                   text != 0 ? text : "(null)");
+            }
+        }
+        if (slot < 0 || slot >= 16 || !gFontStyles[slot].used ||
+            !CzanUiManager_GetChildObjectScreenTransform(0, *(int *)(void *)(helper + 0x10),
+                                                         *(int *)(void *)(helper + 0x14),
+                                                         &x, &y, &scaleX, &scaleY, spriteColor)) {
+            return;
+        }
+        if (*(int *)(void *)(helper + 0xc4) == 0) {
+            spriteColor[0] = helper[0xb0];
+            spriteColor[1] = helper[0xb1];
+            spriteColor[2] = helper[0xb2];
+        }
+        if (*(int *)(void *)(helper + 0xc8) == 0) {
+            spriteColor[3] = helper[0xb3];
+        }
+        memcpy(color, gFontStyles[slot].color, 3);
+        color[3] = spriteColor[3];
+        x += *(float *)(void *)(helper + 0x1c) * scaleX;
+        y += *(float *)(void *)(helper + 0x20) * scaleY;
+        *(int *)(void *)(helper + 0x64) =
+            Font_DrawText(&gFontStyles[slot], color, scaleX, scaleY, text, x, y);
+    }
 }
 
 static unsigned int Render_ReadBe32(const unsigned char *data) {
@@ -1158,6 +1572,28 @@ int UiRootManager_CreateReferenceObjectGroup(
     return cloneGroupHandle;
 }
 
+static int UiRootSubManager_CreateConfirmIndicator(int panelGroupHandle, int panelChildIndex) {
+    /* 0x801002E4(uiRoot) clones uiRoot[2] with flags 2, then the caller links and
+       aligns the clone against panelGroupHandle/panelChildIndex. */
+    int *uiRootManager = gUiRootCurrentManager;
+    int cloneGroupHandle;
+
+    if (uiRootManager == 0 || uiRootManager[2] == -1) {
+        return -1;
+    }
+    cloneGroupHandle = CzanUiManager_CloneObjectGroup(0, uiRootManager[2], 2, 0);
+    if (cloneGroupHandle == -1 || panelGroupHandle == -1) {
+        return cloneGroupHandle;
+    }
+    CzanUiManager_LinkObjectGroupToReferenceObject(0, cloneGroupHandle, panelGroupHandle, panelChildIndex, 0x1f);
+    CzanUiManager_AlignObjectGroupByReferenceEdge(
+        0,
+        cloneGroupHandle,
+        CzanUiManager_GetChildObjectReferenceEdge(0, panelGroupHandle, panelChildIndex),
+        0);
+    return cloneGroupHandle;
+}
+
 void UiRootSubManager_LoadCzanGroups(int *subManager, void *linkData) {
     /* 0x80100944 loads the sub-manager allocated by UiRootManager_LoadResource
        for WII block 4. It links a nested WII resource, creates Czan object groups
@@ -1198,17 +1634,13 @@ void UiRootSubManager_LoadCzanGroups(int *subManager, void *linkData) {
             groupHandle != -1 ? CzanUiManager_CloneObjectGroup(0, groupHandle, 2, 0) : -1;
     }
 
-    subManager[9] = UiRootManager_CreateReferenceObjectGroup(0, subManager[1], 0x0d, 0x1f);
-    if (subManager[9] != -1 && subManager[1] != -1) {
-        int referenceEdge = CzanUiManager_GetChildObjectReferenceEdge(0, subManager[1], 0x0d);
-        CzanUiManager_AlignObjectGroupByReferenceEdge(0, subManager[9], referenceEdge, 0);
-    }
-
-    subManager[10] = UiRootManager_CreateReferenceObjectGroup(0, subManager[2], 0x10, 0x1f);
-    if (subManager[10] != -1 && subManager[2] != -1) {
-        int referenceEdge = CzanUiManager_GetChildObjectReferenceEdge(0, subManager[2], 0x10);
-        CzanUiManager_AlignObjectGroupByReferenceEdge(0, subManager[10], referenceEdge, 0);
-    }
+    /* 0x80100AA8..0x80100B4C: the page/next indicators are clones of uiRoot[2]
+       (comAF block 1, 'com_01_Confirm_') made by 0x801002E4 with flags 2, linked to
+       panel child 0x0D (window c[1]) / child 0x10 (window c[2]) with mode 0x1F and
+       edge-aligned to that child's priority + edge (0x80175804). Unlike 0x800FEC3C the
+       reference child is left enabled. */
+    subManager[9] = UiRootSubManager_CreateConfirmIndicator(subManager[1], 0x0d);
+    subManager[10] = UiRootSubManager_CreateConfirmIndicator(subManager[2], 0x10);
 
     subManager[0x1d] = subManager[3] != -1 ?
         CzanUiManager_GetChildObjectReferenceEdge(0, subManager[3], 0) :
@@ -1262,6 +1694,7 @@ static void UiRootBootTransition_Reset(int *subManager) {
     subManager[0x1a] = 1;
     subManager[0x1c] = 0;
     subManager[0x1e] = -1;
+    FontManager_ResetPromptCursor();
     ClearMemory(subManager + 0x12, 0, 0x20);
 
     if (subManager[0] != -1) {
@@ -1288,24 +1721,395 @@ static void UiRootBootTransition_Reset(int *subManager) {
     }
 }
 
+/* Prompt controller (uiRoot +0x30) fields, as int indices:
+   [0] window group, [1]/[2] text panels, [3..8] buttons, [9] (+0x24) / [10] (+0x28)
+   page/next indicators, [0x0b] mode, [0x0c] phase (0 opening, 1 input, 2 closing),
+   [0x0d] controller slot, [0x0e] active text panel, [0x0f] selected button,
+   [0x10] text has more pages, [0x11] result (-1 none, -2 back, else choice/button),
+   [0x1a] page indicator suppression, [0x1b] per-button base message, [0x1c] per-button
+   message enable, [0x1d] button priority, [0x1e] open cue, [0x1f..0x20] text panel
+   helpers, [0x21..0x26] button label helpers, [0x27] pointer input manager. */
+#define PROMPT_INPUT_LEFT 0x1u
+#define PROMPT_INPUT_RIGHT 0x2u
+#define PROMPT_INPUT_DOWN 0x4u
+#define PROMPT_INPUT_UP 0x8u
+#define PROMPT_CUE_CONFIRM 0x24a
+#define PROMPT_CUE_MOVE 0x250
+#define PROMPT_CUE_BACK 0x253
+#define PROMPT_CUE_DENIED 0x254
+
+static void UiPrompt_StartGroupAnimation(int objectGroupHandle, int animationIndex, int resetMode, int animationMode) {
+    /* 0x80062D58 */
+    if (objectGroupHandle == -1) {
+        return;
+    }
+    CzanUiManager_SetObjectGroupAnimationMode(0, objectGroupHandle, (unsigned char)animationMode);
+    CzanUiManager_StartObjectGroupAnimation(0.0, 0, objectGroupHandle, animationIndex);
+    CzanUiManager_SetObjectGroupAnimationResetMode(0, objectGroupHandle, (unsigned char)resetMode);
+}
+
+static void UiPrompt_PlayCue(int cueId) {
+    CharacterAssetManager_PlayCue(GameMain_GetCharacterAssetManager(), cueId);
+}
+
+static int UiPrompt_Pressed(int *controller, unsigned int mask) {
+    return InputOrMenuStateManager_TestPressedMask(GameMain_GetInputOrMenuStateManager(), controller[0x0d], mask) != 0;
+}
+
+static void UiPrompt_MoveSelection(int *controller, int newSelection) {
+    /* Repeated block in 0x80100DCC (e.g. 0x80101548..0x80101640). */
+    int oldSelection = controller[0x0f];
+
+    UiPrompt_StartGroupAnimation(controller[3 + oldSelection], 0, 0, 0);
+    if (controller[3 + oldSelection] != -1) {
+        CzanUiManager_AlignObjectGroupByReferenceEdge(0, controller[3 + oldSelection], controller[0x1d], 0);
+    }
+    controller[0x0f] = newSelection;
+    UiPrompt_StartGroupAnimation(controller[3 + newSelection], 2, 0, 0);
+    if (controller[3 + newSelection] != -1) {
+        CzanUiManager_AlignObjectGroupByReferenceEdge(0, controller[3 + newSelection], controller[0x1d] - 5, 0);
+    }
+    FontManager_SetPromptCursor(newSelection);
+    if (controller[0x1c] == 1 && controller[0x1b] != -1) {
+        UiRootBootPromptHelper_SetTextIndex(controller[0x1f + controller[0x0e]], controller[0x1b] + newSelection);
+    }
+    UiPrompt_PlayCue(PROMPT_CUE_MOVE);
+}
+
+static void UiPrompt_UpdateButtonGrid(int *controller, int buttonCount) {
+    /* 0x80101408..0x801021D8: button-grid prompts (modes 0..5, 8, 9). */
+    int selection = controller[0x0f];
+
+    if (InputOrMenuStateManager_IsConfirmPressed(GameMain_GetInputOrMenuStateManager(), controller[0x0d]) != 0) {
+        if (controller[0x0b] == 4 && selection == 2) {
+            UiPrompt_PlayCue(PROMPT_CUE_DENIED);
+            return;
+        }
+        UiPrompt_StartGroupAnimation(controller[3 + selection], 1, 0, 0);
+        controller[0x11] = selection;
+        UiPrompt_PlayCue(PROMPT_CUE_CONFIRM);
+        return;
+    }
+    if (InputOrMenuStateManager_IsBackPressed(GameMain_GetInputOrMenuStateManager(), controller[0x0d]) != 0) {
+        controller[0x11] = -2;
+        UiPrompt_PlayCue(PROMPT_CUE_BACK);
+        return;
+    }
+
+    if (buttonCount == 2) {
+        if (UiPrompt_Pressed(controller, 0xf)) {
+            UiPrompt_MoveSelection(controller, selection + 1 < buttonCount ? selection + 1 : 0);
+        }
+    }
+    else if (buttonCount == 3) {
+        /* Two buttons on the top row (0, 1) and one below (2). */
+        if (UiPrompt_Pressed(controller, PROMPT_INPUT_RIGHT) || UiPrompt_Pressed(controller, PROMPT_INPUT_LEFT)) {
+            if (selection == 1) {
+                UiPrompt_MoveSelection(controller, 0);
+            }
+            else if (selection == 0) {
+                UiPrompt_MoveSelection(controller, 1);
+            }
+        }
+        if (UiPrompt_Pressed(controller, PROMPT_INPUT_UP) || UiPrompt_Pressed(controller, PROMPT_INPUT_DOWN)) {
+            UiPrompt_MoveSelection(controller, controller[0x0f] == 2 ? 0 : 2);
+        }
+    }
+    else if (buttonCount == 4) {
+        /* 2x2 grid. */
+        if (UiPrompt_Pressed(controller, PROMPT_INPUT_RIGHT)) {
+            UiPrompt_MoveSelection(controller, selection + 1 < buttonCount ? selection + 1 : 0);
+        }
+        else if (UiPrompt_Pressed(controller, PROMPT_INPUT_LEFT)) {
+            UiPrompt_MoveSelection(controller, selection - 1 >= 0 ? selection - 1 : buttonCount - 1);
+        }
+        else if (UiPrompt_Pressed(controller, PROMPT_INPUT_DOWN | PROMPT_INPUT_UP)) {
+            UiPrompt_MoveSelection(controller, selection + 2 < buttonCount ? selection + 2 : selection + 2 - buttonCount);
+        }
+    }
+    else if (buttonCount >= 5) {
+        /* Two columns. */
+        if (UiPrompt_Pressed(controller, PROMPT_INPUT_RIGHT)) {
+            UiPrompt_MoveSelection(controller, selection + 1 < buttonCount ? selection + 1 : 0);
+        }
+        else if (UiPrompt_Pressed(controller, PROMPT_INPUT_LEFT)) {
+            UiPrompt_MoveSelection(controller, selection - 1 >= 0 ? selection - 1 : buttonCount - 1);
+        }
+        else if (UiPrompt_Pressed(controller, PROMPT_INPUT_DOWN)) {
+            UiPrompt_MoveSelection(controller, selection + 2 < buttonCount ? selection + 2 : selection + 2 - buttonCount);
+        }
+        else if (UiPrompt_Pressed(controller, PROMPT_INPUT_UP)) {
+            UiPrompt_MoveSelection(controller, selection - 2 >= 0 ? selection - 2 : selection - 2 + buttonCount);
+        }
+    }
+    /* 0x801021DC..0x8010237C: Wii Remote pointer hover over the buttons (hit test
+       0x8010EC54, rumble 0x8010F0A4). The PC host has no IR pointer. */
+}
+
+static void UiPrompt_UpdateInput(int *controller, int buttonCount) {
+    /* 0x80101268: phase 1. */
+    int *inputManager = GameMain_GetInputOrMenuStateManager();
+    unsigned char *panel = UiRootBootPromptHelper_Get(controller[0x1f + controller[0x0e]]);
+    int choiceCount;
+    int morePages = 0;
+
+    UiPromptText_Analyze(UiPromptHelper_ResolveText(panel), &morePages, &choiceCount);
+    if (panel != 0) {
+        *(int *)(void *)(panel + 0x64) = morePages;
+    }
+    gFontPromptChoiceCount = choiceCount;
+    controller[0x10] = morePages;
+
+    if (gFontPromptChoiceCount != 0) {
+        /* Choices embedded in the text ("#slYes\n#slNo"): the font cursor. */
+        int cursor = gFontPromptCursor;
+
+        if (InputOrMenuStateManager_IsConfirmPressed(inputManager, controller[0x0d]) != 0) {
+            controller[0x11] = cursor;
+            UiPrompt_PlayCue(PROMPT_CUE_CONFIRM);
+        }
+        else if (UiPrompt_Pressed(controller, PROMPT_INPUT_RIGHT | PROMPT_INPUT_DOWN)) {
+            gFontPromptCursor = cursor + 1 < gFontPromptChoiceCount ? cursor + 1 : 0;
+            UiPrompt_PlayCue(PROMPT_CUE_MOVE);
+        }
+        else if (UiPrompt_Pressed(controller, PROMPT_INPUT_LEFT | PROMPT_INPUT_UP)) {
+            gFontPromptCursor = cursor != 0 ? cursor - 1 : gFontPromptChoiceCount - 1;
+            UiPrompt_PlayCue(PROMPT_CUE_MOVE);
+        }
+        return;
+    }
+    if (controller[0x10] != 0) {
+        /* More pages: A shows the next message (0x800FDC00). */
+        if (InputOrMenuStateManager_IsConfirmPressed(inputManager, controller[0x0d]) != 0) {
+            if (panel != 0 && *(int *)(void *)(panel + 0xc0) != -1 && *(int *)(void *)(panel + 0x64) == 1) {
+                *(int *)(void *)(panel + 0xc0) += 1;
+            }
+            UiPrompt_PlayCue(PROMPT_CUE_CONFIRM);
+        }
+        return;
+    }
+    if (controller[0x0b] == 6 || controller[0x0b] == 7) {
+        /* Message-only modes: no buttons. */
+        return;
+    }
+    UiPrompt_UpdateButtonGrid(controller, buttonCount);
+}
+
+
+/* 0x8027BA50: per-mode prompt layout, 16 bytes per mode:
+   [0] text panel (0 = small 'ms_slewin_S01', 1 = large 'ms_slewin_L01')
+   [1] panel texture frame, [2..3] panel child the text is anchored to,
+   [4 + 2i] button i texture frame (-1 = hidden), [5 + 2i] panel child it attaches to. */
+static const signed char kPromptLayout[10][16] = {
+    { 0, 0, 0, 8,  0, 13,  1, 12, -1, 0, -1, 0, -1, 0, -1, 0 },
+    { 0, 0, 0, 8,  2, 2,   3, 5,  -1, 0, -1, 0, -1, 0, -1, 0 },
+    { 1, 0, 0, 11, 8, 1,  10, 3,  11, 4,  9, 6,  1, 7, -1, 0 },
+    { 1, 0, 0, 11, 13, 1, 14, 3,  15, 4, 16, 6,  0, 7,  1, 9 },
+    { 0, 0, 0, 8,  4, 1,   5, 3,   7, 4,  1, 6, -1, 0, -1, 0 },
+    { 0, 0, 0, 8,  4, 1,   5, 3,   6, 4,  1, 6, -1, 0, -1, 0 },
+    { 0, 1, 0, 9, -1, 0,  -1, 0,  -1, 0, -1, 0, -1, 0, -1, 0 },
+    { 1, 1, 0, 12, -1, 0, -1, 0,  -1, 0, -1, 0, -1, 0, -1, 0 },
+    { 0, 0, 0, 8, 13, 1,   9, 3,   0, 4, -1, 0, -1, 0, -1, 0 },
+    { 1, 0, 0, 11, 17, 1, 17, 3,  17, 4, 17, 6,  1, 7, -1, 0 },
+};
+
+void UiRootBootTransition_Start(int *c, int mode, int advanceLock, int perButtonText, int showSecondChild) {
+    /* 0x801023D8: open a prompt. Only the children the game names are un-hidden:
+       window child 1 (dark backing), panel child 0 (frame) and the used buttons; the
+       dummy anchors keep the hidden flag from the reset (0x80102A40). */
+    const signed char *layout;
+    int panel;
+    int frame;
+    int anchor;
+    int panelGroup;
+    int i;
+
+    if (c == 0 || c[0x0b] != -1 || mode < 0 || mode > 9) {
+        return;
+    }
+    c[0x1c] = ((unsigned int)(mode - 6) <= 1u) ? 0 : perButtonText;
+    c[0x0b] = mode;
+    c[0x0c] = 0;
+    UiPrompt_StartGroupAnimation(c[0], 0, 0, 0);
+    if (c[0] != -1) {
+        CzanUiManager_SetChildObjectEnabled(0, c[0], 1, (unsigned char)(showSecondChild == 1 ? 0 : 1));
+    }
+
+    layout = kPromptLayout[mode];
+    panel = layout[0];
+    frame = layout[1];
+    anchor = ((unsigned char)layout[2] << 8) | (unsigned char)layout[3];
+
+    /* 0x800FD874 / 0x800FD86C / 0x800FD7AC: text panel helper surface, anchor child, attach. */
+    {
+        unsigned char *helper = UiRootBootPromptHelper_Get(c[0x1f + panel]);
+
+        /* 0x801024BC..0x80102524: message style (490 wide, 16x20 glyphs, spacing 6),
+           left aligned unless the layout frame byte is set; palette colour 0. */
+        UiRootBootPromptHelper_EnsureSurface(helper, kFontPalette[0], frame != 0 ? 1 : 0,
+                                             490.0f, 16.0f, 20.0f, 6.0f);
+        if (helper != 0) {
+            *(int *)(void *)(helper + 0x14) = anchor;
+        }
+        UiRootBootPromptHelper_Reattach(c[0x1f + panel]);
+    }
+    for (i = 0; i < 6; i++) {
+        unsigned char *label = UiRootBootPromptHelper_Get(c[0x21 + i]);
+
+        /* 0x8010254C..0x8010256C: button labels, centred, 15.5x22 glyphs, spacing 8. */
+        UiRootBootPromptHelper_EnsureSurface(label, kFontPalette[0], 1, 490.0f, 15.5f, 22.0f, 8.0f);
+        if (label != 0) {
+            *(float *)(void *)(label + 0x1c) = 0.0f;
+            *(float *)(void *)(label + 0x20) = -10.0f;
+        }
+        UiRootBootPromptHelper_Reattach(c[0x21 + i]);
+    }
+
+    panelGroup = c[1 + panel];
+    UiPrompt_StartGroupAnimation(panelGroup, 0, 0, 0);
+    if (panelGroup != -1) {
+        CzanUiManager_SetChildObjectEnabled(0, panelGroup, 0, 0);
+        CzanUiManager_SetObjectTextureFrame(0, panelGroup, 0, frame, 0);
+        if (c[0] != -1) {
+            CzanUiManager_LinkObjectGroupToReferenceObject(0, panelGroup, c[0], 0, 0x1f);
+        }
+    }
+    UiPrompt_StartGroupAnimation(c[9 + panel], 0, 0, 0);
+    if (c[2 - panel] != -1) {
+        CzanUiManager_SetObjectGroupEnabled(0, c[2 - panel], 1);
+    }
+
+    for (i = 0; i < 6; i++) {
+        int button = c[3 + i];
+        int buttonFrame = layout[4 + 2 * i];
+
+        if (button == -1) {
+            continue;
+        }
+        if (buttonFrame != -1) {
+            CzanUiManager_SetObjectGroupEnabled(0, button, 0);
+            CzanUiManager_SetObjectTextureFrame(0, button, 0, buttonFrame, 0);
+            if (panelGroup != -1) {
+                CzanUiManager_LinkObjectGroupToReferenceObject(0, button, panelGroup, layout[5 + 2 * i], 0x1f);
+            }
+            UiPrompt_StartGroupAnimation(button, i == c[0x0f] ? 1 : 0, 0, 0);
+        }
+        else {
+            CzanUiManager_SetObjectGroupEnabled(0, button, 1);
+        }
+    }
+
+    c[0x0e] = panel;
+    c[0x10] = 0;
+    c[0x11] = -1;
+    c[0x1a] = advanceLock;
+    if (c[0x0f] >= 0 && c[0x0f] < 6 && c[3 + c[0x0f]] != -1) {
+        CzanUiManager_AlignObjectGroupByReferenceEdge(0, c[3 + c[0x0f]], c[0x1d] - 5, 0);
+    }
+    UiPrompt_PlayCue(0x258);
+}
+
 void UiRootBootTransition_Update(int *subManager) {
+    /* 0x80100DCC: per-frame prompt controller update (called from 0x800FEA60). */
+    int mode;
+    int buttonCount;
+    int showPage = 1;
+    int showNext = 1;
+    int i;
+
     if (subManager == 0 || subManager[0x0b] == -1) {
         return;
     }
 
-    if (subManager[0x0c] == 0) {
-        if (subManager[0] == -1 || CzanUiManager_IsObjectGroupAnimationDone(0, subManager[0]) != 0) {
-            subManager[0x0c] = 1;
-            subManager[0x10] = 0;
-            if (subManager[0x44 / 4] == -1) {
-                subManager[0x44 / 4] = 0;
-            }
+    /* 0x80100DEC..0x80100F38: copy the window colour (0x801761E0) into the text
+       panels so they fade with it, and hide the six button labels (+0xB8 = 1).
+       TODO: colour copy waits on the font renderer port. */
+    for (i = 0; i < 6; i++) {
+        unsigned char *label = UiRootBootPromptHelper_Get(subManager[0x21 + i]);
+
+        if (label != 0) {
+            *(int *)(void *)(label + 0xb8) = 1;
         }
     }
-    else if (subManager[0x0c] == 2) {
-        if (subManager[0] == -1 || CzanUiManager_IsObjectGroupAnimationDone(0, subManager[0]) != 0) {
-            UiRootBootTransition_Reset(subManager);
+
+    /* Jump table 0x802BE758: button count and page/next indicators per mode. */
+    mode = subManager[0x0b];
+    switch (mode) {
+        case 0:
+        case 1:
+            buttonCount = 2;
+            break;
+        case 2:
+            buttonCount = 5;
+            break;
+        case 3:
+            buttonCount = 6;
+            break;
+        case 4:
+        case 5:
+            buttonCount = 4;
+            break;
+        case 6:
+        case 7: {
+            unsigned char *panel = UiRootBootPromptHelper_Get(subManager[0x1f + subManager[0x0e]]);
+            int canShow = subManager[0x1a] == 0 &&
+                          (panel == 0 || *(int *)(void *)(panel + 0x64) == 0) &&
+                          gFontPromptChoiceCount == 0;
+
+            buttonCount = 0;
+            if (mode == 6) {
+                showPage = canShow ? 1 : 0;
+            }
+            else {
+                showNext = canShow ? 1 : 0;
+            }
+            break;
         }
+        case 8:
+            buttonCount = 3;
+            break;
+        case 9:
+            buttonCount = 5;
+            for (i = 0; i < 6; i++) {
+                unsigned char *label = UiRootBootPromptHelper_Get(subManager[0x21 + i]);
+
+                if (label != 0) {
+                    *(int *)(void *)(label + 0xb8) = 0;
+                }
+            }
+            break;
+        default:
+            buttonCount = 0;
+            break;
+    }
+    if (subManager[9] != -1) {
+        CzanUiManager_SetObjectGroupEnabled(0, subManager[9], (unsigned char)showPage);
+    }
+    if (subManager[10] != -1) {
+        CzanUiManager_SetObjectGroupEnabled(0, subManager[10], (unsigned char)showNext);
+    }
+    switch (subManager[0x0c]) {
+        case 0:
+            /* Opening: wait for the window animation, then play the open cue and
+               register the button hit regions (pointer input, not on PC). */
+            if (subManager[0] == -1 || CzanUiManager_IsObjectGroupAnimationDone(0, subManager[0]) == 1) {
+                subManager[0x0c] = 1;
+                if (subManager[0x1e] != -1) {
+                    UiPrompt_PlayCue(subManager[0x1e]);
+                }
+            }
+            break;
+        case 1:
+            UiPrompt_UpdateInput(subManager, buttonCount);
+            break;
+        case 2:
+            /* Closing: wait for the close animation, then reset (0x80102A40). */
+            if (subManager[0] == -1 || CzanUiManager_IsObjectGroupAnimationDone(0, subManager[0]) == 1) {
+                UiRootBootTransition_Reset(subManager);
+            }
+            break;
+        default:
+            break;
     }
 }
 
@@ -1425,6 +2229,33 @@ void UiRootSubManager_LoadCzanGroupsWithTexture(int *subManager, void *linkData)
     }
 }
 
+int UiRootManager_GetPresentationGroups(int *uiRootManager, int *outHandles, int maxHandles) {
+    /* Host draw helper: the two 0x28-entry header/footer banks of the UI-root
+       texture-frame sub-manager (uiRoot +0x38). Visibility is decided by the
+       recovered mask update (enabled / draw-enabled flags), not here. */
+    int *subManager;
+    int count = 0;
+    int bankIndex;
+    int frameIndex;
+
+    if (uiRootManager == 0 || uiRootManager[0x0e] == 0) {
+        return 0;
+    }
+    subManager = (int *)UiRootHostPointerFromBits(uiRootManager[0x0e]);
+    if (subManager == 0) {
+        return 0;
+    }
+    for (bankIndex = 0; bankIndex < 2; bankIndex++) {
+        int *bank = subManager + bankIndex * (0x3e0 / 4);
+        for (frameIndex = 0; frameIndex < 0x28 && count < maxHandles; frameIndex++) {
+            if (bank[2 + frameIndex] >= 0) {
+                outHandles[count++] = bank[2 + frameIndex];
+            }
+        }
+    }
+    return count;
+}
+
 void UiRootSubManager_InitTextureFrameGroups(int *subManager) {
     /* 0x80106054 initializes the 0x7C8-byte sub-manager allocated by
        UiRootManager_LoadResource for WII block 6. It creates two rows of 0x28
@@ -1444,7 +2275,9 @@ void UiRootSubManager_InitTextureFrameGroups(int *subManager) {
     for (bankIndex = 0; bankIndex < 2; bankIndex++) {
         int *bank = subManager + bankIndex * (0x3e0 / 4);
         for (frameIndex = 0; frameIndex < 0x28; frameIndex++) {
-            int groupHandle = UiRootManager_CreateReferenceObjectGroup(0, -1, -1, 0x1f);
+            /* 0x801002E4: clone uiRoot[2] ('com_01_Confirm_' button labels), flags 2. */
+            int groupHandle = gUiRootCurrentManager != 0 && gUiRootCurrentManager[2] >= 0 ?
+                CzanUiManager_CloneObjectGroup(0, gUiRootCurrentManager[2], 2, 0) : -1;
             bank[2 + frameIndex] = groupHandle;
             CzanUiManager_SetObjectGroupEnabled(0, groupHandle, 1);
             if (bankIndex == 1) {
@@ -1452,15 +2285,12 @@ void UiRootSubManager_InitTextureFrameGroups(int *subManager) {
             }
         }
 
-        /* The Wii object list is populated by the surrounding UI state, but the
-           host cache is flat and would otherwise draw bank 0 before any mask
-           reset/update has run. Force one first-pass mask comparison so the
-           recovered runtime gate, not the clone defaults, decides visibility. */
-        bank[0xb0 / 4] = ~bank[0xa8 / 4];
-        bank[0xb4 / 4] = ~bank[0xac / 4];
-        bank[0xb8 / 4] = -1;
     }
 
+    {
+        int *videoSettings = GlobalRuntimeContext_GetPointerAt(0x258);
+        UiRootSubManager_InitPresentationState(subManager, videoSettings != 0 && videoSettings[0x4c / 4] != 0);
+    }
     for (frameIndex = 0; frameIndex < 0x28; frameIndex++) {
         CzanUiManager_SetObjectTextureFrame(0, subManager[2 + frameIndex], 0, frameIndex, 0);
     }

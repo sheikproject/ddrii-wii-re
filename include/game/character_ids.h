@@ -3,6 +3,7 @@
 
 enum CharacterId {
     CHAR_ID_MII = 0x52,
+    CHAR_ID_MII_SELECT_SLOT = 0x50, /* Mii ID returned for select slot 3 by 0x8006C588 */
 
     CHAR_ID_EMI = 0xC8,
     CHAR_ID_DISCO = 0xC9,

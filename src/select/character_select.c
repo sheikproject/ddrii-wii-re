@@ -10,7 +10,7 @@ int GetCharacterIdForCurrentSelectSlot(int slot) {
         case 2:
             return CHAR_SLOT_RANDOM_MALE;
         case 3:
-            return CHAR_ID_MII;
+            return CHAR_ID_MII_SELECT_SLOT;
         case 4:
             return CHAR_ID_EMI;
         case 5:

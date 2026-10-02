@@ -1441,12 +1441,10 @@ int CSelect_TickHost(void *cSelect) {
     input = Host_ReadInput();
     if (input == HOST_INPUT_LEFT) {
         module->selectedModeIndex = CSelMode_MoveSelection(module->selectedModeIndex, -1);
-        CSelectCommon_AdvanceBackgroundBackward(module->selectCommon, 1);
         module->redrawNeeded = 1;
     }
     else if (input == HOST_INPUT_RIGHT) {
         module->selectedModeIndex = CSelMode_MoveSelection(module->selectedModeIndex, 1);
-        CSelectCommon_AdvanceBackgroundForward(module->selectCommon, 1);
         module->redrawNeeded = 1;
     }
     else if (input == HOST_INPUT_CONFIRM) {

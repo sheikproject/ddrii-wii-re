@@ -9,6 +9,7 @@
 #include "runtime/math.h"
 #include "runtime/memory.h"
 #include "runtime/module_system.h"
+#include "runtime/string_util.h"
 #include "select/csel_mode.h"
 #include "ui/czan_ui.h"
 
@@ -79,7 +80,7 @@ static int ResourcePointerBits(void *pointer) {
         }
     }
 
-    return (int)(uintptr_t)pointer;
+    return HostPointer_ToBits32(pointer, "resource");
 }
 
 static void StoreVec4(float *dst, float x, float y, float z, float w) {
@@ -977,12 +978,26 @@ void TextManager_SelectBank(int *manager, int bankIndex) {
     state->activeBank = bankIndex;
 }
 
+static unsigned int TextManager_ReadBe32(const unsigned char *data) {
+    return ((unsigned int)data[0] << 24) | ((unsigned int)data[1] << 16) |
+           ((unsigned int)data[2] << 8) | (unsigned int)data[3];
+}
+
 const char *TextManager_GetText(int *manager, int textIndex) {
     TextManagerHostState *state = TextManager_FindHostState(manager, 0);
-    CzanLinkBlock block;
+    const unsigned char *bank;
+    const unsigned char *header;
+    unsigned int bankSize;
+    unsigned int count;
+    unsigned int tableOffset;
+    unsigned int stringOffset;
     int activeBank;
 
-    /* 0x800C101C returns a pointer to the selected bank entry or "ERROR". */
+    /* 0x800C101C returns the selected bank's message or "ERROR". Each bank is a
+       "ZMS" table whose header sits at bank +0x20 (relocated by 0x8016B86C on the
+       Wii): header +0x08 = message count, header +0x04 -> word holding the entry
+       table offset, entry i (8 bytes) = string offset; offsets are relative to the
+       header. Strings are UTF-8 with '#' control codes. */
     if (manager == 0 || state == 0) {
         return "ERROR";
     }
@@ -990,16 +1005,34 @@ const char *TextManager_GetText(int *manager, int textIndex) {
     if (activeBank < 0 || activeBank >= 17 || state->banks[activeBank] == 0) {
         return "ERROR";
     }
-    if (textIndex < 0 ||
-        !CzanLinkResource_GetBlock(
-            state->banks[activeBank],
-            state->bankSizes[activeBank],
-            (unsigned int)textIndex,
-            &block) ||
-        block.data == 0) {
+    bank = (const unsigned char *)state->banks[activeBank];
+    bankSize = state->bankSizes[activeBank];
+    if (bankSize < 0x30) {
         return "ERROR";
     }
-    return (const char *)block.data;
+    header = bank + 0x20;
+    count = TextManager_ReadBe32(header + 0x08);
+    if (textIndex < 0 || (unsigned int)textIndex >= count) {
+        return "ERROR";
+    }
+    tableOffset = TextManager_ReadBe32(header + 0x04);
+    if (0x20u + tableOffset + 4u > bankSize) {
+        return "ERROR";
+    }
+    tableOffset = TextManager_ReadBe32(header + tableOffset);
+    if (0x20u + tableOffset + (unsigned int)textIndex * 8u + 4u > bankSize) {
+        return "ERROR";
+    }
+    stringOffset = TextManager_ReadBe32(header + tableOffset + (unsigned int)textIndex * 8u);
+    if (0x20u + stringOffset >= bankSize) {
+        return "ERROR";
+    }
+    return (const char *)(header + stringOffset);
+}
+
+int FontManager_GetTextureSlot(void) {
+    /* gManager_802E70E8 +0x00: font_*.bin TPL (image 0 glyph atlas, image 1 cursor). */
+    return gFontManagerTextureSlot802e70e8;
 }
 
 void FontManager_LoadResource(void *fontLinkData) {

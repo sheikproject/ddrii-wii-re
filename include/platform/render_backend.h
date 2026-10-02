@@ -88,5 +88,7 @@ void Platform_ShutdownOpenGLWindow(void);
 int Platform_ShouldQuit(void);
 int Platform_ConsumeConfirmPressed(void);
 void Platform_PollMenuInput(unsigned int *heldMask, unsigned int *triggeredMask);
+int Platform_GetPointerPosition(float *x, float *y);
+void Platform_SetLogicalScissor(int enable, float x, float y, float width, float height);
 
 #endif

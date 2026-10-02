@@ -8,13 +8,16 @@
 #include <gl/GL.h>
 
 #define MAX_GL_TEXTURE_SETS 512
-#define MAX_GL_TEXTURES_PER_SET 16
+#define MAX_GL_TEXTURES_PER_SET 128
 #define MAX_MOVIE_AUDIO_BUFFERS 16
 
-#define MENU_INPUT_UP 0x00000001U
-#define MENU_INPUT_DOWN 0x00000002U
-#define MENU_INPUT_LEFT 0x00000004U
-#define MENU_INPUT_RIGHT 0x00000008U
+/* Wii Remote (WPAD/KPAD, held upright) button bits, as the DOL tests them. Confirmed
+   by the CSelMode neighbour table at 0x80272348 (1/2 move horizontally, 4/8 vertically)
+   and the prompt controller 0x80100DCC (2|4 = next, 1|8 = previous). */
+#define MENU_INPUT_LEFT 0x00000001U
+#define MENU_INPUT_RIGHT 0x00000002U
+#define MENU_INPUT_DOWN 0x00000004U
+#define MENU_INPUT_UP 0x00000008U
 #define MENU_INPUT_BACK 0x00000400U
 #define MENU_INPUT_CONFIRM 0x00000800U
 
@@ -559,8 +562,187 @@ static void Platform_LoadXInput(void) {
     }
 }
 
+static unsigned int gPlatformFrameCounter;
+
+static unsigned int Platform_ReadScriptedInputMask(void) {
+    /* Debug aid: DDRII_INPUT_SCRIPT="frame:keys,frame:keys,..." holds the given
+       buttons for 4 frames from each frame number (keys: A B U D L R), so headless
+       runs (DDRII_FRAME_DUMP) can drive menus without a focused window. */
+    static int parsed;
+    static unsigned int frames[64];
+    static unsigned int masks[64];
+    static int count;
+    unsigned int mask = 0;
+    int i;
+
+    if (!parsed) {
+        const char *script = getenv("DDRII_INPUT_SCRIPT");
+        parsed = 1;
+        while (script != 0 && *script != '\0' && count < 64) {
+            char *end;
+            unsigned int frame = (unsigned int)strtoul(script, &end, 10);
+            unsigned int keys = 0;
+            if (end == script || *end != ':') {
+                break;
+            }
+            for (script = end + 1; *script != '\0' && *script != ','; script++) {
+                switch (*script) {
+                    case 'A': keys |= MENU_INPUT_CONFIRM; break;
+                    case 'B': keys |= MENU_INPUT_BACK; break;
+                    case 'U': keys |= MENU_INPUT_UP; break;
+                    case 'D': keys |= MENU_INPUT_DOWN; break;
+                    case 'L': keys |= MENU_INPUT_LEFT; break;
+                    case 'R': keys |= MENU_INPUT_RIGHT; break;
+                    default: break;
+                }
+            }
+            frames[count] = frame;
+            masks[count++] = keys;
+            if (*script == ',') {
+                script++;
+            }
+        }
+    }
+    for (i = 0; i < count; i++) {
+        if (gPlatformFrameCounter >= frames[i] && gPlatformFrameCounter < frames[i] + 4) {
+            mask |= masks[i];
+        }
+    }
+    return mask;
+}
+
+static int Platform_ReadScriptedPointer(float *x, float *y, int *active) {
+    /* Debug aid: DDRII_POINTER_SCRIPT="frame:x,y;frame:off;..." places the Wii
+       pointer (logical 640x480 coordinates) from each frame on, for headless runs. */
+    static int parsed;
+    static unsigned int frames[64];
+    static float xs[64];
+    static float ys[64];
+    static int onScreen[64];
+    static int count;
+    int i;
+    int found = -1;
+
+    if (!parsed) {
+        const char *script = getenv("DDRII_POINTER_SCRIPT");
+        parsed = 1;
+        while (script != 0 && *script != '\0' && count < 64) {
+            char *end;
+            frames[count] = (unsigned int)strtoul(script, &end, 10);
+            if (end == script || *end != ':') {
+                break;
+            }
+            script = end + 1;
+            if (strncmp(script, "off", 3) == 0) {
+                onScreen[count] = 0;
+                script += 3;
+            }
+            else {
+                xs[count] = (float)strtod(script, &end);
+                script = end;
+                if (*script == ',') {
+                    script++;
+                }
+                ys[count] = (float)strtod(script, &end);
+                script = end;
+                onScreen[count] = 1;
+            }
+            count++;
+            while (*script != '\0' && *script != ';') {
+                script++;
+            }
+            if (*script == ';') {
+                script++;
+            }
+        }
+    }
+    if (count == 0) {
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        if (gPlatformFrameCounter >= frames[i]) {
+            found = i;
+        }
+    }
+    *active = found >= 0 && onScreen[found];
+    if (*active) {
+        *x = xs[found];
+        *y = ys[found];
+    }
+    return 1;
+}
+
+void Platform_SetLogicalScissor(int enable, float x, float y, float width, float height) {
+    /* Clip rectangle in logical (640x480, y down) coordinates; used as the host
+       stand-in for Czan alpha-mask sprites. */
+    int logicalWidth = gLogicalProjectionWidth > 0 ? gLogicalProjectionWidth : 640;
+    int logicalHeight = gLogicalProjectionHeight > 0 ? gLogicalProjectionHeight : 480;
+    float sx = (float)gViewportWidth / (float)logicalWidth;
+    float sy = (float)gViewportHeight / (float)logicalHeight;
+
+    if (!enable) {
+        glDisable(GL_SCISSOR_TEST);
+        return;
+    }
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(gViewportX + (int)(x * sx),
+              gViewportY + (int)(((float)logicalHeight - (y + height)) * sy),
+              (int)(width * sx + 0.5f),
+              (int)(height * sy + 0.5f));
+}
+
+int Platform_GetPointerPosition(float *x, float *y) {
+    /* Wii Remote IR pointer stand-in: the mouse over the game viewport, mapped to
+       the logical (640x480) framebuffer space the Czan UI uses. */
+    POINT cursor;
+    int logicalWidth;
+    int logicalHeight;
+    int active = 0;
+
+    if (Platform_ReadScriptedPointer(x, y, &active)) {
+        return active;
+    }
+    if (gWindow == 0 || GetForegroundWindow() != gWindow ||
+        gViewportWidth <= 0 || gViewportHeight <= 0 ||
+        !GetCursorPos(&cursor) || !ScreenToClient(gWindow, &cursor)) {
+        return 0;
+    }
+    cursor.y -= gWindowHeight - (gViewportY + gViewportHeight);
+    cursor.x -= gViewportX;
+    if (cursor.x < 0 || cursor.y < 0 || cursor.x >= gViewportWidth || cursor.y >= gViewportHeight) {
+        return 0;
+    }
+    logicalWidth = gLogicalProjectionWidth > 0 ? gLogicalProjectionWidth : 640;
+    logicalHeight = gLogicalProjectionHeight > 0 ? gLogicalProjectionHeight : 480;
+    *x = (float)cursor.x * (float)logicalWidth / (float)gViewportWidth;
+    *y = (float)cursor.y * (float)logicalHeight / (float)gViewportHeight;
+    return 1;
+}
+
+static unsigned int Platform_ReadMouseButtonMask(void) {
+    /* Pointer buttons: left click = A, right click = B, only while the pointer is
+       over the game viewport. */
+    float x;
+    float y;
+    unsigned int mask = 0;
+
+    if (getenv("DDRII_POINTER_SCRIPT") != 0 || !Platform_GetPointerPosition(&x, &y)) {
+        return 0;
+    }
+    if (Platform_IsKeyHeld(VK_LBUTTON)) {
+        mask |= MENU_INPUT_CONFIRM;
+    }
+    if (Platform_IsKeyHeld(VK_RBUTTON)) {
+        mask |= MENU_INPUT_BACK;
+    }
+    return mask;
+}
+
 static unsigned int Platform_ReadMenuInputMask(void) {
     unsigned int mask = 0;
+
+    mask |= Platform_ReadScriptedInputMask();
+    mask |= Platform_ReadMouseButtonMask();
 
     if (Platform_IsKeyHeld(VK_UP) || Platform_IsKeyHeld('W')) {
         mask |= MENU_INPUT_UP;
@@ -618,6 +800,13 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             gWindowHeight = HIWORD(lParam);
             gLogicalProjectionDirty = 1;
             return 0;
+        case WM_SETCURSOR:
+            /* The game draws its own pointer cursor over the client area. */
+            if (LOWORD(lParam) == HTCLIENT) {
+                SetCursor(0);
+                return TRUE;
+            }
+            break;
         case WM_CLOSE:
         case WM_DESTROY:
             gShouldQuit = 1;
@@ -629,9 +818,9 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 DestroyWindow(hwnd);
                 return 0;
             }
+            /* Enter/Space only: 'A' is WASD left in Platform_ReadMenuInputMask. */
             if (wParam == VK_RETURN ||
-                wParam == VK_SPACE ||
-                wParam == 'A') {
+                wParam == VK_SPACE) {
                 gConfirmPressed = 1;
                 return 0;
             }
@@ -721,7 +910,11 @@ static void ApplyLogicalProjection(int width, int height) {
     glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    glOrtho(0.0, width, height, 0.0, -1.0, 1.0);
+    /* The DOL draws Czan UI with a perspective camera (0x80170FA4: eye 888.9 units
+       back, near 0.1, far 18000) whose z = 0 plane maps onto the 640x480 screen.
+       Layer z offsets (e.g. +2..+8) only order/scale sprites slightly and are never
+       clipped, so the host ortho must not clip them either. Depth test is off in 2D. */
+    glOrtho(0.0, width, height, 0.0, -18000.0, 18000.0);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 }
@@ -901,12 +1094,157 @@ void Platform_SetLogicalProjection(int width, int height) {
     }
 }
 
+typedef void (APIENTRY *HostGlGenNamesProc)(int count, unsigned int *names);
+typedef void (APIENTRY *HostGlBindNameProc)(unsigned int target, unsigned int name);
+typedef void (APIENTRY *HostGlRenderbufferStorageProc)(unsigned int target, unsigned int format, int width, int height);
+typedef void (APIENTRY *HostGlFramebufferRenderbufferProc)(unsigned int target, unsigned int attachment,
+                                                           unsigned int renderbufferTarget, unsigned int renderbuffer);
+
+static const char *gFrameDumpDirectory;
+static unsigned int gFrameDumpEvery = 30;
+
+static int FrameDump_IsEnabled(void) {
+    /* Debug aid: DDRII_FRAME_DUMP=<dir> renders headless into an offscreen
+       framebuffer (window presentation blocks while the display is off) and writes
+       it every DDRII_FRAME_DUMP_EVERY frames (default 30) as <dir>\frame_NNNNNN.bmp. */
+    static int checked;
+
+    if (!checked) {
+        const char *every = getenv("DDRII_FRAME_DUMP_EVERY");
+        checked = 1;
+        gFrameDumpDirectory = getenv("DDRII_FRAME_DUMP");
+        if (every != 0 && atoi(every) > 0) {
+            gFrameDumpEvery = (unsigned int)atoi(every);
+        }
+    }
+    return gFrameDumpDirectory != 0 && gFrameDumpDirectory[0] != '\0';
+}
+
+static void FrameDump_BindOffscreenTarget(void) {
+    static HostGlBindNameProc bindFramebuffer;
+    static unsigned int framebuffer;
+    static int width;
+    static int height;
+
+    if (framebuffer == 0 || width != gWindowWidth || height != gWindowHeight) {
+        HostGlGenNamesProc genFramebuffers = (HostGlGenNamesProc)wglGetProcAddress("glGenFramebuffers");
+        HostGlGenNamesProc genRenderbuffers = (HostGlGenNamesProc)wglGetProcAddress("glGenRenderbuffers");
+        HostGlBindNameProc bindRenderbuffer = (HostGlBindNameProc)wglGetProcAddress("glBindRenderbuffer");
+        HostGlRenderbufferStorageProc renderbufferStorage =
+            (HostGlRenderbufferStorageProc)wglGetProcAddress("glRenderbufferStorage");
+        HostGlFramebufferRenderbufferProc framebufferRenderbuffer =
+            (HostGlFramebufferRenderbufferProc)wglGetProcAddress("glFramebufferRenderbuffer");
+        unsigned int renderbuffers[2];
+
+        bindFramebuffer = (HostGlBindNameProc)wglGetProcAddress("glBindFramebuffer");
+        if (genFramebuffers == 0 || genRenderbuffers == 0 || bindRenderbuffer == 0 ||
+            renderbufferStorage == 0 || framebufferRenderbuffer == 0 || bindFramebuffer == 0 ||
+            gWindowWidth <= 0 || gWindowHeight <= 0) {
+            bindFramebuffer = 0;
+            return;
+        }
+        width = gWindowWidth;
+        height = gWindowHeight;
+        genFramebuffers(1, &framebuffer);
+        genRenderbuffers(2, renderbuffers);
+        bindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, framebuffer);
+        bindRenderbuffer(0x8D41 /* GL_RENDERBUFFER */, renderbuffers[0]);
+        renderbufferStorage(0x8D41, 0x8058 /* GL_RGBA8 */, width, height);
+        framebufferRenderbuffer(0x8D40, 0x8CE0 /* GL_COLOR_ATTACHMENT0 */, 0x8D41, renderbuffers[0]);
+        bindRenderbuffer(0x8D41, renderbuffers[1]);
+        renderbufferStorage(0x8D41, 0x88F0 /* GL_DEPTH24_STENCIL8 */, width, height);
+        framebufferRenderbuffer(0x8D40, 0x821A /* GL_DEPTH_STENCIL_ATTACHMENT */, 0x8D41, renderbuffers[1]);
+    }
+    if (bindFramebuffer != 0) {
+        bindFramebuffer(0x8D40, framebuffer);
+    }
+}
+
 void Platform_BeginFrame(void) {
     PumpMessages();
     RefreshWindowClientSize();
+    if (FrameDump_IsEnabled()) {
+        FrameDump_BindOffscreenTarget();
+    }
+}
+
+static void DumpFramebufferBmp(const char *directory, unsigned int frame) {
+    char path[MAX_PATH];
+    BITMAPFILEHEADER fileHeader;
+    BITMAPINFOHEADER infoHeader;
+    unsigned char *pixels;
+    int width = gWindowWidth;
+    int height = gWindowHeight;
+    int stride;
+    FILE *file;
+
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    stride = (width * 3 + 3) & ~3;
+    pixels = (unsigned char *)malloc((size_t)stride * (size_t)height);
+    if (pixels == 0) {
+        return;
+    }
+    if (getenv("DDRII_FRAME_DUMP_PROBE") != 0) {
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(0, 0, 32, 32);
+        glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+    }
+    glFinish();
+    glReadBuffer(0x8CE0 /* GL_COLOR_ATTACHMENT0 */);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, width, height, 0x80E0 /* GL_BGR */, GL_UNSIGNED_BYTE, pixels);
+
+    memset(&fileHeader, 0, sizeof(fileHeader));
+    memset(&infoHeader, 0, sizeof(infoHeader));
+    fileHeader.bfType = 0x4D42;
+    fileHeader.bfOffBits = sizeof(fileHeader) + sizeof(infoHeader);
+    fileHeader.bfSize = fileHeader.bfOffBits + (DWORD)(stride * height);
+    infoHeader.biSize = sizeof(infoHeader);
+    infoHeader.biWidth = width;
+    infoHeader.biHeight = height;
+    infoHeader.biPlanes = 1;
+    infoHeader.biBitCount = 24;
+    infoHeader.biCompression = BI_RGB;
+
+    _snprintf(path, sizeof(path) - 1, "%s\\frame_%06u.bmp", directory, frame);
+    path[sizeof(path) - 1] = '\0';
+    file = fopen(path, "wb");
+    if (file != 0) {
+        fwrite(&fileHeader, sizeof(fileHeader), 1, file);
+        fwrite(&infoHeader, sizeof(infoHeader), 1, file);
+        fwrite(pixels, (size_t)stride, (size_t)height, file);
+        fclose(file);
+    }
+    free(pixels);
 }
 
 void Platform_EndFrame(void) {
+    gPlatformFrameCounter++;
+    static unsigned int frameCounter;
+    static DWORD lastFrameTime;
+
+    if (FrameDump_IsEnabled()) {
+        /* Headless: no SwapBuffers, paced to 60 Hz. */
+        DWORD now;
+        if (frameCounter == 0) {
+            printf("frame dump: renderer '%s' glError 0x%x\n",
+                   (const char *)glGetString(GL_RENDERER), (unsigned int)glGetError());
+        }
+        if (frameCounter % gFrameDumpEvery == 0) {
+            DumpFramebufferBmp(gFrameDumpDirectory, frameCounter);
+        }
+        frameCounter++;
+        now = timeGetTime();
+        if (lastFrameTime != 0 && now - lastFrameTime < 16) {
+            Sleep(16 - (now - lastFrameTime));
+        }
+        lastFrameTime = timeGetTime();
+        return;
+    }
     SwapBuffers(gDeviceContext);
 }
 
